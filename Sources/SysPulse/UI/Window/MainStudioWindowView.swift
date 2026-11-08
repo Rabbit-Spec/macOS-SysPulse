@@ -1400,65 +1400,64 @@ public struct HealthPulseAuraBadgeView: View {
     public var body: some View {
         let isDark = (activeScheme == .dark)
         let mainColor = tierColor
-        let breathSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 2.1 : (tierIndex == 3 ? 3.4 : 5.0)
-        let orbitSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 28.0 : (tierIndex == 3 ? 48.0 : 75.0)
+        let waveSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 0.36 : (tierIndex == 3 ? 0.52 : 0.72)
 
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            let breath = (sin(t * breathSpeed) + 1.0) * 0.5
-            let auraScale = 0.92 + 0.15 * breath
-            let floatY = CGFloat(sin(t * (breathSpeed * 1.05))) * 2.5
-            let tiltAngle = sin(t * (breathSpeed * 0.75)) * 1.8
-            let outerOrbitDeg = (t * orbitSpeed).truncatingRemainder(dividingBy: 360.0)
-            let innerOrbitDeg = (-t * (orbitSpeed * 0.65)).truncatingRemainder(dividingBy: 360.0)
+            let breath = (sin(t * 2.0) + 1.0) * 0.5
 
             ZStack {
-                // 1. 正弦呼吸能量光晕
+                // 1. 柔和呼吸基底光晕
                 Circle()
                     .fill(
                         RadialGradient(
                             colors: [
-                                mainColor.opacity((isDark ? 0.36 : 0.22) + 0.14 * breath),
-                                mainColor.opacity((isDark ? 0.12 : 0.06) + 0.06 * breath),
+                                mainColor.opacity((isDark ? 0.32 : 0.20) + 0.10 * breath),
+                                mainColor.opacity((isDark ? 0.10 : 0.05) + 0.05 * breath),
                                 Color.clear
                             ],
                             center: .center,
-                            startRadius: mascotSize * 0.28,
+                            startRadius: mascotSize * 0.32,
                             endRadius: auraSize * 0.52
                         )
                     )
                     .frame(width: auraSize, height: auraSize)
-                    .scaleEffect(auraScale)
-                    .blur(radius: 3.5)
+                    .blur(radius: 3.0)
 
-                // 2. 外圈顺时针旋转流光追光环
-                Circle()
-                    .strokeBorder(
-                        AngularGradient(
-                            gradient: Gradient(stops: [
-                                .init(color: mainColor.opacity(0.08), location: 0.0),
-                                .init(color: mainColor.opacity(0.28), location: 0.55),
-                                .init(color: mainColor.opacity(0.95), location: 0.88),
-                                .init(color: Color.white.opacity(isDark ? 0.85 : 0.65), location: 0.96),
-                                .init(color: mainColor.opacity(0.08), location: 1.0)
-                            ]),
-                            center: .center
-                        ),
-                        lineWidth: 1.6
-                    )
-                    .frame(width: ringSize, height: ringSize)
-                    .rotationEffect(.degrees(outerOrbitDeg))
+                // 2. 三层交替向外扩散的波光涟漪 (Shining Outward Light Ripples)
+                ForEach(0..<3, id: \.self) { idx in
+                    let phase = ((t * waveSpeed) + Double(idx) / 3.0).truncatingRemainder(dividingBy: 1.0)
+                    let eased = 1.0 - pow(1.0 - phase, 1.65)
+                    let waveDiameter = mascotSize + (auraSize * 1.04 - mascotSize) * CGFloat(eased)
+                    let fadeEnvelope = sin(phase * .pi) * (1.0 - phase * 0.35)
+                    let waveAlpha = max(0.0, fadeEnvelope * (isDark ? 0.78 : 0.65))
 
-                // 3. 内圈逆时针慢速星轨虚线环
-                Circle()
-                    .strokeBorder(
-                        mainColor.opacity(isDark ? 0.34 : 0.26),
-                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round, dash: [3.5, 6.5])
-                    )
-                    .frame(width: ringSize - 8, height: ringSize - 8)
-                    .rotationEffect(.degrees(innerOrbitDeg))
+                    ZStack {
+                        // 柔光波晕
+                        Circle()
+                            .stroke(mainColor.opacity(waveAlpha * 0.45), lineWidth: 5.0 * (1.0 - CGFloat(phase) * 0.4))
+                            .frame(width: waveDiameter, height: waveDiameter)
+                            .blur(radius: 2.2)
 
-                // 4. 轻盈悬浮呼吸水彩兔子徽章
+                        // 清透波峰光线
+                        Circle()
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        mainColor.opacity(waveAlpha * 0.95),
+                                        mainColor.opacity(waveAlpha * 0.55),
+                                        mainColor.opacity(waveAlpha * 0.90)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: max(0.7, 1.6 - CGFloat(phase) * 0.7)
+                            )
+                            .frame(width: waveDiameter, height: waveDiameter)
+                    }
+                }
+
+                // 3. 固定不动的中心水彩兔子徽章
                 if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
                     Image(nsImage: img)
                         .resizable()
@@ -1468,14 +1467,11 @@ public struct HealthPulseAuraBadgeView: View {
                         .overlay(
                             Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
                         )
-                        .shadow(color: mainColor.opacity(0.32 + 0.22 * breath), radius: 6 + 3 * breath, y: 2 - floatY * 0.3)
-                        .offset(y: floatY)
-                        .rotationEffect(.degrees(tiltAngle))
+                        .shadow(color: mainColor.opacity(0.34 + 0.16 * breath), radius: 6, y: 2)
                 } else {
                     Circle()
                         .fill(mainColor.opacity(0.2))
                         .frame(width: mascotSize, height: mascotSize)
-                        .offset(y: floatY)
                 }
             }
             .frame(width: ringSize, height: ringSize)

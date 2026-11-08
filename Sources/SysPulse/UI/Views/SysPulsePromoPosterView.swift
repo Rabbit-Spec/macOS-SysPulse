@@ -27,15 +27,15 @@ public struct SysPulsePromoPosterView: View {
                     HStack(spacing: 24) {
                         rightBottomSubCard(
                             imagePath: "/tmp/poster_network_light.png",
-                            fallbackTitle: "网络监控与链路测速",
-                            caption: "带宽测速与流量诊断"
+                            fallbackTitle: "网络监控与链路诊断",
+                            caption: "网络监控与链路诊断"
                         )
                         .frame(width: 468, height: 346)
 
                         rightBottomSubCard(
                             imagePath: "/tmp/poster_diagnostics_light.png",
-                            fallbackTitle: "系统运行诊断报告",
-                            caption: "系统体检与权限诊断"
+                            fallbackTitle: "系统诊断与 OTA 更新",
+                            caption: "系统诊断与 OTA 更新"
                         )
                         .frame(width: 468, height: 346)
                     }
@@ -257,7 +257,7 @@ public struct SysPulsePromoPosterView: View {
                     )
                     heroDockTile(
                         title: "空间分析",
-                        subtitle: "大文件与重复项透视",
+                        subtitle: "大文件与深层占用",
                         icon: "chart.pie.fill",
                         colors: [Color(red: 0.16, green: 0.78, blue: 0.54), Color(red: 0.08, green: 0.58, blue: 0.40)]
                     )
@@ -328,7 +328,7 @@ public struct SysPulsePromoPosterView: View {
             }
 
             VStack(spacing: 6) {
-                Text("萌兔 4 档随负载变速")
+                Text("双行等宽实时遥测")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
                 Text("快捷操控、一键释放")
@@ -404,7 +404,7 @@ public struct SysPulsePromoPosterView: View {
                     .foregroundStyle(.white)
                     .shadow(color: Color.black.opacity(0.28), radius: 10, y: 4)
 
-                Text("智能清理 · 强力卸载 · 磁盘空间全景透视")
+                Text("智能清理 · 应用卸载 · 磁盘空间透视")
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.96))
                     .shadow(color: Color.black.opacity(0.25), radius: 6, y: 2)
@@ -459,19 +459,19 @@ public struct SysPulsePromoPosterView: View {
                 colors: [Color(red: 0.56, green: 0.84, blue: 0.96), Color(red: 0.32, green: 0.68, blue: 0.90)]
             )
             peripheralBadge(
+                icon: "beats.headphones",
+                label: "Beats",
+                colors: [Color(red: 0.86, green: 0.44, blue: 0.16), Color(red: 0.62, green: 0.24, blue: 0.06)]
+            )
+            peripheralBadge(
                 icon: "keyboard.fill",
                 label: "妙控键鼠",
                 colors: [Color(red: 0.24, green: 0.26, blue: 0.29), Color(red: 0.08, green: 0.09, blue: 0.11)]
             )
             peripheralBadge(
-                icon: "applewatch",
-                label: "Watch",
+                icon: "rectangle.and.hand.point.up.left.fill",
+                label: "妙控板",
                 colors: [Color(red: 0.18, green: 0.56, blue: 0.96), Color(red: 0.08, green: 0.34, blue: 0.82)]
-            )
-            peripheralBadge(
-                icon: "beats.headphones",
-                label: "Beats",
-                colors: [Color(red: 0.86, green: 0.44, blue: 0.16), Color(red: 0.62, green: 0.24, blue: 0.06)]
             )
             peripheralBadge(
                 icon: "bolt.batteryblock.fill",
