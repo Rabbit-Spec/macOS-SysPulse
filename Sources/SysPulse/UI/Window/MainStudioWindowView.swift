@@ -2235,7 +2235,7 @@ private struct WindowAboutSection: View {
             }
 
             VStack(spacing: 10) {
-                aboutRow(label: "作者", value: "Rabbit-Spec", link: "https://github.com/Rabbit-Spec")
+                aboutRow(label: "作者", value: "Rabbit-Spec", link: "https://github.com/Rabbit-Spec/macOS-SysPulse")
                 Divider().overlay(theme.dividerColor.opacity(0.5))
                 aboutRow(label: "Bilibili 频道", value: "汤圆_Lyric", link: "https://space.bilibili.com/7135720")
                 Divider().overlay(theme.dividerColor.opacity(0.5))

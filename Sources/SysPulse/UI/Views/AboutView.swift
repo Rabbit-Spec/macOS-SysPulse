@@ -6,7 +6,7 @@ public struct AboutView: View {
     @Bindable var engine = PowerSourceEngine.shared
     public var onDone: () -> Void
 
-    private let githubURL = URL(string: "https://github.com/Rabbit-Spec")!
+    private let githubURL = URL(string: "https://github.com/Rabbit-Spec/macOS-SysPulse")!
 
     public init(onDone: @escaping () -> Void) {
         self.onDone = onDone
