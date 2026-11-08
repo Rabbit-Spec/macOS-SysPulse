@@ -220,20 +220,23 @@ public struct AppUpdateModalView: View {
                 .foregroundStyle(theme.secondaryText)
 
             ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(release.title)
-                        .font(.system(size: 13.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                        .padding(.bottom, 2)
+                VStack(alignment: .leading, spacing: 8) {
+                    if !release.title.isEmpty && release.title != release.tagName && release.title != "v\(release.version)" {
+                        Text(release.title)
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                            .padding(.bottom, 2)
+                    }
 
-                    Text(release.releaseNotes)
-                        .font(.system(size: 12.5, weight: .regular, design: .rounded))
-                        .foregroundStyle(theme.primaryText.opacity(0.92))
-                        .lineSpacing(4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    ChangelogMarkdownView(
+                        markdown: release.releaseNotes,
+                        theme: theme,
+                        isDark: isDark
+                    )
                 }
                 .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
             }
             .frame(maxHeight: .infinity)
             .background(
@@ -421,5 +424,322 @@ public struct AppUpdateModalView: View {
             .padding(.bottom, 22)
         }
         .padding(.horizontal, 24)
+    }
+}
+
+// MARK: - Rich Markdown Renderer for GitHub Release Notes
+
+struct ChangelogMarkdownView: View {
+    let markdown: String
+    let theme: LiquidGlassTheme
+    let isDark: Bool
+
+    private enum MarkdownBlock: Identifiable {
+        case heading(id: Int, level: Int, text: String)
+        case bullet(id: Int, indentLevel: Int, text: String)
+        case numbered(id: Int, indentLevel: Int, prefix: String, text: String)
+        case quote(id: Int, text: String)
+        case codeBlock(id: Int, code: String)
+        case divider(id: Int)
+        case paragraph(id: Int, text: String)
+
+        var id: Int {
+            switch self {
+            case .heading(let id, _, _),
+                 .bullet(let id, _, _),
+                 .numbered(let id, _, _, _),
+                 .quote(let id, _),
+                 .codeBlock(let id, _),
+                 .divider(let id),
+                 .paragraph(let id, _):
+                return id
+            }
+        }
+    }
+
+    private var parsedBlocks: [MarkdownBlock] {
+        let normalized = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let rawLines = normalized.components(separatedBy: "\n")
+
+        var blocks: [MarkdownBlock] = []
+        var inCodeBlock = false
+        var codeBuffer: [String] = []
+        var nextId = 0
+
+        for line in rawLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                if inCodeBlock {
+                    nextId += 1
+                    blocks.append(.codeBlock(id: nextId, code: codeBuffer.joined(separator: "\n")))
+                    codeBuffer.removeAll()
+                    inCodeBlock = false
+                } else {
+                    inCodeBlock = true
+                }
+                continue
+            }
+
+            if inCodeBlock {
+                codeBuffer.append(line)
+                continue
+            }
+
+            if trimmed.isEmpty {
+                continue
+            }
+
+            // Horizontal divider
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                nextId += 1
+                blocks.append(.divider(id: nextId))
+                continue
+            }
+
+            // Heading (#, ##, ###, ####)
+            if trimmed.hasPrefix("#") {
+                var level = 0
+                for ch in trimmed {
+                    if ch == "#" {
+                        level += 1
+                    } else {
+                        break
+                    }
+                }
+                let rest = String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)
+                if !rest.isEmpty && level <= 6 {
+                    nextId += 1
+                    blocks.append(.heading(id: nextId, level: level, text: rest))
+                    continue
+                }
+            }
+
+            // Count leading indentation spaces/tabs
+            var leadingSpaces = 0
+            for ch in line {
+                if ch == " " {
+                    leadingSpaces += 1
+                } else if ch == "\t" {
+                    leadingSpaces += 2
+                } else {
+                    break
+                }
+            }
+            let indentLevel = min(3, leadingSpaces / 2)
+
+            // Unordered list item (- , * , + , • )
+            if let bulletContent = Self.extractBulletContent(from: trimmed) {
+                nextId += 1
+                blocks.append(.bullet(id: nextId, indentLevel: indentLevel, text: bulletContent))
+                continue
+            }
+
+            // Ordered list item (1. , 2. , etc.)
+            if let (numPrefix, numContent) = Self.extractNumberedContent(from: trimmed) {
+                nextId += 1
+                blocks.append(.numbered(id: nextId, indentLevel: indentLevel, prefix: numPrefix, text: numContent))
+                continue
+            }
+
+            // Blockquote (> )
+            if trimmed.hasPrefix(">") {
+                let quoteText = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                if !quoteText.isEmpty {
+                    nextId += 1
+                    blocks.append(.quote(id: nextId, text: quoteText))
+                    continue
+                }
+            }
+
+            // Normal paragraph
+            nextId += 1
+            blocks.append(.paragraph(id: nextId, text: trimmed))
+        }
+
+        if !codeBuffer.isEmpty {
+            nextId += 1
+            blocks.append(.codeBlock(id: nextId, code: codeBuffer.joined(separator: "\n")))
+        }
+
+        return blocks
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(parsedBlocks) { block in
+                switch block {
+                case .heading(_, let level, let text):
+                    renderHeading(level: level, text: text)
+
+                case .bullet(_, let indentLevel, let text):
+                    renderBullet(indentLevel: indentLevel, text: text)
+
+                case .numbered(_, let indentLevel, let prefix, let text):
+                    renderNumbered(indentLevel: indentLevel, prefix: prefix, text: text)
+
+                case .quote(_, let text):
+                    renderQuote(text: text)
+
+                case .codeBlock(_, let code):
+                    renderCodeBlock(code: code)
+
+                case .divider:
+                    Divider()
+                        .overlay(theme.dividerColor.opacity(0.6))
+                        .padding(.vertical, 4)
+
+                case .paragraph(_, let text):
+                    renderInlineMarkdown(text, baseFontSize: 12.5, defaultWeight: .regular)
+                        .lineSpacing(3.5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func renderHeading(level: Int, text: String) -> some View {
+        let fontSize: CGFloat = level == 1 ? 14.5 : (level == 2 ? 13.5 : 12.8)
+        VStack(alignment: .leading, spacing: 4) {
+            renderInlineMarkdown(text, baseFontSize: fontSize, defaultWeight: .bold)
+                .foregroundStyle(theme.primaryText)
+        }
+        .padding(.top, level <= 2 ? 6 : 3)
+        .padding(.bottom, 1)
+    }
+
+    @ViewBuilder
+    private func renderBullet(indentLevel: Int, text: String) -> some View {
+        let isTopLevel = indentLevel == 0
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Text(isTopLevel ? "•" : "◦")
+                .font(.system(size: isTopLevel ? 13 : 12, weight: .bold, design: .rounded))
+                .foregroundStyle(isTopLevel ? Color.cyan : theme.secondaryText)
+
+            renderInlineMarkdown(
+                text,
+                baseFontSize: isTopLevel ? 12.5 : 12.0,
+                defaultWeight: .regular,
+                secondaryLevel: !isTopLevel
+            )
+            .lineSpacing(3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, CGFloat(indentLevel) * 15)
+    }
+
+    @ViewBuilder
+    private func renderNumbered(indentLevel: Int, prefix: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(prefix)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.cyan)
+
+            renderInlineMarkdown(text, baseFontSize: 12.5, defaultWeight: .regular)
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, CGFloat(indentLevel) * 15)
+    }
+
+    @ViewBuilder
+    private func renderQuote(text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(Color.cyan.opacity(0.75))
+                .frame(width: 3)
+
+            renderInlineMarkdown(text, baseFontSize: 12.0, defaultWeight: .regular, secondaryLevel: true)
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+        )
+    }
+
+    @ViewBuilder
+    private func renderCodeBlock(code: String) -> some View {
+        Text(code)
+            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+            .foregroundStyle(theme.primaryText.opacity(0.92))
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isDark ? Color.black.opacity(0.28) : Color.black.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(theme.cardBorder, lineWidth: 0.6)
+                    )
+            )
+    }
+
+    private func renderInlineMarkdown(
+        _ rawText: String,
+        baseFontSize: CGFloat,
+        defaultWeight: Font.Weight = .regular,
+        secondaryLevel: Bool = false
+    ) -> Text {
+        let baseColor = secondaryLevel ? theme.primaryText.opacity(0.84) : theme.primaryText.opacity(0.94)
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+
+        if var attributed = try? AttributedString(markdown: rawText, options: options) {
+            for run in attributed.runs {
+                let intent = run.inlinePresentationIntent ?? []
+                if intent.contains(.code) {
+                    attributed[run.range].font = .system(size: baseFontSize - 0.5, weight: .semibold, design: .monospaced)
+                    attributed[run.range].foregroundColor = isDark
+                        ? Color(red: 0.36, green: 0.88, blue: 0.98)
+                        : Color(red: 0.04, green: 0.48, blue: 0.72)
+                    attributed[run.range].backgroundColor = isDark
+                        ? Color.cyan.opacity(0.16)
+                        : Color.cyan.opacity(0.11)
+                } else if intent.contains(.stronglyEmphasized) {
+                    attributed[run.range].font = .system(size: baseFontSize, weight: .bold, design: .rounded)
+                    attributed[run.range].foregroundColor = theme.primaryText
+                } else if intent.contains(.emphasized) {
+                    attributed[run.range].font = .system(size: baseFontSize, weight: defaultWeight, design: .rounded).italic()
+                    attributed[run.range].foregroundColor = baseColor
+                } else {
+                    attributed[run.range].font = .system(size: baseFontSize, weight: defaultWeight, design: .rounded)
+                    attributed[run.range].foregroundColor = baseColor
+                }
+            }
+            return Text(attributed)
+        }
+
+        return Text(rawText)
+            .font(.system(size: baseFontSize, weight: defaultWeight, design: .rounded))
+            .foregroundColor(baseColor)
+    }
+
+    private static func extractBulletContent(from trimmed: String) -> String? {
+        for prefix in ["- ", "* ", "+ ", "• "] {
+            if trimmed.hasPrefix(prefix) {
+                let content = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+                return content.isEmpty ? nil : content
+            }
+        }
+        return nil
+    }
+
+    private static func extractNumberedContent(from trimmed: String) -> (String, String)? {
+        guard let dotIndex = trimmed.firstIndex(of: ".") else { return nil }
+        let numberPart = trimmed[..<dotIndex]
+        guard !numberPart.isEmpty, numberPart.count <= 3, numberPart.allSatisfy(\.isNumber) else {
+            return nil
+        }
+        let afterDot = trimmed[trimmed.index(after: dotIndex)...]
+        guard afterDot.first == " " else { return nil }
+        let content = String(afterDot).trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty else { return nil }
+        return ("\(numberPart).", content)
     }
 }

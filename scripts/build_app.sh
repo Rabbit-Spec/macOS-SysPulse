@@ -141,6 +141,7 @@ ln -s /Applications "$DMG_STAGING/Applications"
 DMG_OUTPUT="$HERE/../build/$APP_NAME-v$VERSION.dmg"
 rm -f "$DMG_OUTPUT"
 /usr/bin/hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_OUTPUT" -quiet
+/usr/bin/xattr -c "$DMG_OUTPUT" 2>/dev/null || true
 rm -rf "$DMG_STAGING"
 
 echo "🔄 正在平滑退出旧版本并自动启动全新 $APP_NAME.app..."
