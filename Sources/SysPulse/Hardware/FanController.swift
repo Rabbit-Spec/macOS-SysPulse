@@ -1,7 +1,16 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 // MARK: - 风扇转速与温控模式管理器
+
+public enum PassiveThermalTier: String, CaseIterable, Identifiable, Sendable {
+    case cool = "清凉"
+    case warm = "温热"
+    case hot = "高热"
+
+    public var id: String { rawValue }
+}
 
 public enum FanMode: String, CaseIterable, Identifiable, Sendable {
     case auto = "自动"
@@ -39,6 +48,48 @@ public final class FanController {
     public private(set) var currentRPM: Int = 1000
     public private(set) var maxRPM: Int = 3500
     public private(set) var minRPM: Int = 1000
+
+    /// 当前设备是否配备物理散热风扇（MacBook Air 等被动散热机型返回 false）
+    public var isFanSupported: Bool {
+        if MacHardwareInfo.shared.isPassiveCoolingModel {
+            return false
+        }
+        return SystemResourceMonitor.shared.hardware.isFanSupported
+    }
+
+    /// 被动散热机型的当前热工况等级
+    public var passiveThermalTier: PassiveThermalTier {
+        let temp = SystemResourceMonitor.shared.hardware.cpuTemperatureC
+        let state = ProcessInfo.processInfo.thermalState
+        if state == .serious || state == .critical || temp >= 72.0 {
+            return .hot
+        } else if state == .fair || temp >= 54.0 {
+            return .warm
+        }
+        return .cool
+    }
+
+    public var passiveThermalAccentColor: Color {
+        switch passiveThermalTier {
+        case .cool:
+            return Color.cyan
+        case .warm:
+            return Color(red: 0.35, green: 0.85, blue: 0.55)
+        case .hot:
+            return Color.orange
+        }
+    }
+
+    public var passiveThermalDetailText: String {
+        switch passiveThermalTier {
+        case .cool:
+            return "无风扇架构 · 全机身被动静音导热"
+        case .warm:
+            return "中高负载运行 · 铝合金机身均热散逸"
+        case .hot:
+            return "已触发系统智能温控防过热保护"
+        }
+    }
 
     private var autoRestoreTimer: Timer?
     private var lastModeChangeAt: Date = Date()

@@ -569,7 +569,8 @@ struct SysPulseApp {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory) // Menu bar only, no dock icon like native macOS UPS
+        let isBg = CommandLine.arguments.contains("--background") || CommandLine.arguments.contains("--login-item")
+        app.setActivationPolicy(isBg ? .accessory : .regular)
         app.run()
     }
 }
@@ -578,7 +579,12 @@ struct SysPulseApp {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
         menuBarController = MenuBarController()
         AppIconManager.shared.startObservingSystemAppearance()
 
@@ -700,8 +706,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            MainStudioWindowController.shared.showWindow(section: .overview)
+        }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         PowerSourceEngine.shared.stopListening()
         WiFiLowLatencyManager.shared.restoreOnTermination()
+    }
+
+    // MARK: - 原生 macOS 顶部菜单栏构建
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // 1. 应用主菜单 (SysPulse)
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu(title: "SysPulse")
+        appMenuItem.submenu = appMenu
+
+        let aboutItem = NSMenuItem(title: "关于 SysPulse", action: #selector(menuOpenAbout), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
+
+        let updateItem = NSMenuItem(title: "检查更新…", action: #selector(menuCheckForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        appMenu.addItem(updateItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        let servicesItem = NSMenuItem(title: "服务", action: nil, keyEquivalent: "")
+        let servicesMenu = NSMenu(title: "服务")
+        servicesItem.submenu = servicesMenu
+        NSApp.servicesMenu = servicesMenu
+        appMenu.addItem(servicesItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        appMenu.addItem(NSMenuItem(title: "隐藏 SysPulse", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        let hideOthers = NSMenuItem(title: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(title: "全部显示", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        appMenu.addItem(NSMenuItem(title: "退出 SysPulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // 2. 编辑菜单 (支持搜索框复制/粘贴/全选快捷键)
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "编辑")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(NSMenuItem(title: "撤销", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        // 3. 模块导航菜单
+        let moduleMenuItem = NSMenuItem()
+        mainMenu.addItem(moduleMenuItem)
+        let moduleMenu = NSMenu(title: "模块")
+        moduleMenuItem.submenu = moduleMenu
+
+        let tab1 = NSMenuItem(title: "状态总览", action: #selector(menuSwitchToOverview), keyEquivalent: "1")
+        tab1.target = self
+        moduleMenu.addItem(tab1)
+
+        let tab2 = NSMenuItem(title: "网络监控", action: #selector(menuSwitchToNetwork), keyEquivalent: "2")
+        tab2.target = self
+        moduleMenu.addItem(tab2)
+
+        let tab3 = NSMenuItem(title: "智能清理", action: #selector(menuSwitchToCleaner), keyEquivalent: "3")
+        tab3.target = self
+        moduleMenu.addItem(tab3)
+
+        let tab4 = NSMenuItem(title: "卸载应用", action: #selector(menuSwitchToSoftware), keyEquivalent: "4")
+        tab4.target = self
+        moduleMenu.addItem(tab4)
+
+        let tab5 = NSMenuItem(title: "空间分析", action: #selector(menuSwitchToSpace), keyEquivalent: "5")
+        tab5.target = self
+        moduleMenu.addItem(tab5)
+
+        // 4. 窗口菜单
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(NSMenuItem(title: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
+        windowMenu.addItem(NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(NSMenuItem(title: "前置全部窗口", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""))
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func menuOpenAbout() {
+        MainStudioWindowController.shared.showWindow(section: .about)
+    }
+
+    @objc private func menuCheckForUpdates() {
+        MainStudioWindowController.shared.showWindow()
+        AppUpdateManager.shared.checkForUpdates(userInitiated: true)
+    }
+
+    @objc private func menuOpenSettings() {
+        MainStudioWindowController.shared.showWindow(section: .customization)
+    }
+
+    @objc private func menuSwitchToOverview() {
+        MainStudioWindowController.shared.showWindow(section: .overview)
+    }
+
+    @objc private func menuSwitchToNetwork() {
+        MainStudioWindowController.shared.showWindow(section: .networkMonitor)
+    }
+
+    @objc private func menuSwitchToCleaner() {
+        MainStudioWindowController.shared.showWindow(section: .smartCleaner)
+    }
+
+    @objc private func menuSwitchToSoftware() {
+        MainStudioWindowController.shared.showWindow(section: .appManager)
+    }
+
+    @objc private func menuSwitchToSpace() {
+        MainStudioWindowController.shared.showWindow(section: .spaceAnalysis)
     }
 }

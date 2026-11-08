@@ -109,8 +109,6 @@ cat << EOF > "$CONTENTS_DIR/Info.plist"
     <string>26.0</string>
     <key>DTSDKName</key>
     <string>macosx27.2</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>

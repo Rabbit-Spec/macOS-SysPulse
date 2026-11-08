@@ -887,50 +887,111 @@ private struct StatusOverviewSection: View {
         .frame(height: cardRowH)
     }
 
-    // 8. 风扇转速与温控卡片
+    // 8. 风扇转速与温控卡片（无风扇机型自适应为「静音散热」热工况卡片）
     private var fanCard: some View {
         let fan = FanController.shared
         let rpm = fan.currentRPM
-        let pct = Int(round(Double(rpm) / Double(fan.maxRPM) * 100.0))
+        let pct = Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))
 
         return cardBackground(id: "fan") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    SpinningFanIconView(rpm: rpm, size: 13.5, color: Color.orange)
-                    Text("风扇")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.orange)
-                    Spacer()
-                    headerBadge("转速 \(pct)%")
+            if fan.isFanSupported {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        SpinningFanIconView(rpm: rpm, size: 13.5, color: Color.orange)
+                        Text("风扇")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.orange)
+                        Spacer()
+                        headerBadge("转速 \(pct)%")
+                    }
+
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(NumberFormatter.localizedString(from: NSNumber(value: rpm), number: .decimal))
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                        Text("RPM")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+
+                    Spacer(minLength: 2)
+
+                    // 风扇模式切换按钮
+                    HStack(spacing: 8) {
+                        fanModeButton(.auto)
+                        fanModeButton(.cool)
+                        fanModeButton(.maxCool)
+                    }
+
+                    Spacer(minLength: 2)
+
+                    if fan.needsAuthorization {
+                        Text("未更改，需要授权")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.95, green: 0.65, blue: 0.25))
+                            .lineLimit(1)
+                    } else {
+                        Text(fan.statusText)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(theme.secondaryText)
+                            .lineLimit(1)
+                    }
                 }
+            } else {
+                let tier = fan.passiveThermalTier
+                let accent = fan.passiveThermalAccentColor
+                let tempC = Int(round(monitor.hardware.cpuTemperatureC))
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(NumberFormatter.localizedString(from: NSNumber(value: rpm), number: .decimal))
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("RPM")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        PulsingHeaderSymbolView(
+                            systemName: "snowflake",
+                            size: 13.5,
+                            color: accent,
+                            isRotating: false
+                        )
+                        Text("静音散热")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(accent)
+                        Spacer()
+                        headerBadge("零噪音 0 dB")
+                    }
 
-                Spacer(minLength: 2)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(tier.rawValue)
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                        Text("被动均热 · \(tempC)°C")
+                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.secondaryText)
+                    }
 
-                // 风扇模式切换按钮
-                HStack(spacing: 8) {
-                    fanModeButton(.auto)
-                    fanModeButton(.cool)
-                    fanModeButton(.maxCool)
-                }
+                    Spacer(minLength: 2)
 
-                Spacer(minLength: 2)
+                    HStack(spacing: 8) {
+                        ForEach(PassiveThermalTier.allCases) { item in
+                            let isCurrent = (item == tier)
+                            Text(item.rawValue)
+                                .font(.system(size: 12, weight: isCurrent ? .bold : .medium, design: .rounded))
+                                .foregroundStyle(isCurrent ? theme.primaryText : theme.secondaryText.opacity(0.75))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 4.5)
+                                .background(
+                                    Capsule().fill(
+                                        isCurrent
+                                            ? accent.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                                            : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
+                                    )
+                                )
+                                .overlay(
+                                    Capsule().strokeBorder(isCurrent ? accent.opacity(0.45) : Color.clear, lineWidth: 0.8)
+                                )
+                        }
+                    }
 
-                if fan.needsAuthorization {
-                    Text("未更改，需要授权")
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.95, green: 0.65, blue: 0.25))
-                        .lineLimit(1)
-                } else {
-                    Text(fan.statusText)
+                    Spacer(minLength: 2)
+
+                    Text(fan.passiveThermalDetailText)
                         .font(.system(size: 12.5))
                         .foregroundStyle(theme.secondaryText)
                         .lineLimit(1)

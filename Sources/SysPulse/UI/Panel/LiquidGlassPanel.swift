@@ -444,46 +444,111 @@ public struct LiquidGlassPanel: View {
 
     private var fanMetricCard: some View {
         let rpm = fan.currentRPM
-        let pct = Int(round(Double(rpm) / Double(fan.maxRPM) * 100.0))
+        let pct = Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))
 
         return metricCardContainer {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    HStack(spacing: 4) {
-                        SpinningFanIconView(rpm: rpm, size: 10.5, color: Color.orange)
-                        Text("风扇")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.primaryText)
+            if fan.isFanSupported {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        HStack(spacing: 4) {
+                            SpinningFanIconView(rpm: rpm, size: 10.5, color: Color.orange)
+                            Text("风扇")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.primaryText)
+                        }
+                        Spacer()
+                        metricBadge("转速 \(pct)%")
                     }
-                    Spacer()
-                    metricBadge("转速 \(pct)%")
-                }
 
-                Spacer(minLength: 2)
+                    Spacer(minLength: 2)
 
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text("\(rpm)")
-                        .font(.system(size: 21, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("RPM")
-                        .font(.system(size: 11, weight: .semibold))
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text("\(rpm)")
+                            .font(.system(size: 21, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                        Text("RPM")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+
+                    Spacer(minLength: 2)
+
+                    Text(fan.statusText)
+                        .font(.system(size: 9, weight: .regular))
                         .foregroundStyle(theme.secondaryText)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    // 风扇控制模式切换按钮
+                    HStack(spacing: 4) {
+                        fanModeButton(.auto)
+                        fanModeButton(.cool)
+                        fanModeButton(.maxCool)
+                    }
                 }
+            } else {
+                let tier = fan.passiveThermalTier
+                let accent = fan.passiveThermalAccentColor
+                let tempC = Int(round(monitor.hardware.cpuTemperatureC))
 
-                Spacer(minLength: 2)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        HStack(spacing: 4) {
+                            PulsingHeaderSymbolView(
+                                systemName: "snowflake",
+                                size: 10.5,
+                                color: accent,
+                                isRotating: false
+                            )
+                            Text("静音散热")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.primaryText)
+                        }
+                        Spacer()
+                        metricBadge("0 dB")
+                    }
 
-                Text(fan.statusText)
-                    .font(.system(size: 9, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
-                    .lineLimit(1)
+                    Spacer(minLength: 2)
 
-                Spacer(minLength: 4)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(tier.rawValue)
+                            .font(.system(size: 21, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                        Text("均热 \(tempC)°C")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.secondaryText)
+                    }
 
-                // 风扇控制模式切换按钮
-                HStack(spacing: 4) {
-                    fanModeButton(.auto)
-                    fanModeButton(.cool)
-                    fanModeButton(.maxCool)
+                    Spacer(minLength: 2)
+
+                    Text("无风扇架构 · 零噪音导热")
+                        .font(.system(size: 9, weight: .regular))
+                        .foregroundStyle(theme.secondaryText)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    HStack(spacing: 4) {
+                        ForEach(PassiveThermalTier.allCases) { item in
+                            let isCurrent = (item == tier)
+                            Text(item.rawValue)
+                                .font(.system(size: 9.5, weight: isCurrent ? .bold : .medium, design: .rounded))
+                                .foregroundStyle(isCurrent ? theme.primaryText : theme.secondaryText.opacity(0.75))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 3.5)
+                                .background(
+                                    Capsule().fill(
+                                        isCurrent
+                                            ? accent.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                                            : (colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+                                    )
+                                )
+                                .overlay(
+                                    Capsule().strokeBorder(isCurrent ? accent.opacity(0.45) : Color.clear, lineWidth: 0.6)
+                                )
+                        }
+                    }
                 }
             }
         }

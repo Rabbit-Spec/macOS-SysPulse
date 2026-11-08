@@ -1332,14 +1332,19 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         h.fanMinRPM = smcTelemetry.fanMinRPM ?? defaultBaseRPM
         h.fanMaxRPM = smcTelemetry.fanMaxRPM ?? defaultMaxRPM
 
-        if let hasFan = smcTelemetry.hasFan {
+        if MacHardwareInfo.shared.isPassiveCoolingModel {
+            h.isFanSupported = false
+            h.fanSpeedRPM = 0
+            h.fanMinRPM = 0
+            h.fanMaxRPM = 0
+        } else if let hasFan = smcTelemetry.hasFan {
             h.isFanSupported = hasFan
         }
 
-        if let realRPM = smcTelemetry.fanRPM {
-            h.fanSpeedRPM = max(0, realRPM)
-        } else if !h.isFanSupported {
+        if !h.isFanSupported {
             h.fanSpeedRPM = 0
+        } else if let realRPM = smcTelemetry.fanRPM {
+            h.fanSpeedRPM = max(0, realRPM)
         } else {
             let tempExcess = max(0.0, h.cpuTemperatureC - 40.0)
             let thermalRPM = Int(tempExcess * 24.0)
@@ -1549,7 +1554,10 @@ public final class AppleSMCReader: @unchecked Sendable {
         }
 
         // 3. Fan Count & Tachometer Speed
-        if let rawFanNum = readKey(key: "FNum"), rawFanNum.size >= 1 {
+        if MacHardwareInfo.shared.isPassiveCoolingModel {
+            snap.hasFan = false
+            snap.fanRPM = 0
+        } else if let rawFanNum = readKey(key: "FNum"), rawFanNum.size >= 1 {
             let fanCount = Int(rawFanNum.bytes.0)
             snap.hasFan = (fanCount > 0)
             if fanCount > 0 {
@@ -1572,6 +1580,9 @@ public final class AppleSMCReader: @unchecked Sendable {
             } else {
                 snap.fanRPM = 0
             }
+        } else if readRPM(key: "F0Ac") == nil && MacHardwareInfo.shared.isLaptop {
+            snap.hasFan = false
+            snap.fanRPM = 0
         }
 
         return snap

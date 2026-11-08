@@ -270,7 +270,7 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
             newWindow.titleVisibility = .hidden
             newWindow.titlebarSeparatorStyle = .none
             newWindow.isMovableByWindowBackground = true
-            newWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary]
+            newWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary, .moveToActiveSpace]
             newWindow.isReleasedWhenClosed = false
             newWindow.delegate = self
             newWindow.contentView = containerView
@@ -284,26 +284,20 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         if let win = window {
             win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
             win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-            // 若窗口当前不可见或在初次展示时，以默认尺寸 1200 × 822 居中放置
             if !win.isVisible {
                 win.setFrame(centeredRect, display: true)
             }
         }
-        window?.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary]
+        window?.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary, .moveToActiveSpace]
 
-        // Switch away from any full-screen app Space and jump back to the Desktop Space
-        if let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first {
-            finder.activate()
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
         }
-
-        NSApp.setActivationPolicy(.regular)
         AppIconManager.shared.applyCurrentAppearanceIcon(force: true)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self, let win = self.window else { return }
+        if let win = self.window {
             win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
             win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-            win.orderFrontRegardless()
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }

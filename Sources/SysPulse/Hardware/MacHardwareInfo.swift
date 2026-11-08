@@ -24,6 +24,23 @@ public struct MacHardwareInfo: Sendable {
         return lower.contains("book") || lower.contains("macbook")
     }
 
+    /// 识别是否为无风扇被动散热机型（如全系 Apple Silicon MacBook Air 及 12 寸 MacBook）
+    public var isPassiveCoolingModel: Bool {
+        let lowerName = platformName.lowercased()
+        let lowerModel = modelIdentifier.lowercased()
+        if lowerName.contains("macbook air") || lowerModel.contains("macbookair") {
+            return true
+        }
+        let fanlessModelIDs: Set<String> = [
+            "macbookair10,1",
+            "mac14,2", "mac14,15",
+            "mac15,12", "mac15,13",
+            "mac16,12", "mac16,13",
+            "macbook8,1", "macbook9,1", "macbook10,1"
+        ]
+        return fanlessModelIDs.contains(lowerModel)
+    }
+
     private init() {
         let modelID = Self.readModelIdentifier() ?? "Mac"
         let chip = Self.readChipBrand() ?? "Apple Silicon"
