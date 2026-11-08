@@ -13,7 +13,8 @@ if [ ! -f "$VERSION_FILE" ]; then
 fi
 VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
 IFS='.' read -r major minor patch <<< "$VERSION"
-BUILD_NUM="${patch}"
+PATCH_NUM="${patch%%_*}"
+BUILD_NUM="${PATCH_NUM}"
 BUNDLE_DIR="$HERE/build/$APP_NAME.app"
 CONTENTS_DIR="$BUNDLE_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -155,8 +156,12 @@ echo "✅ 打包并启动完成:"
 echo "   - 独立 App: $HERE/../build/$APP_NAME.app"
 echo "   - 可分享 DMG: $DMG_OUTPUT"
 
-# 下次编译自动递增 0.0.1
-NEXT_PATCH=$((patch + 1))
-NEXT_VERSION="${major}.${minor}.${NEXT_PATCH}"
-echo "$NEXT_VERSION" > "$VERSION_FILE"
-echo "🔢 下一次编译版本将自动递增为: v$NEXT_VERSION"
+# 下次编译自动递增 0.0.1（若为带后缀的测试支线则保持当前测试版本号）
+if [[ "$patch" != *"_"* ]]; then
+    NEXT_PATCH=$((PATCH_NUM + 1))
+    NEXT_VERSION="${major}.${minor}.${NEXT_PATCH}"
+    echo "$NEXT_VERSION" > "$VERSION_FILE"
+    echo "🔢 下一次编译版本将自动递增为: v$NEXT_VERSION"
+else
+    echo "🧪 当前为测试支线版本: v$VERSION"
+fi

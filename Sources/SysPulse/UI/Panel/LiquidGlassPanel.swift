@@ -87,9 +87,12 @@ public struct LiquidGlassPanel: View {
         } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 6) {
-                    Image(systemName: "sun.max.fill")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(red: 0.35, green: 0.85, blue: 0.55))
+                    PulsingHeaderSymbolView(
+                        systemName: "sun.max.fill",
+                        size: 15,
+                        color: Color(red: 0.35, green: 0.85, blue: 0.55),
+                        isRotating: true
+                    )
 
                     Text("\(snapshot.score)")
                         .font(.system(size: 20, weight: .bold, design: .rounded))
@@ -208,6 +211,7 @@ public struct LiquidGlassPanel: View {
                         Capsule()
                             .fill(isActive ? Color(red: 0.35, green: 0.85, blue: 0.55) : metricTrackFill)
                             .frame(height: 3.5)
+                            .animation(.spring(response: 0.30, dampingFraction: 0.72), value: isActive)
                     }
                 }
 
@@ -446,9 +450,7 @@ public struct LiquidGlassPanel: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HStack(spacing: 4) {
-                        Image(systemName: "fan.fill")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Color.orange)
+                        SpinningFanIconView(rpm: rpm, size: 10.5, color: Color.orange)
                         Text("风扇")
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
@@ -586,9 +588,11 @@ public struct LiquidGlassPanel: View {
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    Image(systemName: headerIcon.name)
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(headerIcon.color)
+                    PulsingHeaderSymbolView(
+                        systemName: headerIcon.name,
+                        size: 11,
+                        color: headerIcon.color
+                    )
                     Text(isLaptop ? "电池" : (engine.telemetry.isConnected ? "UPS 供电" : "AC 供电"))
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.primaryText)

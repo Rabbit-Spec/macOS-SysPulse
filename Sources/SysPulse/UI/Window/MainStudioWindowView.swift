@@ -396,12 +396,15 @@ private struct StatusOverviewSection: View {
     private var healthCard: some View {
         let snapshot = SystemHealthEvaluator.shared.evaluate()
 
-        return cardBackground {
+        return cardBackground(id: "health") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: "sun.max.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
+                    PulsingHeaderSymbolView(
+                        systemName: "sun.max.fill",
+                        size: 13,
+                        color: Color(red: 0.35, green: 0.82, blue: 0.55),
+                        isRotating: true
+                    )
                     Text("健康度")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
@@ -475,7 +478,7 @@ private struct StatusOverviewSection: View {
             loadStatus = "高负载"
         }
 
-        return cardBackground {
+        return cardBackground(id: "cpu") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("CPU", systemImage: "cpu")
@@ -553,7 +556,7 @@ private struct StatusOverviewSection: View {
             gpuStatus = "高负载"
         }
 
-        return cardBackground {
+        return cardBackground(id: "gpu") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("GPU", systemImage: "display")
@@ -594,7 +597,7 @@ private struct StatusOverviewSection: View {
         let usedGB = String(format: "%.1f", monitor.memory.usedGB)
         let swapMB = String(format: "%.1f", Double(monitor.memory.compressedBytes) / 1048576.0)
 
-        return cardBackground {
+        return cardBackground(id: "memory") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("内存", systemImage: "memorychip")
@@ -655,13 +658,15 @@ private struct StatusOverviewSection: View {
         let topEnergyApp = monitor.topEnergyApps.first?.name ?? "WindowServer"
         let connectedAccessories = accessories.accessories.filter { $0.isConnected }
 
-        return cardBackground {
+        return cardBackground(id: "power") {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label(
-                        isMacBook ? "电池" : (engine.telemetry.isConnected ? "UPS 供电" : "AC 供电"),
-                        systemImage: isMacBook ? "battery.100.bolt" : (engine.telemetry.isConnected ? "bolt.fill" : "powerplug.fill")
+                HStack(spacing: 6) {
+                    PulsingHeaderSymbolView(
+                        systemName: isMacBook ? "battery.100.bolt" : (engine.telemetry.isConnected ? "bolt.fill" : "powerplug.fill"),
+                        size: 13,
+                        color: Color(red: 0.35, green: 0.82, blue: 0.55)
                     )
+                    Text(isMacBook ? "电池" : (engine.telemetry.isConnected ? "UPS 供电" : "AC 供电"))
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
                     Spacer()
@@ -765,7 +770,7 @@ private struct StatusOverviewSection: View {
         let usedGB = Int(round(monitor.hardware.statfsUsedGB))
         let usedPct = monitor.hardware.statfsUsedPercent
 
-        return cardBackground {
+        return cardBackground(id: "disk") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("可用空间", systemImage: "internaldrive")
@@ -813,7 +818,7 @@ private struct StatusOverviewSection: View {
         let parts = monitor.hardware.downloadSpeedParts
         let ifKind = monitor.hardware.primaryInterfaceKind
 
-        return cardBackground {
+        return cardBackground(id: "network") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Label("网络", systemImage: "network")
@@ -888,10 +893,11 @@ private struct StatusOverviewSection: View {
         let rpm = fan.currentRPM
         let pct = Int(round(Double(rpm) / Double(fan.maxRPM) * 100.0))
 
-        return cardBackground {
+        return cardBackground(id: "fan") {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label("风扇", systemImage: "fan.fill")
+                HStack(spacing: 6) {
+                    SpinningFanIconView(rpm: rpm, size: 13.5, color: Color.orange)
+                    Text("风扇")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.orange)
                     Spacer()
@@ -1264,8 +1270,13 @@ private struct StatusOverviewSection: View {
 
     // MARK: - Component Helpers
 
-    private func cardBackground<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func cardBackground<Content: View>(id: String = "", @ViewBuilder content: () -> Content) -> some View {
+        let isHovered = (!id.isEmpty && navState.hoveredOverviewCardID == id)
+        let borderColor = isHovered
+            ? (colorScheme == .dark ? Color.white.opacity(0.28) : Color.black.opacity(0.18))
+            : theme.cardBorder
+
+        return VStack(alignment: .leading, spacing: 0) {
             content()
         }
         .padding(12)
@@ -1275,9 +1286,24 @@ private struct StatusOverviewSection: View {
                 .fill(theme.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                        .strokeBorder(borderColor, lineWidth: isHovered ? 1.1 : 0.8)
+                )
+                .shadow(
+                    color: Color.black.opacity(isHovered ? (colorScheme == .dark ? 0.32 : 0.08) : 0.0),
+                    radius: isHovered ? 10 : 0,
+                    y: isHovered ? 4 : 0
                 )
         )
+        .offset(y: isHovered ? -2.0 : 0.0)
+        .animation(.spring(response: 0.26, dampingFraction: 0.78), value: isHovered)
+        .onHover { hovering in
+            guard !id.isEmpty else { return }
+            if hovering {
+                navState.hoveredOverviewCardID = id
+            } else if navState.hoveredOverviewCardID == id {
+                navState.hoveredOverviewCardID = nil
+            }
+        }
     }
 
     private func pillBadge(_ text: String) -> some View {
@@ -1374,52 +1400,86 @@ public struct HealthPulseAuraBadgeView: View {
     public var body: some View {
         let isDark = (activeScheme == .dark)
         let mainColor = tierColor
+        let breathSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 2.1 : (tierIndex == 3 ? 3.4 : 5.0)
+        let orbitSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 28.0 : (tierIndex == 3 ? 48.0 : 75.0)
 
-        ZStack {
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            mainColor.opacity(isDark ? 0.42 : 0.26),
-                            mainColor.opacity(isDark ? 0.14 : 0.07),
-                            Color.clear
-                        ],
-                        center: .center,
-                        startRadius: mascotSize * 0.32,
-                        endRadius: auraSize * 0.50
-                    )
-                )
-                .frame(width: auraSize, height: auraSize)
-                .blur(radius: 3.0)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let breath = (sin(t * breathSpeed) + 1.0) * 0.5
+            let auraScale = 0.92 + 0.15 * breath
+            let floatY = CGFloat(sin(t * (breathSpeed * 1.05))) * 2.5
+            let tiltAngle = sin(t * (breathSpeed * 0.75)) * 1.8
+            let outerOrbitDeg = (t * orbitSpeed).truncatingRemainder(dividingBy: 360.0)
+            let innerOrbitDeg = (-t * (orbitSpeed * 0.65)).truncatingRemainder(dividingBy: 360.0)
 
-            Circle()
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [mainColor.opacity(0.85), mainColor.opacity(0.20)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1.5
-                )
-                .frame(width: ringSize, height: ringSize)
-
-            if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: mascotSize, height: mascotSize)
-                    .clipShape(Circle())
-                    .overlay(
-                        Circle().strokeBorder(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08), lineWidth: 1)
-                    )
-                    .shadow(color: mainColor.opacity(0.4), radius: 6, y: 2)
-            } else {
+            ZStack {
+                // 1. 正弦呼吸能量光晕
                 Circle()
-                    .fill(mainColor.opacity(0.2))
-                    .frame(width: mascotSize, height: mascotSize)
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                mainColor.opacity((isDark ? 0.36 : 0.22) + 0.14 * breath),
+                                mainColor.opacity((isDark ? 0.12 : 0.06) + 0.06 * breath),
+                                Color.clear
+                            ],
+                            center: .center,
+                            startRadius: mascotSize * 0.28,
+                            endRadius: auraSize * 0.52
+                        )
+                    )
+                    .frame(width: auraSize, height: auraSize)
+                    .scaleEffect(auraScale)
+                    .blur(radius: 3.5)
+
+                // 2. 外圈顺时针旋转流光追光环
+                Circle()
+                    .strokeBorder(
+                        AngularGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: mainColor.opacity(0.08), location: 0.0),
+                                .init(color: mainColor.opacity(0.28), location: 0.55),
+                                .init(color: mainColor.opacity(0.95), location: 0.88),
+                                .init(color: Color.white.opacity(isDark ? 0.85 : 0.65), location: 0.96),
+                                .init(color: mainColor.opacity(0.08), location: 1.0)
+                            ]),
+                            center: .center
+                        ),
+                        lineWidth: 1.6
+                    )
+                    .frame(width: ringSize, height: ringSize)
+                    .rotationEffect(.degrees(outerOrbitDeg))
+
+                // 3. 内圈逆时针慢速星轨虚线环
+                Circle()
+                    .strokeBorder(
+                        mainColor.opacity(isDark ? 0.34 : 0.26),
+                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round, dash: [3.5, 6.5])
+                    )
+                    .frame(width: ringSize - 8, height: ringSize - 8)
+                    .rotationEffect(.degrees(innerOrbitDeg))
+
+                // 4. 轻盈悬浮呼吸水彩兔子徽章
+                if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: mascotSize, height: mascotSize)
+                        .clipShape(Circle())
+                        .overlay(
+                            Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
+                        )
+                        .shadow(color: mainColor.opacity(0.32 + 0.22 * breath), radius: 6 + 3 * breath, y: 2 - floatY * 0.3)
+                        .offset(y: floatY)
+                        .rotationEffect(.degrees(tiltAngle))
+                } else {
+                    Circle()
+                        .fill(mainColor.opacity(0.2))
+                        .frame(width: mascotSize, height: mascotSize)
+                        .offset(y: floatY)
+                }
             }
+            .frame(width: ringSize, height: ringSize)
         }
-        .frame(width: ringSize, height: ringSize)
     }
 
     public static func loadTierImage(tier: Int, isDark: Bool) -> NSImage? {
@@ -1488,30 +1548,87 @@ struct MiniWaveformLine: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            Path { path in
-                if history.isEmpty {
-                    path.move(to: CGPoint(x: 0, y: h * 0.85))
-                    path.addLine(to: CGPoint(x: w, y: h * 0.85))
-                    return
+            let maxVal = max(5.0, history.max() ?? 5.0)
+            let step = w / CGFloat(max(1, history.count - 1))
+
+            let lastPoint: CGPoint = {
+                guard let lastVal = history.last, !history.isEmpty else {
+                    return CGPoint(x: w, y: h * 0.85)
                 }
-                let maxVal = max(5.0, history.max() ?? 5.0)
-                let step = w / CGFloat(max(1, history.count - 1))
-                for (idx, val) in history.enumerated() {
-                    let norm = CGFloat(min(maxVal, max(0.0, val)) / maxVal)
-                    let y = h - (norm * (h * 0.75) + h * 0.12)
-                    let x = CGFloat(idx) * step
-                    if idx == 0 {
-                        path.move(to: CGPoint(x: x, y: y))
-                    } else {
-                        let prevX = CGFloat(idx - 1) * step
-                        let prevVal = history[idx - 1]
-                        let prevY = h - (CGFloat(min(maxVal, max(0.0, prevVal)) / maxVal) * (h * 0.75) + h * 0.12)
-                        let midX = (prevX + x) / 2.0
-                        path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                let norm = CGFloat(min(maxVal, max(0.0, lastVal)) / maxVal)
+                let y = h - (norm * (h * 0.75) + h * 0.12)
+                return CGPoint(x: w, y: y)
+            }()
+
+            ZStack {
+                Path { path in
+                    guard !history.isEmpty else { return }
+                    for (idx, val) in history.enumerated() {
+                        let norm = CGFloat(min(maxVal, max(0.0, val)) / maxVal)
+                        let y = h - (norm * (h * 0.75) + h * 0.12)
+                        let x = CGFloat(idx) * step
+                        if idx == 0 {
+                            path.move(to: CGPoint(x: x, y: h))
+                            path.addLine(to: CGPoint(x: x, y: y))
+                        } else {
+                            let prevX = CGFloat(idx - 1) * step
+                            let prevVal = history[idx - 1]
+                            let prevY = h - (CGFloat(min(maxVal, max(0.0, prevVal)) / maxVal) * (h * 0.75) + h * 0.12)
+                            let midX = (prevX + x) / 2.0
+                            path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                        }
+                    }
+                    path.addLine(to: CGPoint(x: w, y: h))
+                    path.closeSubpath()
+                }
+                .fill(
+                    LinearGradient(
+                        colors: [color.opacity(0.22), color.opacity(0.0)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                Path { path in
+                    if history.isEmpty {
+                        path.move(to: CGPoint(x: 0, y: h * 0.85))
+                        path.addLine(to: CGPoint(x: w, y: h * 0.85))
+                        return
+                    }
+                    for (idx, val) in history.enumerated() {
+                        let norm = CGFloat(min(maxVal, max(0.0, val)) / maxVal)
+                        let y = h - (norm * (h * 0.75) + h * 0.12)
+                        let x = CGFloat(idx) * step
+                        if idx == 0 {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            let prevX = CGFloat(idx - 1) * step
+                            let prevVal = history[idx - 1]
+                            let prevY = h - (CGFloat(min(maxVal, max(0.0, prevVal)) / maxVal) * (h * 0.75) + h * 0.12)
+                            let midX = (prevX + x) / 2.0
+                            path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                        }
                     }
                 }
+                .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let pulse = (t * 0.9).truncatingRemainder(dividingBy: 1.0)
+
+                    ZStack {
+                        Circle()
+                            .stroke(color.opacity(max(0.0, (1.0 - pulse) * 0.65)), lineWidth: 1.2)
+                            .frame(width: 5 + CGFloat(pulse) * 9, height: 5 + CGFloat(pulse) * 9)
+
+                        Circle()
+                            .fill(color)
+                            .frame(width: 4.5, height: 4.5)
+                            .shadow(color: color.opacity(0.8), radius: 3)
+                    }
+                    .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
+                }
             }
-            .stroke(color, lineWidth: 1.5)
         }
     }
 }
@@ -1527,31 +1644,87 @@ struct DualSparklineView: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
+            let maxDown = max(1024.0 * 20.0, downloadHistory.max() ?? 1024.0)
+            let step = w / CGFloat(max(1, downloadHistory.count - 1))
 
-            Path { path in
-                if downloadHistory.isEmpty {
-                    path.move(to: CGPoint(x: 0, y: h * 0.85))
-                    path.addLine(to: CGPoint(x: w, y: h * 0.85))
-                    return
+            let lastPoint: CGPoint = {
+                guard let lastVal = downloadHistory.last, !downloadHistory.isEmpty else {
+                    return CGPoint(x: w, y: h * 0.85)
                 }
-                let maxDown = max(1024.0 * 20.0, downloadHistory.max() ?? 1024.0)
-                let step = w / CGFloat(max(1, downloadHistory.count - 1))
-                for (idx, val) in downloadHistory.enumerated() {
-                    let norm = min(1.0, CGFloat(val / maxDown))
-                    let y = h - (norm * (h * 0.75) + h * 0.12)
-                    let x = CGFloat(idx) * step
-                    if idx == 0 {
-                        path.move(to: CGPoint(x: x, y: y))
-                    } else {
-                        let prevX = CGFloat(idx - 1) * step
-                        let prevVal = downloadHistory[idx - 1]
-                        let prevY = h - (min(1.0, CGFloat(prevVal / maxDown)) * (h * 0.75) + h * 0.12)
-                        let midX = (prevX + x) / 2.0
-                        path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                let norm = min(1.0, CGFloat(lastVal / maxDown))
+                let y = h - (norm * (h * 0.75) + h * 0.12)
+                return CGPoint(x: w, y: y)
+            }()
+
+            ZStack {
+                Path { path in
+                    guard !downloadHistory.isEmpty else { return }
+                    for (idx, val) in downloadHistory.enumerated() {
+                        let norm = min(1.0, CGFloat(val / maxDown))
+                        let y = h - (norm * (h * 0.75) + h * 0.12)
+                        let x = CGFloat(idx) * step
+                        if idx == 0 {
+                            path.move(to: CGPoint(x: x, y: h))
+                            path.addLine(to: CGPoint(x: x, y: y))
+                        } else {
+                            let prevX = CGFloat(idx - 1) * step
+                            let prevVal = downloadHistory[idx - 1]
+                            let prevY = h - (min(1.0, CGFloat(prevVal / maxDown)) * (h * 0.75) + h * 0.12)
+                            let midX = (prevX + x) / 2.0
+                            path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                        }
+                    }
+                    path.addLine(to: CGPoint(x: w, y: h))
+                    path.closeSubpath()
+                }
+                .fill(
+                    LinearGradient(
+                        colors: [color.opacity(0.22), color.opacity(0.0)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                Path { path in
+                    if downloadHistory.isEmpty {
+                        path.move(to: CGPoint(x: 0, y: h * 0.85))
+                        path.addLine(to: CGPoint(x: w, y: h * 0.85))
+                        return
+                    }
+                    for (idx, val) in downloadHistory.enumerated() {
+                        let norm = min(1.0, CGFloat(val / maxDown))
+                        let y = h - (norm * (h * 0.75) + h * 0.12)
+                        let x = CGFloat(idx) * step
+                        if idx == 0 {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            let prevX = CGFloat(idx - 1) * step
+                            let prevVal = downloadHistory[idx - 1]
+                            let prevY = h - (min(1.0, CGFloat(prevVal / maxDown)) * (h * 0.75) + h * 0.12)
+                            let midX = (prevX + x) / 2.0
+                            path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+                        }
                     }
                 }
+                .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let pulse = (t * 0.9).truncatingRemainder(dividingBy: 1.0)
+
+                    ZStack {
+                        Circle()
+                            .stroke(color.opacity(max(0.0, (1.0 - pulse) * 0.65)), lineWidth: 1.2)
+                            .frame(width: 5 + CGFloat(pulse) * 9, height: 5 + CGFloat(pulse) * 9)
+
+                        Circle()
+                            .fill(color)
+                            .frame(width: 4.5, height: 4.5)
+                            .shadow(color: color.opacity(0.8), radius: 3)
+                    }
+                    .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
+                }
             }
-            .stroke(color, lineWidth: 1.5)
         }
     }
 }

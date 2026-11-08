@@ -107,6 +107,8 @@ public final class StudioWindowNavigationState {
     public var isNetworkDetailPresented: Bool = false
     public var isDiagnosticsModalPresented: Bool = false
     public var isUpdateModalPresented: Bool = false
+    public var hoveredOverviewCardID: String? = nil
+    public var hoveredPopoverCardID: String? = nil
 
     public func toggleSort(field: ProcessSortField) {
         if processSortField == field {

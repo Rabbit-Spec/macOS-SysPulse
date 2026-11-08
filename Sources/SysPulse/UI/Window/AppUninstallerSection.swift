@@ -82,11 +82,15 @@ public struct AppUninstallerSection: View {
     private var primaryActionCard: some View {
         cardContainer {
             HStack(spacing: 0) {
-                UninstallerArtworkIconView(size: 50, forcedColorScheme: colorScheme)
-                    .clipShape(RoundedRectangle(cornerRadius: 11.5, style: .continuous))
-                    .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.08), radius: 4, y: 2)
-                    .padding(.leading, 24)
-                    .padding(.trailing, 20)
+                AnimatedModuleArtworkBadgeView(
+                    size: 50,
+                    isActive: uninstaller.isScanning || uninstaller.isUninstalling,
+                    accentColor: Color(red: 0.45, green: 0.65, blue: 0.98)
+                ) {
+                    UninstallerArtworkIconView(size: 50, forcedColorScheme: colorScheme)
+                }
+                .padding(.leading, 24)
+                .padding(.trailing, 20)
 
                 VStack(alignment: .leading, spacing: 2.5) {
                     HStack(spacing: 8) {

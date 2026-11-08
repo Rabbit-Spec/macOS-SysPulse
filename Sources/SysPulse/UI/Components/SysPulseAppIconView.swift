@@ -525,3 +525,120 @@ public struct SpaceAnalysisArtworkIconView: View {
     }
 }
 
+// MARK: - 实时微动效组件 (Micro-Motion Components)
+
+/// 根据真实风扇 RPM 转速无级旋转的风扇图标视图
+public struct SpinningFanIconView: View {
+    public var rpm: Int
+    public var size: CGFloat = 14
+    public var color: Color = .orange
+
+    public init(rpm: Int, size: CGFloat = 14, color: Color = .orange) {
+        self.rpm = rpm
+        self.size = size
+        self.color = color
+    }
+
+    public var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let degPerSec = max(110.0, min(720.0, Double(max(600, rpm)) / 1000.0 * 145.0))
+            let angle = (t * degPerSec).truncatingRemainder(dividingBy: 360.0)
+
+            Image(systemName: "fan.fill")
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(color)
+                .rotationEffect(.degrees(angle))
+        }
+    }
+}
+
+/// 带有柔和呼吸脉动（及可选慢速旋转）的卡片头部符号视图
+public struct PulsingHeaderSymbolView: View {
+    public var systemName: String
+    public var size: CGFloat = 13
+    public var color: Color
+    public var isRotating: Bool = false
+
+    public init(systemName: String, size: CGFloat = 13, color: Color, isRotating: Bool = false) {
+        self.systemName = systemName
+        self.size = size
+        self.color = color
+        self.isRotating = isRotating
+    }
+
+    public var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let breath = (sin(t * 2.4) + 1.0) * 0.5
+            let scale = 0.94 + 0.10 * breath
+            let angle = isRotating ? (t * 24.0).truncatingRemainder(dividingBy: 360.0) : 0.0
+
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: .bold))
+                .foregroundStyle(color)
+                .scaleEffect(scale)
+                .rotationEffect(.degrees(angle))
+                .shadow(color: color.opacity(0.25 + 0.30 * breath), radius: 3.5)
+        }
+    }
+}
+
+/// 3D 模块图标悬浮呼吸与扫描声呐波纹容器视图
+public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
+    public var size: CGFloat = 50
+    public var isActive: Bool = false
+    public var accentColor: Color = .cyan
+    private let content: Content
+
+    public init(
+        size: CGFloat = 50,
+        isActive: Bool = false,
+        accentColor: Color = .cyan,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.size = size
+        self.isActive = isActive
+        self.accentColor = accentColor
+        self.content = content()
+    }
+
+    public var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let floatSpeed = isActive ? 3.6 : 2.1
+            let floatY = CGFloat(sin(t * floatSpeed)) * (isActive ? 2.6 : 1.8)
+            let tilt = sin(t * (floatSpeed * 0.7)) * (isActive ? 2.2 : 1.2)
+            let cornerRadius = size * 0.23
+
+            ZStack {
+                if isActive {
+                    ForEach(0..<2, id: \.self) { idx in
+                        let phase = ((t * 0.85) + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
+                        let ringScale = 1.0 + CGFloat(phase) * 0.42
+                        let ringAlpha = max(0.0, (1.0 - phase) * 0.65)
+
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(accentColor.opacity(ringAlpha), lineWidth: 1.5)
+                            .frame(width: size, height: size)
+                            .scaleEffect(ringScale)
+                    }
+                }
+
+                content
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .shadow(
+                        color: accentColor.opacity(isActive ? 0.38 : 0.16),
+                        radius: isActive ? 7 : 4,
+                        y: 2 - floatY * 0.3
+                    )
+                    .offset(y: floatY)
+                    .rotationEffect(.degrees(tilt))
+            }
+            .frame(width: size, height: size)
+        }
+    }
+}
+
+
