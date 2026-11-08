@@ -1400,58 +1400,59 @@ public struct HealthPulseAuraBadgeView: View {
     public var body: some View {
         let isDark = (activeScheme == .dark)
         let mainColor = tierColor
-        let waveSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 0.36 : (tierIndex == 3 ? 0.52 : 0.72)
+        let waveSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 0.17 : (tierIndex == 3 ? 0.25 : 0.35)
+        let maxWaveSpan: CGFloat = max(14.0, (ringSize - mascotSize) * 1.12)
 
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            let breath = (sin(t * 2.0) + 1.0) * 0.5
+            let breath = (sin(t * 1.1) + 1.0) * 0.5
 
             ZStack {
-                // 1. 柔和呼吸基底光晕
+                // 1. 紧凑内敛的呼吸基底光晕
                 Circle()
                     .fill(
                         RadialGradient(
                             colors: [
-                                mainColor.opacity((isDark ? 0.32 : 0.20) + 0.10 * breath),
-                                mainColor.opacity((isDark ? 0.10 : 0.05) + 0.05 * breath),
+                                mainColor.opacity((isDark ? 0.28 : 0.18) + 0.08 * breath),
+                                mainColor.opacity((isDark ? 0.08 : 0.04) + 0.04 * breath),
                                 Color.clear
                             ],
                             center: .center,
-                            startRadius: mascotSize * 0.32,
-                            endRadius: auraSize * 0.52
+                            startRadius: mascotSize * 0.38,
+                            endRadius: (mascotSize + maxWaveSpan) * 0.52
                         )
                     )
-                    .frame(width: auraSize, height: auraSize)
-                    .blur(radius: 3.0)
+                    .frame(width: mascotSize + maxWaveSpan + 6, height: mascotSize + maxWaveSpan + 6)
+                    .blur(radius: 2.0)
 
-                // 2. 三层交替向外扩散的波光涟漪 (Shining Outward Light Ripples)
-                ForEach(0..<3, id: \.self) { idx in
-                    let phase = ((t * waveSpeed) + Double(idx) / 3.0).truncatingRemainder(dividingBy: 1.0)
-                    let eased = 1.0 - pow(1.0 - phase, 1.65)
-                    let waveDiameter = mascotSize + (auraSize * 1.04 - mascotSize) * CGFloat(eased)
-                    let fadeEnvelope = sin(phase * .pi) * (1.0 - phase * 0.35)
-                    let waveAlpha = max(0.0, fadeEnvelope * (isDark ? 0.78 : 0.65))
+                // 2. 双层慢速、小范围向外散发的柔光波纹
+                ForEach(0..<2, id: \.self) { idx in
+                    let phase = ((t * waveSpeed) + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
+                    let eased = 1.0 - pow(1.0 - phase, 1.45)
+                    let waveDiameter = mascotSize + maxWaveSpan * CGFloat(eased)
+                    let fadeEnvelope = sin(phase * .pi) * (1.0 - phase * 0.45)
+                    let waveAlpha = max(0.0, fadeEnvelope * (isDark ? 0.68 : 0.56))
 
                     ZStack {
                         // 柔光波晕
                         Circle()
-                            .stroke(mainColor.opacity(waveAlpha * 0.45), lineWidth: 5.0 * (1.0 - CGFloat(phase) * 0.4))
+                            .stroke(mainColor.opacity(waveAlpha * 0.38), lineWidth: 2.8 * (1.0 - CGFloat(phase) * 0.4))
                             .frame(width: waveDiameter, height: waveDiameter)
-                            .blur(radius: 2.2)
+                            .blur(radius: 1.5)
 
-                        // 清透波峰光线
+                        // 细腻波峰光线
                         Circle()
                             .strokeBorder(
                                 LinearGradient(
                                     colors: [
-                                        mainColor.opacity(waveAlpha * 0.95),
-                                        mainColor.opacity(waveAlpha * 0.55),
-                                        mainColor.opacity(waveAlpha * 0.90)
+                                        mainColor.opacity(waveAlpha * 0.88),
+                                        mainColor.opacity(waveAlpha * 0.48),
+                                        mainColor.opacity(waveAlpha * 0.82)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
                                 ),
-                                lineWidth: max(0.7, 1.6 - CGFloat(phase) * 0.7)
+                                lineWidth: max(0.6, 1.3 - CGFloat(phase) * 0.55)
                             )
                             .frame(width: waveDiameter, height: waveDiameter)
                     }
@@ -1467,7 +1468,7 @@ public struct HealthPulseAuraBadgeView: View {
                         .overlay(
                             Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
                         )
-                        .shadow(color: mainColor.opacity(0.34 + 0.16 * breath), radius: 6, y: 2)
+                        .shadow(color: mainColor.opacity(0.30 + 0.12 * breath), radius: 5, y: 2)
                 } else {
                     Circle()
                         .fill(mainColor.opacity(0.2))
