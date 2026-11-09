@@ -122,9 +122,9 @@ cat << EOF > "$CONTENTS_DIR/Info.plist"
 </plist>
 EOF
 
-echo "🔐 正在对应用包进行代码签名与隔离属性清理..."
+echo "🔐 正在对应用包进行代码签名与隔离属性清理 (Designated Requirement: com.powerglass.SysPulse)..."
 /usr/bin/xattr -cr "$BUNDLE_DIR"
-/usr/bin/codesign --force --deep --sign - "$BUNDLE_DIR"
+/usr/bin/codesign --force --deep -s - -r='designated => identifier "com.powerglass.SysPulse"' "$BUNDLE_DIR"
 
 # 同步纯净 App 到主目录 build 下（文件名不带版本号）
 mkdir -p "$HERE/../build"

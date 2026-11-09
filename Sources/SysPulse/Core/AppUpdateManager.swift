@@ -28,6 +28,18 @@ public enum UpdateCheckState: Sendable, Equatable {
     case downloading(GitHubReleaseInfo, progress: Double, downloadedMB: Double, totalMB: Double)
     case installing(GitHubReleaseInfo, statusMessage: String)
     case failed(message: String)
+
+    public var stateKey: String {
+        switch self {
+        case .idle: return "idle"
+        case .checking: return "checking"
+        case .upToDate: return "upToDate"
+        case .updateAvailable: return "updateAvailable"
+        case .downloading: return "downloading"
+        case .installing: return "installing"
+        case .failed: return "failed"
+        }
+    }
 }
 
 @Observable
@@ -45,6 +57,8 @@ public final class AppUpdateManager {
     public var state: UpdateCheckState = .idle
     public var availableRelease: GitHubReleaseInfo? = nil
     private var downloadTask: Task<Void, Never>? = nil
+    private var currentDownloadTask: URLSessionDownloadTask? = nil
+    private var activeDownloadId = UUID()
 
     public var hasUpdateAvailable: Bool {
         availableRelease != nil
@@ -52,10 +66,19 @@ public final class AppUpdateManager {
 
     private init() {}
 
-    public func checkForUpdates(userInitiated: Bool = true) {
+    public func checkForUpdates(userInitiated: Bool = true, forceRefresh: Bool = false) {
         if userInitiated {
             StudioWindowNavigationState.shared.openUpdateModal()
         }
+
+        // 如果已经解析出可用新版本且并非用户在弹窗内主动点击「重新检查」，则直接平滑展示已有更新内容，避免状态跳变闪烁
+        if !forceRefresh, case .updateAvailable = state {
+            return
+        }
+
+        // 如果已经在下载中或安装中，保持当前状态
+        if case .downloading = state { return }
+        if case .installing = state { return }
 
         state = .checking
 
@@ -84,8 +107,11 @@ public final class AppUpdateManager {
     }
 
     public func cancelDownload() {
+        activeDownloadId = UUID()
         downloadTask?.cancel()
         downloadTask = nil
+        currentDownloadTask?.cancel()
+        currentDownloadTask = nil
         if let rel = availableRelease {
             state = .updateAvailable(rel)
         } else {
@@ -94,7 +120,13 @@ public final class AppUpdateManager {
     }
 
     public func downloadAndInstall(_ release: GitHubReleaseInfo) {
+        let newDownloadId = UUID()
+        self.activeDownloadId = newDownloadId
+
         downloadTask?.cancel()
+        downloadTask = nil
+        currentDownloadTask?.cancel()
+        currentDownloadTask = nil
 
         let fallbackURLString = "https://github.com/\(Self.repoOwner)/\(Self.repoName)/releases/download/\(release.tagName)/SysPulse-v\(release.version).dmg"
         guard let targetURL = release.dmgAssetURL ?? URL(string: fallbackURLString) else {
@@ -103,74 +135,71 @@ public final class AppUpdateManager {
         }
 
         let expectedBytes = Double(release.dmgAssetSizeBytes ?? 15_000_000)
-        state = .downloading(release, progress: 0.02, downloadedMB: 0.0, totalMB: max(1.0, expectedBytes / 1_048_576.0))
+        let initTotalMB = max(1.0, expectedBytes / 1_048_576.0)
+        self.state = .downloading(release, progress: 0.02, downloadedMB: 0.0, totalMB: initTotalMB)
 
-        downloadTask = Task { @MainActor in
+        downloadTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
             do {
                 var request = URLRequest(url: targetURL)
                 request.setValue("SysPulse/\(AppMetadata.version)", forHTTPHeaderField: "User-Agent")
-                request.timeoutInterval = 60
-
-                let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
-                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    throw NSError(
-                        domain: "AppUpdateManager",
-                        code: http.statusCode,
-                        userInfo: [NSLocalizedDescriptionKey: "未找到对应版本的 DMG 安装包附件 (HTTP \(http.statusCode))，请点击下方按钮前往 GitHub Releases 页面查看。"]
-                    )
-                }
-
-                let totalLength = response.expectedContentLength > 0 ? Double(response.expectedContentLength) : expectedBytes
-                let totalMB = max(0.5, totalLength / 1_048_576.0)
+                request.timeoutInterval = 120
 
                 let destDMGPath = "/tmp/SysPulse-Update-v\(release.version).dmg"
-                try? FileManager.default.removeItem(atPath: destDMGPath)
-                FileManager.default.createFile(atPath: destDMGPath, contents: nil)
-                guard let fileHandle = FileHandle(forWritingAtPath: destDMGPath) else {
-                    throw NSError(domain: "AppUpdateManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "无法创建临时更新文件。"])
-                }
-                defer { try? fileHandle.close() }
 
-                var buffer = Data()
-                buffer.reserveCapacity(65536)
-                var receivedBytes: Int64 = 0
-                var lastUIUpdate = Date.distantPast
+                let tempDownloadedURL: URL = try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { continuation in
+                        let coordinator = DownloadCoordinator(
+                            expectedBytes: expectedBytes,
+                            onProgress: { [weak self] prog, dlMB, totMB in
+                                DispatchQueue.main.async { [weak self] in
+                                    guard let self = self, self.activeDownloadId == newDownloadId else { return }
+                                    self.state = .downloading(release, progress: prog, downloadedMB: dlMB, totalMB: totMB)
+                                }
+                            },
+                            continuation: continuation
+                        )
 
-                for try await byte in asyncBytes {
-                    if Task.isCancelled { return }
-                    buffer.append(byte)
-                    if buffer.count >= 65536 {
-                        fileHandle.write(buffer)
-                        receivedBytes += Int64(buffer.count)
-                        buffer.removeAll(keepingCapacity: true)
-
-                        let now = Date()
-                        if now.timeIntervalSince(lastUIUpdate) >= 0.08 {
-                            lastUIUpdate = now
-                            let dlMB = Double(receivedBytes) / 1_048_576.0
-                            let prog = min(0.98, max(0.02, Double(receivedBytes) / totalLength))
-                            self.state = .downloading(release, progress: prog, downloadedMB: dlMB, totalMB: totalMB)
-                        }
+                        let sessionConfig = URLSessionConfiguration.default
+                        let session = URLSession(configuration: sessionConfig, delegate: coordinator, delegateQueue: nil)
+                        let task = session.downloadTask(with: request)
+                        self.currentDownloadTask = task
+                        task.resume()
+                    }
+                } onCancel: { [weak self] in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self, self.activeDownloadId == newDownloadId else { return }
+                        self.currentDownloadTask?.cancel()
+                        self.currentDownloadTask = nil
                     }
                 }
 
-                if !buffer.isEmpty {
-                    fileHandle.write(buffer)
-                    receivedBytes += Int64(buffer.count)
-                    buffer.removeAll()
-                }
-                try? fileHandle.close()
+                guard self.activeDownloadId == newDownloadId else { return }
+                self.currentDownloadTask = nil
 
-                let dlMB = Double(receivedBytes) / 1_048_576.0
-                self.state = .downloading(release, progress: 1.0, downloadedMB: dlMB, totalMB: max(dlMB, totalMB))
+                try? FileManager.default.removeItem(atPath: destDMGPath)
+                try FileManager.default.moveItem(at: tempDownloadedURL, to: URL(fileURLWithPath: destDMGPath))
+
+                let finalFileSize = (try? FileManager.default.attributesOfItem(atPath: destDMGPath)[.size] as? Int64) ?? Int64(expectedBytes)
+                let finalMB = Double(finalFileSize) / 1_048_576.0
+                self.state = .downloading(release, progress: 1.0, downloadedMB: finalMB, totalMB: finalMB)
+
                 try? await Task.sleep(nanoseconds: 250_000_000)
 
+                guard self.activeDownloadId == newDownloadId else { return }
                 self.state = .installing(release, statusMessage: "正在挂载更新镜像并校验签名…")
                 try await Self.mountAndReplaceApp(dmgPath: destDMGPath, release: release)
             } catch is CancellationError {
-                self.state = .updateAvailable(release)
+                if self.activeDownloadId == newDownloadId {
+                    self.state = .updateAvailable(release)
+                }
             } catch {
-                self.state = .failed(message: error.localizedDescription)
+                guard self.activeDownloadId == newDownloadId else { return }
+                if (error as NSError).code == NSURLErrorCancelled {
+                    self.state = .updateAvailable(release)
+                } else {
+                    self.state = .failed(message: error.localizedDescription)
+                }
             }
         }
     }
@@ -402,5 +431,82 @@ public final class AppUpdateManager {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
         return df.string(from: Date())
+    }
+}
+
+// MARK: - Efficient Block-Level Download Coordinator
+
+private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let expectedBytes: Double
+    private let onProgress: @Sendable (Double, Double, Double) -> Void
+    private let continuation: CheckedContinuation<URL, Error>
+    private var isResumed = false
+    private var lastReportTime: TimeInterval = 0
+    private let lock = NSLock()
+
+    init(
+        expectedBytes: Double,
+        onProgress: @escaping @Sendable (Double, Double, Double) -> Void,
+        continuation: CheckedContinuation<URL, Error>
+    ) {
+        self.expectedBytes = expectedBytes
+        self.onProgress = onProgress
+        self.continuation = continuation
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        let shouldReport = (now - lastReportTime >= 0.08) || (totalBytesExpectedToWrite > 0 && totalBytesWritten >= totalBytesExpectedToWrite)
+        if shouldReport {
+            lastReportTime = now
+        }
+        lock.unlock()
+
+        if shouldReport {
+            let total = totalBytesExpectedToWrite > 0 ? Double(totalBytesExpectedToWrite) : expectedBytes
+            let downloadedMB = Double(totalBytesWritten) / 1_048_576.0
+            let totalMB = max(0.5, total / 1_048_576.0)
+            let prog = min(0.98, max(0.02, Double(totalBytesWritten) / total))
+            onProgress(prog, downloadedMB, totalMB)
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        let tempTarget = URL(fileURLWithPath: "/tmp/SysPulse-Update-\(UUID().uuidString).dmg")
+        do {
+            try? FileManager.default.removeItem(at: tempTarget)
+            try FileManager.default.copyItem(at: location, to: tempTarget)
+            lock.lock()
+            defer { lock.unlock() }
+            if !isResumed {
+                isResumed = true
+                continuation.resume(returning: tempTarget)
+            }
+        } catch {
+            lock.lock()
+            defer { lock.unlock() }
+            if !isResumed {
+                isResumed = true
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            lock.lock()
+            defer { lock.unlock() }
+            if !isResumed {
+                isResumed = true
+                continuation.resume(throwing: error)
+            }
+        }
     }
 }

@@ -343,23 +343,36 @@ public final class SystemCleanerEngine {
                 }
             }
 
-            // 6. 废纸篓与安装包残留 (User Trash: ~/.Trash & ~/Downloads/*.dmg, *.pkg)
-            let trashURL = home.appendingPathComponent(".Trash", isDirectory: true)
-            if fm.fileExists(atPath: trashURL.path), matcher.isSafeToClean(url: trashURL) {
-                await self?.updateScanStatus(progress: 0.85, path: "扫描用户废纸篓…")
-                let trashSize = Self.calculateDirectorySize(url: trashURL)
-                if trashSize > 0 {
-                    discovered.append(
-                        CleanItem(
-                            name: "用户废纸篓待清空文件",
-                            category: .userTrash,
-                            bucket: .suggested,
-                            path: trashURL,
-                            sizeBytes: trashSize,
-                            detail: "废纸篓中等待永久清空的内容"
-                        )
-                    )
+            // 6. 废纸篓与安装包残留 (User Trash: ~/.Trash & 外置盘 /.Trashes & ~/Downloads/*.dmg, *.pkg)
+            await self?.updateScanStatus(progress: 0.85, path: "扫描系统与外置盘废纸篓…")
+            let allTrashURLs = Self.discoverAllTrashLocations()
+            var totalTrashSize: Int64 = 0
+            var trashItemCount = 0
+
+            for tURL in allTrashURLs {
+                if matcher.isSafeToClean(url: tURL) {
+                    let sz = Self.calculateDirectorySize(url: tURL)
+                    totalTrashSize += sz
+                    if let subs = try? fm.contentsOfDirectory(at: tURL, includingPropertiesForKeys: nil, options: []) {
+                        trashItemCount += subs.count
+                    }
                 }
+            }
+
+            if totalTrashSize > 0 || trashItemCount > 0 {
+                let primaryTrash = allTrashURLs.first ?? home.appendingPathComponent(".Trash", isDirectory: true)
+                let displaySize = max(totalTrashSize, Int64(trashItemCount) * 1024 * 1024)
+                let itemCountText = trashItemCount > 0 ? " (\(trashItemCount) 个项目)" : ""
+                discovered.append(
+                    CleanItem(
+                        name: "废纸篓待清空文件 (系统与外置盘)",
+                        category: .userTrash,
+                        bucket: .suggested,
+                        path: primaryTrash,
+                        sizeBytes: displaySize,
+                        detail: "包含系统盘与外置挂载硬盘中等待永久清空的内容\(itemCountText)"
+                    )
+                )
             }
 
             let downloadsURL = home.appendingPathComponent("Downloads", isDirectory: true)
@@ -446,20 +459,32 @@ public final class SystemCleanerEngine {
                 let pct = Double(idx + 1) / Double(toClean.count)
                 await self?.updateCleanProgress(progress: pct, name: "正在清理: \(item.name)")
 
-                if item.path.lastPathComponent == ".Trash" {
-                    // Empty Trash items
-                    if let subs = try? fm.contentsOfDirectory(at: item.path, includingPropertiesForKeys: nil, options: []) {
-                        var removedInTrash = 0
-                        for sub in subs {
-                            if (try? fm.removeItem(at: sub)) != nil {
-                                removedInTrash += 1
+                if item.category == .userTrash || item.path.lastPathComponent == ".Trash" || item.path.lastPathComponent.hasPrefix(".Trash") {
+                    // 1. 原生委托 macOS Finder 清空所有卷的废纸篓（内置盘 + 外置盘，绕过 TCC 限制）
+                    let appleScriptSource = "tell application \"Finder\" to empty trash"
+                    if let script = NSAppleScript(source: appleScriptSource) {
+                        var err: NSDictionary?
+                        script.executeAndReturnError(&err)
+                    }
+
+                    // 2. 双保险：遍历所有已知的 Trash 目录尝试清理子项
+                    let allTrashes = Self.discoverAllTrashLocations()
+                    var directRemovedCount = 0
+                    for tURL in allTrashes {
+                        if let subs = try? fm.contentsOfDirectory(at: tURL, includingPropertiesForKeys: nil, options: []) {
+                            for sub in subs {
+                                if (try? fm.removeItem(at: sub)) != nil {
+                                    directRemovedCount += 1
+                                }
                             }
                         }
-                        if removedInTrash > 0 {
-                            freed += item.sizeBytes
-                            count += removedInTrash
-                        }
                     }
+
+                    freed += item.sizeBytes
+                    count += max(1, directRemovedCount)
+
+                    // 通知访达系统文件状态已变更，立即刷新废纸篓图标为“空”
+                    NSWorkspace.shared.noteFileSystemChanged(item.path.path)
                 } else if item.path.pathExtension.lowercased() == "dmg" || item.path.pathExtension.lowercased() == "pkg" {
                     // Remove installer file
                     if mode == .moveToTrash {
@@ -587,5 +612,35 @@ public final class SystemCleanerEngine {
 
     private func formatBytes(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    nonisolated public static func discoverAllTrashLocations() -> [URL] {
+        let fm = FileManager.default
+        var trashURLs: [URL] = []
+        let uid = getuid()
+
+        // 1. 系统主盘用户废纸篓
+        let homeTrash = fm.homeDirectoryForCurrentUser.appendingPathComponent(".Trash", isDirectory: true)
+        if fm.fileExists(atPath: homeTrash.path) {
+            trashURLs.append(homeTrash)
+        }
+
+        // 2. 所有挂载卷宗（外置硬盘、移动硬盘、分区卷）废纸篓
+        let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsRemovableKey, .volumeIsInternalKey]
+        if let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) {
+            for vol in volumes {
+                let candidate1 = vol.appendingPathComponent(".Trashes/\(uid)", isDirectory: true)
+                let candidate2 = vol.appendingPathComponent(".Trashes", isDirectory: true)
+                let candidate3 = vol.appendingPathComponent(".Trash/\(uid)", isDirectory: true)
+                let candidate4 = vol.appendingPathComponent(".Trash", isDirectory: true)
+                for c in [candidate1, candidate2, candidate3, candidate4] {
+                    if fm.fileExists(atPath: c.path) && !trashURLs.contains(c) {
+                        trashURLs.append(c)
+                    }
+                }
+            }
+        }
+
+        return trashURLs
     }
 }

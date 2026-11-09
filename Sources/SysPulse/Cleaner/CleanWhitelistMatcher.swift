@@ -61,6 +61,11 @@ public struct CleanWhitelistMatcher: Sendable {
             return false
         }
 
+        // 4.1 Explicitly allow Trash folders on all volumes (Internal ~/.Trash and External /.Trashes)
+        if path.contains("/.Trashes/") || path.hasSuffix("/.Trashes") || path.contains("/.Trash/") || path.hasSuffix("/.Trash") {
+            return true
+        }
+
         // 5. Must match one of our designated safe cleanup zones
         let home = fm.homeDirectoryForCurrentUser.standardized.path
         let allowedZones = [

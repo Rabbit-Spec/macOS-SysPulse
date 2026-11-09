@@ -70,6 +70,7 @@ public struct AppUpdateModalView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeInOut(duration: 0.22), value: updater.state.stateKey)
         }
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -148,7 +149,7 @@ public struct AppUpdateModalView: View {
                 .pointingHandOnHover()
 
                 Button {
-                    updater.checkForUpdates(userInitiated: false)
+                    updater.checkForUpdates(userInitiated: false, forceRefresh: true)
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -272,7 +273,9 @@ public struct AppUpdateModalView: View {
                 Spacer()
 
                 Button {
-                    updater.downloadAndInstall(release)
+                    withAnimation(.snappy(duration: 0.25)) {
+                        updater.downloadAndInstall(release)
+                    }
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.down.circle.fill")
@@ -402,7 +405,7 @@ public struct AppUpdateModalView: View {
                 .pointingHandOnHover()
 
                 Button {
-                    updater.checkForUpdates(userInitiated: false)
+                    updater.checkForUpdates(userInitiated: false, forceRefresh: true)
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.clockwise")

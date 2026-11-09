@@ -545,7 +545,12 @@ public struct StorageCleanerSection: View {
             }
 
             Button {
-                NSWorkspace.shared.selectFile(item.path.path, inFileViewerRootedAtPath: item.path.deletingLastPathComponent().path)
+                if item.category == .userTrash || item.path.lastPathComponent == ".Trash" || item.path.path.contains("/.Trashes") {
+                    let script = "tell application \"Finder\"\nactivate\nopen trash\nend tell"
+                    NSAppleScript(source: script)?.executeAndReturnError(nil)
+                } else {
+                    NSWorkspace.shared.selectFile(item.path.path, inFileViewerRootedAtPath: item.path.deletingLastPathComponent().path)
+                }
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "arrow.up.forward.square")
