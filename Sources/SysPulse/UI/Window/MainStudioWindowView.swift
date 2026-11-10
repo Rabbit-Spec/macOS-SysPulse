@@ -997,7 +997,7 @@ private struct StatusOverviewSection: View {
     private var fanCard: some View {
         let fan = FanController.shared
         let rpm = fan.currentRPM
-        let pct = Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))
+        let pct = rpm <= 0 ? 0 : min(100, max(1, Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))))
 
         return cardBackground(id: "fan") {
             if fan.isFanSupported {
@@ -2290,6 +2290,24 @@ private struct CustomizationTogglesSection: View {
                         permissions.requestAutomationPermission()
                     }
                 )
+
+                Divider().overlay(theme.dividerColor.opacity(0.5))
+
+                permissionRow(
+                    icon: "fan.fill",
+                    iconColor: .orange,
+                    title: "风扇控制特权授权 (SMC Helper)",
+                    description: "在手动降温或强冷模式下写入 AppleSMC 调节风扇转速，安装一次可跨后续版本复用",
+                    status: permissions.fanHelperStatus,
+                    actionTitle: permissions.fanHelperStatus.isAuthorized ? "已授权" : "请求系统授权",
+                    action: {
+                        permissions.requestFanHelperPermission()
+                    }
+                )
+
+                Divider().overlay(theme.dividerColor.opacity(0.5))
+
+                launchAtLoginPermissionRow
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.pillFill))
@@ -2349,6 +2367,67 @@ private struct CustomizationTogglesSection: View {
             .buttonStyle(.plain)
             .pointingHandOnHover()
             .disabled(status.isAuthorized)
+        }
+    }
+
+    private var launchAtLoginPermissionRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "power.circle.fill")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.green)
+                .frame(width: 26, height: 26)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("开机自启动授权 (Login Items)")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(theme.primaryText)
+
+                    Text(permissions.launchAtLoginStatus.title)
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(permissions.launchAtLoginStatus.isAuthorized ? .green : .orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            Capsule().fill((permissions.launchAtLoginStatus.isAuthorized ? Color.green : Color.orange).opacity(0.15))
+                        )
+                }
+
+                Text("默认开启 · 系统登录后自动在后台启动 SysPulse 并恢复菜单栏监控与断电保护")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(theme.secondaryText)
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                if permissions.launchAtLoginStatus == .denied {
+                    Button {
+                        permissions.openLoginItemsSettings()
+                    } label: {
+                        Text("前往登录项允许")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4.5)
+                            .background(Capsule().fill(Color.orange))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                }
+
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { permissions.isLaunchAtLoginEnabled },
+                        set: { permissions.setLaunchAtLogin($0) }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .pointingHandOnHover()
+            }
         }
     }
 

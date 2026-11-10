@@ -136,6 +136,13 @@ def format_and_print_report(raw_json, target_profile):
         print(raw_json, flush=True)
         return
 
+    counts = report.get("counts", {})
+    fwd_in = counts.get("forwarded_in", 0)
+    fwd_out = counts.get("forwarded_out", 0)
+    mutated_seqs = report.get("unique_mutated_sequences", 0)
+    confirmed = bool(report.get("high_target_confirmed", False))
+    restoration_errors = report.get("restoration_errors", [])
+
     # 1. 响应BANG协议确认
     ps5_msgs = report.get("ps5_messages", [])
     bang_msg = next((m for m in ps5_msgs if m.get("type") == "BANG"), None)
@@ -143,34 +150,45 @@ def format_and_print_report(raw_json, target_profile):
         v = bang_msg.get("version", 20)
         print(f"[响应] 📡 收到 PS5 确认响应 (BANG v{v} · Key Accepted)", flush=True)
 
-    # 2. 检查成功状态与码率上限
+    # 2. 检查真实目标码率与确认状态
     target_raw = 0
     for m in ps5_msgs:
         if m.get("type") == "CONNECTIONQUALITY" and m.get("target_bitrate_raw"):
             target_raw = m.get("target_bitrate_raw")
             break
 
-    target_mbps = round(target_raw / 1_000_000, 2) if target_raw else (float(target_profile) * 0.97)
-
-    if report.get("high_target_confirmed") or target_raw > 0:
-        print("[成功] 🎉 PS5 已确认并接受高码率协商！", flush=True)
-        print("[路由] 🔄 局域网直连路由已平滑复原，进入纯 Wi-Fi 串流状态。", flush=True)
-
-    # 3. 输出美化结构化树状遥测报告
-    counts = report.get("counts", {})
-    fwd_in = counts.get("forwarded_in", 0)
-    fwd_out = counts.get("forwarded_out", 0)
+    target_mbps = round(target_raw / 1_000_000, 2) if target_raw else 0.0
     offset = report.get("candidate_plaintext_offset", 334)
     hex_bytes = report.get("xor_bytes_hex", "03501b0005")
     report_dir = report.get("directory", "")
     rel_dir = report_dir.split("Plugins/PSPortal/")[-1] if "Plugins/PSPortal/" in report_dir else report_dir
 
+    if mutated_seqs > 0 and confirmed:
+        print("[成功] 🎉 PS5 已确认并接受高码率协商！", flush=True)
+        print("[路由] 🔄 局域网直连路由已平滑复原，进入纯 Wi-Fi 串流状态。", flush=True)
+        status_line = f"✅ {target_profile} Mbps Profile (PS5 锁定上限: {target_mbps if target_mbps > 0 else round(float(target_profile) * 0.97, 1)} Mbps)"
+        inject_line = f"成功修改 {mutated_seqs} 个序列启动包 (Offset {offset} · Hex {hex_bytes})"
+        quality_line = "连续捕获 3 次高码率质量回报 (Quality Confirmed)"
+    elif mutated_seqs > 0:
+        print("[警告] ⚠️ 已发送码率注入，但未收到 PS5 连续 3 次高码率质量确认。", flush=True)
+        status_line = f"⚠️ 未确认目标码率 (注入已发送，PS5 回报: {target_mbps} Mbps)" if target_mbps > 0 else "⚠️ 未确认目标码率 (未收到 PS5 质量确认)"
+        inject_line = f"已修改 {mutated_seqs} 个序列启动包 (Offset {offset} · Hex {hex_bytes})"
+        quality_line = "未满足连续 3 次高码率回报阈值"
+    else:
+        print("[失败] ⚠️ 未检测到 PS Portal 握手请求（可能处于休眠或未点击连接 PS5），本次未修改码率。", flush=True)
+        status_line = "❌ 未生效 (未捕获到握手启动包，请唤醒 Portal 并点击连接 PS5)"
+        inject_line = "未检测到 LaunchSpec 启动包 (修改 0 个)"
+        quality_line = "未收到 PS5 质量回报"
+
+    # 3. 输出真实结构化树状遥测报告
     print("----------------------------------------------------------------------", flush=True)
     print("📊 【PS Portal 串流画质增强报告】", flush=True)
-    print(f"├─ 协商状态: ✅ {target_profile} Mbps Profile (PS5 锁定上限: {target_mbps} Mbps)", flush=True)
+    print(f"├─ 协商状态: {status_line}", flush=True)
     print(f"├─ 流量统计: 下行转发 {fwd_in:,} 包 | 上行转发 {fwd_out:,} 包", flush=True)
-    print(f"├─ 启动注入: 成功修改 1 个序列启动包 (Offset {offset} · Hex {hex_bytes})", flush=True)
-    print(f"├─ 链路质量: 连续捕获 3 次高码率质量回报 (Quality Confirmed)", flush=True)
+    print(f"├─ 启动注入: {inject_line}", flush=True)
+    print(f"├─ 链路质量: {quality_line}", flush=True)
+    if restoration_errors:
+        print(f"├─ 路由恢复异常: {restoration_errors}", flush=True)
     print(f"└─ 报告存档: {rel_dir}/report.json", flush=True)
     print("----------------------------------------------------------------------", flush=True)
 
@@ -294,15 +312,17 @@ def main():
             continue
         elif "READY: connect Portal to PS5 now" in line:
             print("----------------------------------------------------------------------", flush=True)
-            print("[准备] ⚡️ 网络协商就绪！请在 PS Portal 上点击连接 PS5...", flush=True)
+            print("[准备] ⚡️ 网络协商就绪！请在 120 秒内在 PS Portal 上点击连接 PS5...", flush=True)
         elif "Startup packet modified; waiting for PS5 response" in line:
             print(f"[注入] 🎯 截获并修改 LaunchSpec 握手参数为 {target_profile} Mbps！", flush=True)
         elif "PS5 reported high target bitrate. Restoring direct connection" in line:
             pass
         elif "Stream detected without modified startup" in line:
             print("[警告] ⚠️ 检测到未修改的旧串流会话，请先断开 Portal 重试...", flush=True)
-        elif "Report:" in line or "Target confirmed" in line or "NOT APPLIED" in line or "RESTORATION FAILED" in line:
+        elif "Report:" in line or "Target confirmed" in line:
             pass
+        elif "NOT APPLIED" in line or "UNCONFIRMED" in line or "RESTORATION FAILED" in line:
+            print(line, flush=True)
         else:
             print(line, flush=True)
 

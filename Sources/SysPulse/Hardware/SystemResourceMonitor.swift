@@ -126,6 +126,7 @@ public struct SystemHardwareExtendedMetrics: Equatable, Sendable {
     public var fanSpeedRPM: Int = 1000
     public var fanMinRPM: Int = 1000
     public var fanMaxRPM: Int = 3500
+    public var fanCount: Int = 1
     public var isFanSupported: Bool = true
     public var diskUsagePercent: Int = 12
     public var networkUploadBytesPerSec: Double = 0.0
@@ -300,18 +301,18 @@ public final class SystemResourceMonitor {
         }
     }
 
-    public func triggerImmediateRefresh() {
+    public func triggerImmediateRefresh(force: Bool = true) {
         let state = sampler
         workerQueue.async { [weak self] in
-            self?.pollOnBackgroundQueue(state: state)
+            self?.pollOnBackgroundQueue(state: state, force: force)
         }
     }
 
     public func refreshNow() {
-        triggerImmediateRefresh()
+        triggerImmediateRefresh(force: true)
     }
 
-    private nonisolated func pollOnBackgroundQueue(state: BackgroundSamplerState) {
+    private nonisolated func pollOnBackgroundQueue(state: BackgroundSamplerState, force: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -330,7 +331,8 @@ public final class SystemResourceMonitor {
                         needDisk: needDisk,
                         needApps: needApps,
                         needRuntime: needRuntime,
-                        upsTelemetry: upsTelemetry
+                        upsTelemetry: upsTelemetry,
+                        force: force
                     )
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
@@ -416,13 +418,14 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         needDisk: Bool,
         needApps: Bool,
         needRuntime: Bool,
-        upsTelemetry: UPSTelemetry
+        upsTelemetry: UPSTelemetry,
+        force: Bool = false
     ) -> SnapshotResult {
         var result = SnapshotResult()
         let now = ProcessInfo.processInfo.systemUptime
         tickCount &+= 1
 
-        let shouldSampleBase = isFirstSample || (now - lastBaseSampleTime >= 1.0)
+        let shouldSampleBase = isFirstSample || force || (now - lastBaseSampleTime >= 1.0)
         let shouldSampleProc = isFirstSample || (now - lastProcSampleTime >= 2.0)
         let shouldSampleStorage = isFirstSample || (now - lastDiskStorageSampleTime >= 5.0)
         let shouldSampleInterface = isFirstSample || (now - lastInterfaceKindSampleTime >= 10.0)
@@ -1334,11 +1337,16 @@ private final class BackgroundSamplerState: @unchecked Sendable {
 
         if MacHardwareInfo.shared.isPassiveCoolingModel {
             h.isFanSupported = false
+            h.fanCount = 0
             h.fanSpeedRPM = 0
             h.fanMinRPM = 0
             h.fanMaxRPM = 0
-        } else if let hasFan = smcTelemetry.hasFan {
-            h.isFanSupported = hasFan
+        } else {
+            let fallbackCount = (isLaptop || MacHardwareInfo.shared.platformName.lowercased().contains("studio") || MacHardwareInfo.shared.platformName.lowercased().contains("pro")) ? 2 : 1
+            h.fanCount = smcTelemetry.fanCount ?? fallbackCount
+            if let hasFan = smcTelemetry.hasFan {
+                h.isFanSupported = hasFan
+            }
         }
 
         if !h.isFanSupported {
@@ -1442,54 +1450,24 @@ public struct SMCThermalFanSnapshot: Sendable {
     public var fanRPM: Int?
     public var fanMinRPM: Int?
     public var fanMaxRPM: Int?
+    public var fanCount: Int?
     public var hasFan: Bool?
 }
 
 public final class AppleSMCReader: @unchecked Sendable {
     public static let shared = AppleSMCReader()
 
-    private struct SMCVersion {
-        var major: UInt8 = 0
-        var minor: UInt8 = 0
-        var build: UInt8 = 0
-        var reserved: UInt8 = 0
-        var release: UInt16 = 0
-    }
-
-    private struct SMCPLimitData {
-        var version: UInt16 = 0
-        var length: UInt16 = 0
-        var cpuPLimit: UInt32 = 0
-        var gpuPLimit: UInt32 = 0
-        var memPLimit: UInt32 = 0
-    }
-
-    private struct SMCKeyInfoData {
-        var dataSize: UInt32 = 0
-        var dataType: UInt32 = 0
-        var dataAttributes: UInt8 = 0
-    }
-
-    private struct SMCKeyData {
-        var key: UInt32 = 0
-        var vers = SMCVersion()
-        var pLimitData = SMCPLimitData()
-        var keyInfo = SMCKeyInfoData()
-        var result: UInt8 = 0
-        var status: UInt8 = 0
-        var data8: UInt8 = 0
-        var data32: UInt32 = 0
-        var bytes: (
-            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
-        ) = (
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0
-        )
+    // Exact 80-byte AppleSMC SMCKeyData_t C ABI byte offsets (avoids Swift 76-byte padding discrepancy).
+    private enum SMCLayout {
+        static let totalSize = 80
+        static let keyOffset = 0
+        static let dataSizeOffset = 28
+        static let dataTypeOffset = 32
+        static let resultOffset = 40
+        static let commandOffset = 42
+        static let bytesOffset = 48
+        static let cmdReadBytes: UInt8 = 5
+        static let cmdReadKeyInfo: UInt8 = 9
     }
 
     private let lock = NSLock()
@@ -1527,8 +1505,8 @@ public final class AppleSMCReader: @unchecked Sendable {
 
         var snap = SMCThermalFanSnapshot()
 
-        // 1. CPU Temperature Keys (Apple Silicon M1-M4 & Intel)
-        let cpuKeys = ["Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "TC0P", "TC0E", "TC0F", "TC0D"]
+        // 1. CPU Temperature Keys (Apple Silicon M1-M5 & Intel)
+        let cpuKeys = ["Tp00", "Tp04", "Tp08", "Tp0C", "Tp0G", "Tp0a", "Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "TC0P", "TC0E", "TC0F", "TC0D"]
         var cpuTemps: [Double] = []
         for k in cpuKeys {
             if let t = readTemperature(key: k), t >= 22.0 && t <= 115.0 {
@@ -1540,8 +1518,8 @@ public final class AppleSMCReader: @unchecked Sendable {
             snap.cpuTempC = sum / Double(cpuTemps.count)
         }
 
-        // 2. GPU Temperature Keys
-        let gpuKeys = ["Tg05", "Tg0D", "Tg0P", "Tg0f", "TG0P", "TG0D"]
+        // 2. GPU Temperature Keys (Apple Silicon M1-M5 & Intel)
+        let gpuKeys = ["Tg08", "Tg0C", "Tg0O", "Tg0R", "Tg0a", "Tg05", "Tg0D", "Tg0P", "Tg0f", "TG0P", "TG0D"]
         var gpuTemps: [Double] = []
         for k in gpuKeys {
             if let t = readTemperature(key: k), t >= 22.0 && t <= 115.0 {
@@ -1556,9 +1534,11 @@ public final class AppleSMCReader: @unchecked Sendable {
         // 3. Fan Count & Tachometer Speed
         if MacHardwareInfo.shared.isPassiveCoolingModel {
             snap.hasFan = false
+            snap.fanCount = 0
             snap.fanRPM = 0
         } else if let rawFanNum = readKey(key: "FNum"), rawFanNum.size >= 1 {
             let fanCount = Int(rawFanNum.bytes.0)
+            snap.fanCount = fanCount
             snap.hasFan = (fanCount > 0)
             if fanCount > 0 {
                 var rpms: [Double] = []
@@ -1568,21 +1548,31 @@ public final class AppleSMCReader: @unchecked Sendable {
                     }
                 }
                 if !rpms.isEmpty {
-                    let avgRPM = rpms.reduce(0.0, +) / Double(rpms.count)
-                    snap.fanRPM = Int(round(avgRPM))
+                    let activeRpms = rpms.filter { $0 > 0.0 }
+                    if !activeRpms.isEmpty {
+                        let avgRPM = activeRpms.reduce(0.0, +) / Double(activeRpms.count)
+                        snap.fanRPM = Int(round(avgRPM))
+                    } else {
+                        snap.fanRPM = 0
+                    }
                 }
-                if let mn = readRPM(key: "F0Mn"), mn >= 300.0 && mn <= 4000.0 {
+                if let mn = readRPM(key: "F0mn") ?? readRPM(key: "F0Mn"), mn >= 300.0 && mn <= 4000.0 {
                     snap.fanMinRPM = Int(round(mn))
                 }
-                if let mx = readRPM(key: "F0Mx"), mx >= 1500.0 && mx <= 9000.0 {
+                if let mx = readRPM(key: "F0mx") ?? readRPM(key: "F0Mx"), mx >= 1500.0 && mx <= 9000.0 {
                     snap.fanMaxRPM = Int(round(mx))
                 }
             } else {
                 snap.fanRPM = 0
             }
-        } else if readRPM(key: "F0Ac") == nil && MacHardwareInfo.shared.isLaptop {
-            snap.hasFan = false
-            snap.fanRPM = 0
+        } else if let f0 = readRPM(key: "F0Ac"), f0 >= 0.0 && f0 <= 10000.0 {
+            let f1 = readRPM(key: "F1Ac")
+            snap.fanCount = (f1 != nil) ? 2 : 1
+            snap.hasFan = true
+            let rpms = [f0, f1].compactMap { $0 }.filter { $0 >= 0.0 && $0 <= 10000.0 }
+            if !rpms.isEmpty {
+                snap.fanRPM = Int(round(rpms.reduce(0.0, +) / Double(rpms.count)))
+            }
         }
 
         return snap
@@ -1596,36 +1586,43 @@ public final class AppleSMCReader: @unchecked Sendable {
         return result
     }
 
+    private func writeUInt32LE(_ value: UInt32, into buffer: inout [UInt8], offset: Int) {
+        buffer[offset] = UInt8(value & 0xff)
+        buffer[offset + 1] = UInt8((value >> 8) & 0xff)
+        buffer[offset + 2] = UInt8((value >> 16) & 0xff)
+        buffer[offset + 3] = UInt8((value >> 24) & 0xff)
+    }
+
+    private func readUInt32LE(from buffer: [UInt8], offset: Int) -> UInt32 {
+        UInt32(buffer[offset])
+            | (UInt32(buffer[offset + 1]) << 8)
+            | (UInt32(buffer[offset + 2]) << 16)
+            | (UInt32(buffer[offset + 3]) << 24)
+    }
+
     private func readKey(key: String) -> (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))? {
-        var inData = SMCKeyData()
-        var outData = SMCKeyData()
-        inData.key = fourCC(key)
-        inData.data8 = 9 // SMC_CMD_READ_KEYINFO
+        var inBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
+        var outBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
+        writeUInt32LE(fourCC(key), into: &inBuf, offset: SMCLayout.keyOffset)
+        inBuf[SMCLayout.commandOffset] = SMCLayout.cmdReadKeyInfo
 
-        var outSize = MemoryLayout<SMCKeyData>.stride
-        let kr1 = withUnsafeMutablePointer(to: &inData) { inPtr in
-            withUnsafeMutablePointer(to: &outData) { outPtr in
-                IOConnectCallStructMethod(connection, 2, inPtr, MemoryLayout<SMCKeyData>.stride, outPtr, &outSize)
-            }
-        }
-        guard kr1 == kIOReturnSuccess, outData.result == 0 else { return nil }
+        var outSize = SMCLayout.totalSize
+        let kr1 = IOConnectCallStructMethod(connection, 2, &inBuf, SMCLayout.totalSize, &outBuf, &outSize)
+        guard kr1 == kIOReturnSuccess, outBuf[SMCLayout.resultOffset] == 0 else { return nil }
 
-        let dataType = outData.keyInfo.dataType
-        let dataSize = outData.keyInfo.dataSize
-        inData.keyInfo.dataSize = dataSize
-        inData.data8 = 5 // SMC_CMD_READ_BYTES
+        let dataSize = readUInt32LE(from: outBuf, offset: SMCLayout.dataSizeOffset)
+        let dataType = readUInt32LE(from: outBuf, offset: SMCLayout.dataTypeOffset)
 
-        var valData = SMCKeyData()
-        outSize = MemoryLayout<SMCKeyData>.stride
-        let kr2 = withUnsafeMutablePointer(to: &inData) { inPtr in
-            withUnsafeMutablePointer(to: &valData) { outPtr in
-                IOConnectCallStructMethod(connection, 2, inPtr, MemoryLayout<SMCKeyData>.stride, outPtr, &outSize)
-            }
-        }
-        guard kr2 == kIOReturnSuccess, valData.result == 0 else { return nil }
+        writeUInt32LE(dataSize, into: &inBuf, offset: SMCLayout.dataSizeOffset)
+        inBuf[SMCLayout.commandOffset] = SMCLayout.cmdReadBytes
 
-        let b = valData.bytes
-        return (dataType, dataSize, (b.0, b.1, b.2, b.3))
+        var valBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
+        outSize = SMCLayout.totalSize
+        let kr2 = IOConnectCallStructMethod(connection, 2, &inBuf, SMCLayout.totalSize, &valBuf, &outSize)
+        guard kr2 == kIOReturnSuccess, valBuf[SMCLayout.resultOffset] == 0 else { return nil }
+
+        let b = SMCLayout.bytesOffset
+        return (dataType, dataSize, (valBuf[b], valBuf[b + 1], valBuf[b + 2], valBuf[b + 3]))
     }
 
     private func readTemperature(key: String) -> Double? {

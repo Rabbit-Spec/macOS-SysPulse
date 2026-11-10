@@ -133,18 +133,28 @@ cat << EOF > "$CONTENTS_DIR/Info.plist"
     <string>SysPulse 需要使用蓝牙功能读取妙控键盘、妙控鼠标、触控板及 AirPods 的真实电量状态。</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>SysPulse 需要访问局域网以发现 PS5、PS Portal 及其他局域网网络设备并进行通信测量。</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SysPulse 需要在市电意外断开或用户点击推出时，向系统发送外置磁盘安全推出与断电保护自动化控制指令。</string>
 </dict>
 </plist>
 EOF
 
-echo "🔐 正在对应用包进行代码签名与隔离属性清理 (Designated Requirement: com.rabbit.syspulse)..."
+echo "🔐 正在对应用包进行分层代码签名与隔离属性清理 (Designated Requirement: com.rabbit.syspulse)..."
 /usr/bin/xattr -cr "$BUNDLE_DIR"
-/usr/bin/codesign --force --deep -s - -r='designated => identifier "com.rabbit.syspulse"' "$BUNDLE_DIR"
+if [ -f "$MACOS_DIR/SysPulseUPSHelper" ]; then
+    /usr/bin/codesign --force -s - -i "com.rabbit.syspulse.upshelper" "$MACOS_DIR/SysPulseUPSHelper"
+fi
+if [ -f "$RESOURCES_DIR/Plugins/PSPortal/portal_engine" ]; then
+    /usr/bin/codesign --force -s - -i "com.rabbit.syspulse.portal-engine" "$RESOURCES_DIR/Plugins/PSPortal/portal_engine"
+fi
+/usr/bin/codesign --force -s - -r='designated => identifier "com.rabbit.syspulse"' "$BUNDLE_DIR"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$BUNDLE_DIR"
 
 # 同步纯净 App 到主目录 build 下（文件名不带版本号）
 mkdir -p "$HERE/../build"
 rm -rf "$HERE/../build/$APP_NAME.app"
 cp -R "$BUNDLE_DIR" "$HERE/../build/$APP_NAME.app"
+/usr/bin/codesign --verify --deep --strict "$HERE/../build/$APP_NAME.app"
 
 echo "💿 正在生成可分享的 DMG 安装包 ($APP_NAME-v$VERSION.dmg)..."
 DMG_STAGING="/tmp/syspulse-dmg-staging"

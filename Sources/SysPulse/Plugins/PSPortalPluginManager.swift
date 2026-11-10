@@ -72,17 +72,20 @@ public final class PSPortalPluginManager {
     public var isCheckingForUpdates: Bool = false
     public var updateStatusMessage: String? = nil
     public var logs: [String] = []
-    public var pluginVersion: String = "1.0.0"
+    public var pluginVersion: String = "1.0.1"
     public var pluginAuthor: String = "atameric"
     public var pluginRepo: String = "https://github.com/atameric/ps5-portal-high-bitrate"
     public var installedCommitSHA: String = "4430daa"
     public var installedCommitDate: String = "2026-10-21"
     public var installedCommitMsg: String = "docs: add October 21 Raspberry Pi and mobile update"
     public var lastError: String? = nil
+    public var listenRemainingSeconds: Int? = nil
 
     private var relayProcess: Process?
     private var outputPipe: Pipe?
     private var logWatchTimer: Timer?
+    private var listenCountdownTimer: Timer?
+    private var listenDeadline: Date?
     private var lastLogOffset: UInt64 = 0
 
     private let logFilePath = "/tmp/syspulse_psportal.log"
@@ -138,8 +141,42 @@ public final class PSPortalPluginManager {
         stopRelay()
         logWatchTimer?.invalidate()
         logWatchTimer = nil
+        stopListenCountdown()
         isScanningDevices = false
         discoveredDevices = []
+    }
+
+    private func startListenCountdown(seconds: Int = 120) {
+        listenCountdownTimer?.invalidate()
+        listenDeadline = Date().addingTimeInterval(TimeInterval(seconds))
+        listenRemainingSeconds = seconds
+
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isListening, let deadline = self.listenDeadline else {
+                    self.stopListenCountdown()
+                    return
+                }
+                let remaining = max(0, min(seconds, Int(ceil(deadline.timeIntervalSinceNow))))
+                if self.listenRemainingSeconds != remaining {
+                    self.listenRemainingSeconds = remaining
+                }
+                if remaining <= 0 {
+                    self.listenCountdownTimer?.invalidate()
+                    self.listenCountdownTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        listenCountdownTimer = timer
+    }
+
+    private func stopListenCountdown() {
+        listenCountdownTimer?.invalidate()
+        listenCountdownTimer = nil
+        listenDeadline = nil
+        listenRemainingSeconds = nil
     }
 
     // MARK: - 目录与资源自举
@@ -177,7 +214,7 @@ public final class PSPortalPluginManager {
         {
           "id": "com.syspulse.plugin.psportal",
           "name": "PS Portal 串流画质增强",
-          "version": "1.0.0",
+          "version": "1.0.1",
           "author": "atameric",
           "license": "GPL-3.0",
           "repo": "https://github.com/atameric/ps5-portal-high-bitrate",
@@ -612,8 +649,12 @@ public final class PSPortalPluginManager {
             proc.terminationHandler = { [weak self] _ in
                 Task { @MainActor in
                     guard let self = self else { return }
+                    self.pollLogFile()
                     self.isRunning = false
                     self.isListening = false
+                    self.stopListenCountdown()
+                    self.logWatchTimer?.invalidate()
+                    self.logWatchTimer = nil
                     self.relayProcess = nil
                 }
             }
@@ -702,6 +743,7 @@ public final class PSPortalPluginManager {
                 self.isRunning = false
                 self.isListening = false
                 self.isStreamActive = false
+                self.stopListenCountdown()
                 self.appendLog("[SysPulse] 插件进程已安全退出 (退出码: \(p.terminationStatus))")
             }
         }
@@ -775,19 +817,21 @@ public final class PSPortalPluginManager {
         relayProcess = nil
         isRunning = false
         isListening = false
+        stopListenCountdown()
         appendLog("[SysPulse] 插件已停止，网络路由恢复直连。")
     }
 
     private func evaluateProcessOutput(_ line: String) {
-        if line.contains("READY: connect Portal") || line.contains("EXPERIMENT READY") || line.contains("BASELINE READY") {
+        if line.contains("网络协商就绪") || line.contains("READY: connect Portal") || line.contains("EXPERIMENT READY") || line.contains("BASELINE READY") {
             isListening = true
             isStreamActive = false
-            appendLog("[提示] ⚡️ 官方网络就绪！请立即在 PS Portal 上点击连接您的 PS5！")
-        } else if line.contains("Startup packet modified") {
+            startListenCountdown(seconds: 120)
+        } else if line.contains("Startup packet modified") || line.contains("截获并修改 LaunchSpec") {
             appendLog("[注入] 🎯 截获并成功修改 LaunchSpec 握手参数为 \(targetBitrate.rawValue)！正在等待 PS5 协商确认...")
-        } else if line.contains("PS5 reported high target bitrate") || line.contains("Target confirmed") || line.contains("[ACCEPTED]") {
+        } else if line.contains("PS5 reported high target bitrate") || line.contains("Target confirmed") || line.contains("[ACCEPTED]") || line.contains("已确认并接受高码率协商") {
             isStreamActive = true
             isListening = false
+            stopListenCountdown()
             appendLog("[成功] 🎉 PS5 已确认并接受高码率协商！局域网直连路由已彻底复原！")
 
             // 握手成功并输出报告后，延迟 1.5 秒自动平滑收敛运行状态，将按钮切回“启动画质增强”
@@ -795,30 +839,44 @@ public final class PSPortalPluginManager {
                 guard let self = self else { return }
                 self.isRunning = false
                 self.isListening = false
+                self.stopListenCountdown()
                 self.relayProcess = nil
                 self.logWatchTimer?.invalidate()
                 self.logWatchTimer = nil
             }
+        } else if line.contains("未生效") || line.contains("未检测到 PS Portal 握手请求") || line.contains("NOT APPLIED") {
+            isListening = false
+            isStreamActive = false
+            stopListenCountdown()
+            lastError = "未检测到 PS Portal 握手请求（120 秒内未收到连接，或 Portal 仍处于休眠状态）。"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self = self else { return }
+                self.isRunning = false
+                self.isListening = false
+                self.stopListenCountdown()
+                self.relayProcess = nil
+                self.logWatchTimer?.invalidate()
+                self.logWatchTimer = nil
+            }
+        } else if line.contains("未确认目标码率") || line.contains("UNCONFIRMED") {
+            isListening = false
+            isStreamActive = false
+            stopListenCountdown()
+            lastError = "握手修改已发送，但未能在规定时间内检测到 PS5 连续 3 次高码率遥测确认。"
+        } else if line.contains("RESTORATION FAILED") || line.contains("路由恢复异常") {
+            isListening = false
+            stopListenCountdown()
+            lastError = "网络恢复异常，请检查网络配置。"
         } else if line.contains("报告存档:") || line.contains("report.json") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard let self = self else { return }
                 self.isRunning = false
                 self.isListening = false
+                self.stopListenCountdown()
                 self.relayProcess = nil
                 self.logWatchTimer?.invalidate()
                 self.logWatchTimer = nil
             }
-        } else if line.contains("NOT APPLIED") {
-            isListening = false
-            isStreamActive = false
-            isRunning = false
-            lastError = "未检测到新的握手连接。请断开 Portal，并在出现 READY 后重新连接。"
-        } else if line.contains("UNCONFIRMED") {
-            isListening = false
-            isStreamActive = false
-            lastError = "握手修改已发送，但未能在规定时间内稳定检测到高码率遥测确认。"
-        } else if line.contains("RESTORATION FAILED") {
-            lastError = "网络恢复异常，请检查网络配置。"
         }
     }
 

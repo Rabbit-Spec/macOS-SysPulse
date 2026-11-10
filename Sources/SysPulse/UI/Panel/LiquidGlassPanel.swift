@@ -445,7 +445,7 @@ public struct LiquidGlassPanel: View {
 
     private var fanMetricCard: some View {
         let rpm = fan.currentRPM
-        let pct = Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))
+        let pct = rpm <= 0 ? 0 : min(100, max(1, Int(round(Double(rpm) / Double(max(1, fan.maxRPM)) * 100.0))))
 
         return metricCardContainer {
             if fan.isFanSupported {

@@ -241,10 +241,13 @@ public final class SystemDiagnosticsCollector {
         let gpuTemp = Int(round(monitor.hardware.gpuTemperatureC))
         let temperatureSensors = "CPU \(cpuTemp)°C · GPU \(gpuTemp)°C"
 
-        let fanCount = Self.detectFanCount()
+        let fanCount = Self.detectFanCount(from: monitor.hardware)
         let fansSummary: String = {
             if fanCount <= 0 || !monitor.hardware.isFanSupported {
                 return "0 fans detected · passive cooling"
+            }
+            if monitor.hardware.fanSpeedRPM <= 0 {
+                return "\(fanCount) fans detected · 0 RPM (standby)"
             }
             return "\(fanCount) fans detected · primary \(monitor.hardware.fanSpeedRPM) RPM"
         }()
@@ -421,7 +424,13 @@ public final class SystemDiagnosticsCollector {
         return "\(screens.count) connected · \(w)×\(h) @ \(scale)x"
     }
 
-    private static func detectFanCount() -> Int {
+    private static func detectFanCount(from hardware: SystemHardwareExtendedMetrics) -> Int {
+        if MacHardwareInfo.shared.isPassiveCoolingModel || !hardware.isFanSupported {
+            return 0
+        }
+        if hardware.fanCount > 0 {
+            return hardware.fanCount
+        }
         let isLaptop = MacHardwareInfo.shared.isLaptop
         let brand = MacHardwareInfo.shared.platformName.lowercased()
         if brand.contains("air") {

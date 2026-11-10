@@ -515,18 +515,15 @@ struct SysPulseApp {
                 to: "/tmp/poster_overview_dark.png"
             )
 
-            // 1B. Smart Cleaner Scanned Results (Dark) for Hero Right Card
-            StudioWindowNavigationState.shared.selectedTab = .cleaner
-            SystemCleanerEngine.shared.startScan()
-            let cleanDeadline = Date().addingTimeInterval(4.5)
-            while SystemCleanerEngine.shared.isScanning && Date() < cleanDeadline {
-                RunLoop.current.run(until: Date().addingTimeInterval(0.15))
-            }
+            // 1B. Module Center (Dark) for Hero Right Card
+            StudioWindowNavigationState.shared.selectedTab = .plugins
+            PSPortalPluginManager.shared.activePluginType = nil
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
             captureView(
                 MainStudioWindowView().environment(\.colorScheme, .dark).frame(width: 1200, height: 822),
                 width: 1200,
                 height: 822,
-                to: "/tmp/poster_cleaner_dark.png"
+                to: "/tmp/poster_plugins_dark.png"
             )
 
             // 2. Popover (Light)

@@ -27,15 +27,15 @@ public struct SysPulsePromoPosterView: View {
                     HStack(spacing: 24) {
                         rightBottomSubCard(
                             imagePath: "/tmp/poster_network_light.png",
-                            fallbackTitle: "网络监控与链路诊断",
-                            caption: "网络监控与链路诊断"
+                            fallbackTitle: "网络监控与测速诊断",
+                            caption: "网络监控与测速诊断"
                         )
                         .frame(width: 468, height: 346)
 
                         rightBottomSubCard(
                             imagePath: "/tmp/poster_diagnostics_light.png",
-                            fallbackTitle: "系统诊断与 OTA 更新",
-                            caption: "系统诊断与 OTA 更新"
+                            fallbackTitle: "系统诊断与更新检查",
+                            caption: "系统诊断与更新检查"
                         )
                         .frame(width: 468, height: 346)
                     }
@@ -91,13 +91,27 @@ public struct SysPulsePromoPosterView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 )
 
-            VStack(spacing: 16) {
-                Text("SysPulse")
-                    .font(.system(size: 82, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .shadow(color: Color.black.opacity(0.12), radius: 8, y: 3)
+            VStack(spacing: 14) {
+                HStack(alignment: .center, spacing: 18) {
+                    Text("SysPulse")
+                        .font(.system(size: 82, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .shadow(color: Color.black.opacity(0.12), radius: 8, y: 3)
 
-                Text("轻于颜表，深于内在 · 让系统状态如玻璃般清透，让运行空间如初次开箱")
+                    Text("v0.1.7")
+                        .font(.system(size: 28, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Color.white.opacity(0.22))
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1.2))
+                        )
+                        .offset(y: 4)
+                }
+
+                Text("macOS (Apple Silicon) 原生系统监测、清理与扩展模块管理工具")
                     .font(.system(size: 31, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.97))
                     .shadow(color: Color.black.opacity(0.10), radius: 4, y: 2)
@@ -152,13 +166,16 @@ public struct SysPulsePromoPosterView: View {
                             .font(.system(size: 15, weight: .bold))
                         Text("SysPulse")
                             .font(.system(size: 14.5, weight: .bold, design: .rounded))
-                        Text("状态总览")
+                        Text("状态")
                             .font(.system(size: 14, weight: .medium))
                             .opacity(0.85)
-                        Text("网络监控")
+                        Text("网络")
                             .font(.system(size: 14, weight: .medium))
                             .opacity(0.75)
-                        Text("智能清理")
+                        Text("清理")
+                            .font(.system(size: 14, weight: .medium))
+                            .opacity(0.75)
+                        Text("模块")
                             .font(.system(size: 14, weight: .medium))
                             .opacity(0.75)
                     }
@@ -214,8 +231,8 @@ public struct SysPulsePromoPosterView: View {
                             .shadow(color: Color.black.opacity(0.45), radius: 22, y: 10)
                     }
 
-                    if let cleanerImg = Self.loadImage(at: "/tmp/poster_cleaner_dark.png") {
-                        Image(nsImage: cleanerImg)
+                    if let pluginsImg = Self.loadImage(at: "/tmp/poster_plugins_dark.png") {
+                        Image(nsImage: pluginsImg)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: 696, height: 477)
@@ -230,7 +247,7 @@ public struct SysPulsePromoPosterView: View {
 
                 Spacer(minLength: 12)
 
-                HStack(spacing: 20) {
+                HStack(spacing: 14) {
                     heroDockTile(
                         title: "状态总览",
                         subtitle: "硬件遥测与能耗排行",
@@ -245,25 +262,31 @@ public struct SysPulsePromoPosterView: View {
                     )
                     heroDockTile(
                         title: "智能清理",
-                        subtitle: "缓存日志安全净空",
+                        subtitle: "缓存日志安全清理",
                         icon: "sparkles",
                         colors: [Color(red: 0.96, green: 0.36, blue: 0.52), Color(red: 0.85, green: 0.24, blue: 0.42)]
                     )
                     heroDockTile(
                         title: "应用卸载",
-                        subtitle: "深层残留彻底根除",
+                        subtitle: "应用与关联残留清理",
                         icon: "trash.slash.fill",
                         colors: [Color(red: 0.45, green: 0.42, blue: 0.96), Color(red: 0.30, green: 0.25, blue: 0.85)]
                     )
                     heroDockTile(
                         title: "空间分析",
-                        subtitle: "大文件与深层占用",
+                        subtitle: "大文件与目录分布",
                         icon: "chart.pie.fill",
                         colors: [Color(red: 0.16, green: 0.78, blue: 0.54), Color(red: 0.08, green: 0.58, blue: 0.40)]
                     )
+                    heroDockTile(
+                        title: "模块中心",
+                        subtitle: "按需启停四大模块",
+                        icon: "square.grid.2x2.fill",
+                        colors: [Color(red: 0.58, green: 0.34, blue: 0.92), Color(red: 0.38, green: 0.22, blue: 0.76)]
+                    )
                 }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 16)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
                 .background(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .fill(Color.white.opacity(0.14))
@@ -279,26 +302,27 @@ public struct SysPulsePromoPosterView: View {
     }
 
     private func heroDockTile(title: String, subtitle: String, icon: String, colors: [Color]) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 52, height: 52)
+                    .frame(width: 44, height: 44)
                 Image(systemName: icon)
-                    .font(.system(size: 24, weight: .bold))
+                    .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.white)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Text(subtitle)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
                     .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
             }
         }
-        .frame(width: 244, height: 84)
+        .frame(width: 214, height: 80)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.black.opacity(0.26))
@@ -313,7 +337,7 @@ public struct SysPulsePromoPosterView: View {
 
     private var leftMenuBarCard: some View {
         VStack(spacing: 16) {
-            Text("菜单栏灵动悬浮窗")
+            Text("菜单栏悬浮窗")
                 .font(.system(size: 38, weight: .bold, design: .rounded))
                 .foregroundStyle(primaryText)
                 .padding(.top, 26)
@@ -331,7 +355,7 @@ public struct SysPulsePromoPosterView: View {
                 Text("双行等宽实时遥测")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
-                Text("快捷操控、一键释放")
+                Text("快捷操控与状态查看")
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
             }
@@ -399,12 +423,12 @@ public struct SysPulsePromoPosterView: View {
                 )
 
             VStack(spacing: 14) {
-                Text("3 合 1 净空引擎")
-                    .font(.system(size: 86, weight: .bold, design: .rounded))
+                Text("3 合 1 清理分析")
+                    .font(.system(size: 82, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .shadow(color: Color.black.opacity(0.28), radius: 10, y: 4)
 
-                Text("智能清理 · 应用卸载 · 磁盘空间透视")
+                Text("智能清理 · 应用卸载 · 空间分析")
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.96))
                     .shadow(color: Color.black.opacity(0.25), radius: 6, y: 2)
@@ -517,18 +541,18 @@ public struct SysPulsePromoPosterView: View {
                 .foregroundStyle(primaryText)
 
             HStack(spacing: 8) {
-                Text("静")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(primaryText)
-                    .frame(width: 44, height: 44)
-
                 Text("自")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundStyle(Color(red: 0.22, green: 0.62, blue: 0.98))
                     .frame(width: 48, height: 48)
                     .background(Circle().fill(Color(red: 0.10, green: 0.12, blue: 0.16)))
 
-                Text("极")
+                Text("降")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundStyle(primaryText)
+                    .frame(width: 44, height: 44)
+
+                Text("强")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
                     .frame(width: 44, height: 44)
@@ -548,16 +572,16 @@ public struct SysPulsePromoPosterView: View {
     }
 
     private var bottomNativeArchCard: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 8) {
             Text("AppleSMC 传感器")
                 .font(.system(size: 31, weight: .bold, design: .rounded))
                 .foregroundStyle(primaryText)
 
-            Text("毫秒级")
-                .font(.system(size: 60, weight: .heavy, design: .rounded))
+            Text("原生直读")
+                .font(.system(size: 54, weight: .heavy, design: .rounded))
                 .foregroundStyle(Color(red: 0.22, green: 0.62, blue: 0.98))
 
-            Text("Swift 6 原生零臃肿")
+            Text("Swift 6 原生架构")
                 .font(.system(size: 31, weight: .bold, design: .rounded))
                 .foregroundStyle(primaryText)
         }
@@ -591,7 +615,7 @@ public struct SysPulsePromoPosterView: View {
                 Text("MIT 开源")
                     .font(.system(size: 31, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
-                Text("纯净无广")
+                Text("零遥测")
                     .font(.system(size: 31, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
             }
@@ -613,6 +637,7 @@ public struct SysPulsePromoPosterView: View {
     private static func loadResourceImage(named name: String) -> NSImage? {
         let candidates: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
+            "/Volumes/巨无霸/SPEC/v0.1.7/Resources/\(name).png",
             "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
             "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png"
         ]

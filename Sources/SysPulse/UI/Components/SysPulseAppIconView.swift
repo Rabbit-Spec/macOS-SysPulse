@@ -542,7 +542,7 @@ public struct SpinningFanIconView: View {
     public var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            let degPerSec = max(110.0, min(720.0, Double(max(600, rpm)) / 1000.0 * 145.0))
+            let degPerSec = rpm <= 0 ? 0.0 : max(110.0, min(720.0, Double(rpm) / 1000.0 * 145.0))
             let angle = (t * degPerSec).truncatingRemainder(dividingBy: 360.0)
 
             Image(systemName: "fan.fill")

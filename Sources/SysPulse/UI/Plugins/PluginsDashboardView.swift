@@ -2291,6 +2291,33 @@ public struct PluginsDashboardView: View {
                 .pointingHandOnHover()
             }
 
+            if let errorText = pluginManager.lastError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.orange)
+                    Text(errorText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Button {
+                        pluginManager.lastError = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.orange.opacity(colorScheme == .dark ? 0.14 : 0.10))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.35), lineWidth: 0.8))
+                )
+            }
+
             Divider()
                 .opacity(0.2)
 
@@ -2464,9 +2491,16 @@ public struct PluginsDashboardView: View {
                 .fill(Color.orange)
                 .frame(width: 8, height: 8)
 
-            Text("正在监听握手...")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(Color.orange)
+            if let remaining = pluginManager.listenRemainingSeconds {
+                Text("正在监听握手 · \(remaining)s")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.orange)
+            } else {
+                Text("正在准备路径...")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.orange)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -2488,6 +2522,10 @@ public struct PluginsDashboardView: View {
                     Text("实时通信与握手遥测")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(theme.primaryText)
+
+                    if pluginManager.isListening {
+                        statusBadgeView
+                    }
                 }
 
                 Spacer()
@@ -2533,10 +2571,20 @@ public struct PluginsDashboardView: View {
                                 .foregroundStyle(Color.white.opacity(0.55))
                                 .padding(.vertical, 8)
                         } else {
+                            let activeReadyIdx = pluginManager.logs.lastIndex(where: { $0.hasPrefix("[准备] ⚡️ 网络协商就绪") })
                             ForEach(Array(pluginManager.logs.enumerated()), id: \.offset) { idx, line in
-                                Text(line)
+                                let displayLine: String = {
+                                    if pluginManager.isListening,
+                                       idx == activeReadyIdx,
+                                       let remaining = pluginManager.listenRemainingSeconds {
+                                        return "[准备] ⚡️ 网络协商就绪！请在 \(remaining) 秒内在 PS Portal 上点击连接 PS5..."
+                                    }
+                                    return line
+                                }()
+                                Text(displayLine)
                                     .font(.system(size: 12, design: .monospaced))
-                                    .foregroundStyle(logColor(for: line))
+                                    .monospacedDigit()
+                                    .foregroundStyle(logColor(for: displayLine))
                                     .textSelection(.enabled)
                                     .id(idx)
                             }

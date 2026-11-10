@@ -1,7 +1,7 @@
 {
   "id": "com.syspulse.plugin.psportal",
   "name": "PS Portal 串流画质增强",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "installedCommitSHA": "4430daa",
   "installedCommitDate": "2026-10-21",
   "installedCommitMsg": "docs: add October 21 Raspberry Pi and mobile update",

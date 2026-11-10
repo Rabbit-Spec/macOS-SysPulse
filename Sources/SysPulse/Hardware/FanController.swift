@@ -92,10 +92,21 @@ public final class FanController {
     }
 
     private var autoRestoreTimer: Timer?
+    private var keepAliveTimer: Timer?
     private var lastModeChangeAt: Date = Date()
 
     private init() {
         refreshFanStats()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.activeMode != .auto else { return }
+                _ = Self.runInstalledHelperSilently(percent: 0)
+            }
+        }
     }
 
     public func setMode(_ mode: FanMode) {
@@ -108,26 +119,73 @@ public final class FanController {
             self.statusText = mode.strategyText
             self.autoRestoreTimer?.invalidate()
             self.autoRestoreTimer = nil
+            self.keepAliveTimer?.invalidate()
+            self.keepAliveTimer = nil
             restoreAutoFanControl()
             self.isTransitioning = false
             return
         }
 
         // Cool or MaxCool mode:
-        // 1. Try silent setuid helper or root execution first
-        if Self.runInstalledHelperSilently(percent: mode.targetPercent) {
+        // 1. Only use installed helper silently if it matches the latest bundled binary (prevents stale 0.1.7 helper)
+        if Self.isInstalledHelperUpToDate() {
+            let pct = mode.targetPercent
             self.needsAuthorization = false
-            self.statusText = mode.strategyText
-            self.isTransitioning = false
-            setupAutoRestoreTimer()
-            SystemResourceMonitor.shared.refreshNow()
+            self.statusText = "正在调节风扇…"
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let ok = Self.runInstalledHelperSilently(percent: pct)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.isTransitioning = false
+                    if ok && self.activeMode == mode {
+                        self.needsAuthorization = false
+                        self.statusText = mode.strategyText
+                        self.setupAutoRestoreTimer()
+                        self.setupKeepAliveTimer(percent: pct)
+                        self.schedulePostSwitchRefreshes()
+                    } else if !ok {
+                        self.needsAuthorization = true
+                        self.statusText = "正在请求更新控速组件…"
+                        self.tryApplyPrivilegedFanControl(mode: mode)
+                    }
+                }
+            }
             return
         }
 
-        // 2. Helper not yet installed: request one-time administrator authorization to install & apply
+        // 2. Helper missing or outdated: request administrator authorization to install/update & apply
         self.needsAuthorization = true
         self.statusText = "正在请求授权…"
         tryApplyPrivilegedFanControl(mode: mode)
+    }
+
+    private func setupKeepAliveTimer(percent: Int) {
+        keepAliveTimer?.invalidate()
+        let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.activeMode != .auto, !self.needsAuthorization else {
+                    self?.keepAliveTimer?.invalidate()
+                    self?.keepAliveTimer = nil
+                    return
+                }
+                let currentPct = self.activeMode.targetPercent
+                DispatchQueue.global(qos: .utility).async {
+                    _ = Self.runInstalledHelperSilently(percent: currentPct)
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keepAliveTimer = timer
+    }
+
+    private func schedulePostSwitchRefreshes() {
+        SystemResourceMonitor.shared.refreshNow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            SystemResourceMonitor.shared.refreshNow()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            SystemResourceMonitor.shared.refreshNow()
+        }
     }
 
     private func setupAutoRestoreTimer() {
@@ -177,45 +235,48 @@ public final class FanController {
     }
 
     private func tryApplyPrivilegedFanControl(mode: FanMode) {
-        let bundledPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
-        let fallbackPath = "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
-        let sourceHelper = FileManager.default.isExecutableFile(atPath: bundledPath) ? bundledPath : fallbackPath
-        let installedDir = "/Library/Application Support/SysPulse"
-        let installedHelper = "\(installedDir)/SysPulseUPSHelper"
         let pct = mode.targetPercent
 
-        let shellCmd = "mkdir -p '\(installedDir)' && cp -f '\(sourceHelper)' '\(installedHelper)' && chown root:wheel '\(installedHelper)' && chmod 4755 '\(installedHelper)' && '\(installedHelper)' --fan \(pct)"
-        let script = "do shell script \"\(shellCmd)\" with administrator privileges"
-
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            proc.arguments = ["-e", script]
-            var succeeded = false
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                succeeded = (proc.terminationStatus == 0)
-            } catch {
-                succeeded = false
-            }
+            let succeeded = SystemPermissionManager.installPrivilegedHelper(additionalFanPercent: pct)
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isTransitioning = false
+                SystemPermissionManager.shared.checkFanHelperPermission()
                 if succeeded {
                     self.needsAuthorization = false
                     self.statusText = mode.strategyText
                     self.lastModeChangeAt = Date()
                     self.setupAutoRestoreTimer()
-                    SystemResourceMonitor.shared.refreshNow()
+                    self.setupKeepAliveTimer(percent: pct)
+                    self.schedulePostSwitchRefreshes()
                 } else {
                     self.activeMode = .auto
+                    self.keepAliveTimer?.invalidate()
+                    self.keepAliveTimer = nil
                     self.needsAuthorization = true
                     self.statusText = "未更改，需要授权"
                 }
             }
         }
+    }
+
+    public func syncAuthorizationGranted() {
+        if needsAuthorization {
+            needsAuthorization = false
+            if activeMode == .auto {
+                statusText = activeMode.strategyText
+            }
+        }
+    }
+
+    nonisolated private static func isInstalledHelperUpToDate() -> Bool {
+        if SystemPermissionManager.checkInstalledFanHelperStatus() == .authorized {
+            return true
+        }
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
+        return geteuid() == 0 && FileManager.default.isExecutableFile(atPath: bundled)
     }
 
     nonisolated private static func runInstalledHelperSilently(percent: Int) -> Bool {

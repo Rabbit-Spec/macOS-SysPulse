@@ -127,6 +127,37 @@ static double smcDecodeRPM(const SMCKeyData_t *val) {
     return 0.0;
 }
 
+static int smcKeyExists(io_connect_t conn, const char *keyStr, SMCKeyData_t *outVal) {
+    return smcReadKey(conn, keyStr, outVal) == kIOReturnSuccess;
+}
+
+static int resolveFanKey(io_connect_t conn, int idx, const char *lowerFmt, const char *upperFmt, char *resolvedKey, SMCKeyData_t *outVal) {
+    char candidate[5];
+    snprintf(candidate, sizeof(candidate), lowerFmt, idx);
+    if (smcKeyExists(conn, candidate, outVal)) {
+        memcpy(resolvedKey, candidate, 5);
+        return 1;
+    }
+    snprintf(candidate, sizeof(candidate), upperFmt, idx);
+    if (smcKeyExists(conn, candidate, outVal)) {
+        memcpy(resolvedKey, candidate, 5);
+        return 1;
+    }
+    return 0;
+}
+
+static kern_return_t smcWriteTargetRPM(io_connect_t conn, const char *tgKey, const SMCKeyData_t *tgInfo, double targetRPM) {
+    if (tgInfo->keyInfo.dataType == smcFourCC("flt ") && tgInfo->keyInfo.dataSize == 4) {
+        float fTarget = (float)targetRPM;
+        return smcWriteKey(conn, tgKey, &fTarget, 4);
+    } else if (tgInfo->keyInfo.dataType == smcFourCC("fpe2") && tgInfo->keyInfo.dataSize == 2) {
+        uint16_t fpeTarget = (uint16_t)((int)targetRPM << 2);
+        uint8_t buf[2] = { (uint8_t)(fpeTarget >> 8), (uint8_t)(fpeTarget & 0xFF) };
+        return smcWriteKey(conn, tgKey, buf, 2);
+    }
+    return kIOReturnError;
+}
+
 static int applySMCFanControl(int percent) {
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
     if (service == IO_OBJECT_NULL) {
@@ -151,66 +182,95 @@ static int applySMCFanControl(int percent) {
     }
     if (fanCount > 4) fanCount = 4;
 
-    // Unlock software fan control on Apple Silicon if Ftst key exists
-    if (percent <= 0) {
-        uint8_t unlockZero = 0;
-        smcWriteKey(conn, "Ftst", &unlockZero, 1);
-    } else {
+    int hasFtst = smcKeyExists(conn, "Ftst", &val);
+    if (percent > 0 && hasFtst && val.bytes[0] != 1) {
         uint8_t unlockOne = 1;
         smcWriteKey(conn, "Ftst", &unlockOne, 1);
+        usleep(20000);
     }
 
-    for (int i = 0; i < fanCount; i++) {
-        char mdKey[5], tgKey[5], mnKey[5], mxKey[5];
-        snprintf(mdKey, sizeof(mdKey), "F%dMd", i);
-        snprintf(tgKey, sizeof(tgKey), "F%dTg", i);
-        snprintf(mnKey, sizeof(mnKey), "F%dMn", i);
-        snprintf(mxKey, sizeof(mxKey), "F%dMx", i);
+    if (percent <= 0) {
+        for (int i = 0; i < fanCount; i++) {
+            char mdKey[5];
+            if (resolveFanKey(conn, i, "F%dmd", "F%dMd", mdKey, &val)) {
+                uint8_t autoMode = 0;
+                smcWriteKey(conn, mdKey, &autoMode, 1);
+            }
+        }
+        if (smcKeyExists(conn, "FS! ", &val)) {
+            uint8_t fsAuto[2] = { 0x00, 0x00 };
+            smcWriteKey(conn, "FS! ", fsAuto, 2);
+        }
+        if (hasFtst) {
+            uint8_t unlockZero = 0;
+            smcWriteKey(conn, "Ftst", &unlockZero, 1);
+        }
+        IOServiceClose(conn);
+        return 0;
+    }
 
-        if (percent <= 0) {
-            uint8_t autoMode = 0;
-            smcWriteKey(conn, mdKey, &autoMode, 1);
-        } else {
-            double minRPM = 1000.0;
-            double maxRPM = 3500.0;
-            if (smcReadKey(conn, mnKey, &val) == kIOReturnSuccess) {
+    double clampedPct = (percent < 10) ? 10.0 : ((percent > 100) ? 100.0 : (double)percent);
+    int controlledFans = 0;
+
+    // Apple Silicon M3/M4/M5 thermalmonitord may override the first write; retry briefly to confirm latch.
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int allConfirmed = 1;
+        controlledFans = 0;
+
+        if (hasFtst) {
+            SMCKeyData_t tstVal;
+            if (smcReadKey(conn, "Ftst", &tstVal) == kIOReturnSuccess && tstVal.bytes[0] != 1) {
+                uint8_t unlockOne = 1;
+                smcWriteKey(conn, "Ftst", &unlockOne, 1);
+            }
+        }
+
+        for (int i = 0; i < fanCount; i++) {
+            char mdKey[5], mnKey[5], mxKey[5], tgKey[5];
+            snprintf(tgKey, sizeof(tgKey), "F%dTg", i);
+
+            double minRPM = 1200.0;
+            double maxRPM = 5500.0;
+            if (resolveFanKey(conn, i, "F%dmn", "F%dMn", mnKey, &val)) {
                 double m = smcDecodeRPM(&val);
                 if (m >= 300.0 && m <= 4000.0) minRPM = m;
             }
-            if (smcReadKey(conn, mxKey, &val) == kIOReturnSuccess) {
+            if (resolveFanKey(conn, i, "F%dmx", "F%dMx", mxKey, &val)) {
                 double m = smcDecodeRPM(&val);
                 if (m >= 1500.0 && m <= 9000.0) maxRPM = m;
             }
-
-            double clampedPct = (percent < 10) ? 10.0 : ((percent > 100) ? 100.0 : (double)percent);
             double targetRPM = minRPM + (maxRPM - minRPM) * (clampedPct / 100.0);
 
-            uint8_t manualMode = 1;
-            smcWriteKey(conn, mdKey, &manualMode, 1);
+            int modeWritten = 0;
+            if (resolveFanKey(conn, i, "F%dmd", "F%dMd", mdKey, &val)) {
+                uint8_t manualMode = 1;
+                if (smcWriteKey(conn, mdKey, &manualMode, 1) == kIOReturnSuccess) {
+                    modeWritten = 1;
+                }
+            }
 
-            // Check target key dataType (flt vs fpe2)
             SMCKeyData_t tgInfo;
             if (smcReadKey(conn, tgKey, &tgInfo) == kIOReturnSuccess) {
-                if (tgInfo.keyInfo.dataType == smcFourCC("flt ")) {
-                    float fTarget = (float)targetRPM;
-                    smcWriteKey(conn, tgKey, &fTarget, 4);
-                } else if (tgInfo.keyInfo.dataType == smcFourCC("fpe2")) {
-                    uint16_t fpeTarget = (uint16_t)((int)targetRPM << 2);
-                    uint8_t buf[2] = { (uint8_t)(fpeTarget >> 8), (uint8_t)(fpeTarget & 0xFF) };
-                    smcWriteKey(conn, tgKey, buf, 2);
+                if (smcWriteTargetRPM(conn, tgKey, &tgInfo, targetRPM) == kIOReturnSuccess && modeWritten) {
+                    controlledFans++;
+                    SMCKeyData_t verifyMd;
+                    if (smcReadKey(conn, mdKey, &verifyMd) != kIOReturnSuccess || verifyMd.bytes[0] != 1) {
+                        allConfirmed = 0;
+                    }
+                } else {
+                    allConfirmed = 0;
                 }
             }
         }
-    }
 
-    // Legacy Intel FS! bitmask fallback
-    if (percent <= 0) {
-        uint8_t fsAuto[2] = { 0x00, 0x00 };
-        smcWriteKey(conn, "FS! ", fsAuto, 2);
+        if (controlledFans > 0 && allConfirmed) {
+            break;
+        }
+        usleep(100000);
     }
 
     IOServiceClose(conn);
-    return 0;
+    return (controlledFans > 0) ? 0 : 3;
 }
 
 static int applyAWDLState(const char *mode) {
@@ -248,6 +308,11 @@ static CFDictionaryRef createThresholdEntry(int enabled, int value) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
+        puts("2");
+        return 0;
+    }
+
     // Elevate to root if setuid bit is set
     setuid(0);
     seteuid(0);

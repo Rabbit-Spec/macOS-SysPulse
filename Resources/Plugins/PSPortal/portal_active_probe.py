@@ -141,7 +141,7 @@ def run(active, finish_on_high_target=False):
         watcher=subprocess.Popen([sys.executable,str(network.ROOT/'portal_capture.py'),'--watchdog',str(saved)],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         altered=True;network.syswrite('net.inet.ip.redirect','0')
         # Forwarding stays OFF: only these two peers are relayed, with no original duplicate.
-        duration=40 if active else 20
+        duration=125 if active else 20
         print('Preparing network path; keep Portal disconnected.',flush=True)
         start=time.monotonic();end=start+duration;next_arp=0
         ready_at=start+5;ready_announced=False;early_session_warned=False
