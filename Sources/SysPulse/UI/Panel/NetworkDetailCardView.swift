@@ -360,39 +360,6 @@ public struct NetworkDetailCardView: View {
                     infoRow(key: "signal", label: "信号强度", value: "\(model.signal) (\(model.signalDbm) dBm)")
                 }
             }
-
-            Divider()
-                .overlay(theme.dividerColor.opacity(0.35))
-                .padding(.vertical, 2)
-
-            // Wi-Fi 低延迟开关 (awdl0 接口控制)
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2.5) {
-                    Text("WiFi 低延迟模式")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("开启后暂停 AWDL 直连，有效降低延迟抖动")
-                        .font(.system(size: 9, weight: .regular))
-                        .foregroundStyle(theme.secondaryText)
-                }
-
-                Spacer()
-
-                Button {
-                    wifiLL.toggleLowLatency()
-                } label: {
-                    Text(wifiLL.isLowLatencyActive ? "已开启" : "开启低延迟")
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundStyle(wifiLL.isLowLatencyActive ? Color.green : theme.primaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(
-                            Capsule().fill(wifiLL.isLowLatencyActive ? Color.green.opacity(0.18) : (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)))
-                        )
-                }
-                .buttonStyle(.plain)
-                .pointingHandOnHover()
-            }
         }
         .padding(12)
         .background(cardBackground)

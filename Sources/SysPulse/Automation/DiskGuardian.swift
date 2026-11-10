@@ -68,7 +68,9 @@ public final class DiskGuardian {
         if savedDelay >= 60 {
             self.delaySeconds = savedDelay
         }
-        refreshDisks()
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            refreshDisks()
+        }
     }
 
     /// Discover external mounted volumes (skipping root macOS volume).
@@ -163,5 +165,17 @@ public final class DiskGuardian {
             }
         }
         refreshDisks()
+    }
+
+    /// Safely eject a specific external drive
+    public func ejectDisk(at path: String) {
+        let url = URL(fileURLWithPath: path)
+        do {
+            try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+            logger.info("磁盘 \(path) 已安全弹出")
+            refreshDisks()
+        } catch {
+            logger.error("弹出指定磁盘失败: \(error.localizedDescription)")
+        }
     }
 }

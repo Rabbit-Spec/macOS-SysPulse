@@ -68,7 +68,7 @@ public struct AboutView: View {
 
                 Divider()
 
-                LabeledContent("连接 UPS", value: engine.telemetry.pairedUPSDescription)
+                LabeledContent("连接 UPS", value: FeatureToggleManager.shared.enablePluginUPSManager ? engine.telemetry.pairedUPSDescription : "UPS 插件未启用")
             }
             .font(.system(size: 12))
             .padding(14)

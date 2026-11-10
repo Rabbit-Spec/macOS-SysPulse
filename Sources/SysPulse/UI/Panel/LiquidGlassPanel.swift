@@ -32,6 +32,7 @@ public struct LiquidGlassPanel: View {
     @Bindable var accessories = AccessoryBatteryManager.shared
     @Bindable var navState = StudioWindowNavigationState.shared
     @Bindable var keepAwake = KeepAwakeController.shared
+    @Bindable var toggles = FeatureToggleManager.shared
 
     public init() {}
 
@@ -619,12 +620,13 @@ public struct LiquidGlassPanel: View {
     // MARK: - 3. 供电状态与外设电量卡片
 
     private var batteryAccessoriesCard: some View {
+        let upsConnected = toggles.enablePluginUPSManager && engine.telemetry.isConnected
         let isLaptop = monitor.loadRuntime.hasInternalBattery
-        let batteryPct = isLaptop ? monitor.loadRuntime.internalBatteryPercent : (engine.telemetry.batteryLevel > 0 ? engine.telemetry.batteryLevel : 100)
-        let isCharging = engine.telemetry.isCharging || monitor.loadRuntime.isInternalCharging || monitor.hardware.isBatteryCharging
+        let batteryPct = isLaptop ? monitor.loadRuntime.internalBatteryPercent : (upsConnected && engine.telemetry.batteryLevel > 0 ? engine.telemetry.batteryLevel : 100)
+        let isCharging = (upsConnected && engine.telemetry.isCharging) || monitor.loadRuntime.isInternalCharging || monitor.hardware.isBatteryCharging
         let statusString: String = {
             if isCharging { return "充电中" }
-            if engine.telemetry.state.isAC || monitor.loadRuntime.isInternalPluggedIn || !isLaptop { return "市电在线" }
+            if (upsConnected && engine.telemetry.state.isAC) || monitor.loadRuntime.isInternalPluggedIn || !isLaptop { return "市电在线" }
             return "电池供电"
         }()
 
@@ -644,10 +646,10 @@ public struct LiquidGlassPanel: View {
                     return ("battery.25", Color(red: 0.95, green: 0.40, blue: 0.35))
                 }
             }
-            if engine.telemetry.isConnected {
-                return ("bolt.shield.fill", Color(red: 0.35, green: 0.85, blue: 0.55))
+            if upsConnected {
+                return ("bolt.shield.fill", Color(red: 0.35, green: 0.82, blue: 0.55))
             }
-            return ("powerplug.fill", Color(red: 0.35, green: 0.75, blue: 0.95))
+            return ("powerplug.fill", Color(red: 0.35, green: 0.82, blue: 0.55))
         }()
 
         return HStack(spacing: 12) {
@@ -658,7 +660,7 @@ public struct LiquidGlassPanel: View {
                         size: 11,
                         color: headerIcon.color
                     )
-                    Text(isLaptop ? "电池" : (engine.telemetry.isConnected ? "UPS 供电" : "AC 供电"))
+                    Text(isLaptop ? "电池" : (upsConnected ? "UPS 供电" : "AC 供电"))
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.primaryText)
                 }

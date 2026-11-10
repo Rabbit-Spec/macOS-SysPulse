@@ -62,25 +62,21 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
 
     public var onSnapshotUpdated: (@MainActor @Sendable (RawHIDPowerState) -> Void)?
 
-    private init() {
-        setupManager()
-    }
+    private init() {}
 
-    private func setupManager() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-            let match: [String: Any] = [
-                kIOHIDDeviceUsagePageKey: 0x84 // Power Device
-            ]
-            IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
-            let ret = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-            if ret == kIOReturnSuccess {
-                self.hidManager = manager
-                self.logger.info("Background HID hardware watchdog opened successfully")
-            } else {
-                self.logger.error("Failed to open background HID manager: \(ret)")
-            }
+    private func ensureManagerOpened() {
+        guard hidManager == nil else { return }
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let match: [String: Any] = [
+            kIOHIDDeviceUsagePageKey: 0x84 // Power Device
+        ]
+        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
+        let ret = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        if ret == kIOReturnSuccess {
+            self.hidManager = manager
+            self.logger.info("Background HID hardware watchdog opened successfully")
+        } else {
+            self.logger.error("Failed to open background HID manager: \(ret)")
         }
     }
 
@@ -88,7 +84,8 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
     public func start(intervalSeconds: Double = 2.0) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.stopInternal()
+            self.stopTimerOnly()
+            self.ensureManagerOpened()
 
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
             timer.schedule(deadline: .now(), repeating: intervalSeconds)
@@ -107,15 +104,26 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
         }
     }
 
-    private func stopInternal() {
+    private func stopTimerOnly() {
         timer?.cancel()
         timer = nil
+    }
+
+    private func stopInternal() {
+        stopTimerOnly()
+        if let manager = hidManager {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            hidManager = nil
+            logger.info("Background HID hardware watchdog closed and released")
+        }
     }
 
     /// Force an immediate background query right now (e.g. user clicks refresh).
     public func triggerManualPoll() {
         queue.async { [weak self] in
-            self?.pollHardware()
+            guard let self else { return }
+            self.ensureManagerOpened()
+            self.pollHardware()
         }
     }
 

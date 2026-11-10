@@ -48,7 +48,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
     private func observeEngine() {
         // Connect power state transitions to disk safety (multi-observer safe)
         PowerSourceEngine.shared.addPowerStateObserver(id: "MenuBarController") { [weak self] state in
-            if FeatureToggleManager.shared.enableDiskGuardian {
+            if FeatureToggleManager.shared.enablePluginUPSManager && FeatureToggleManager.shared.enableDiskGuardian {
                 if state == .batteryPower {
                     DiskGuardian.shared.handlePowerOutageStarted()
                 } else if state == .acPower {
@@ -341,24 +341,12 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         fanItem.image = NSImage(systemSymbolName: "fan.fill", accessibilityDescription: nil)
         menu.addItem(fanItem)
 
-        let wifiActive = WiFiLowLatencyManager.shared.isLowLatencyActive
-        let wifiItem = NSMenuItem(title: wifiActive ? "WiFi 低延迟已开启" : "WiFi 低延迟", action: #selector(toggleWiFiLatency), keyEquivalent: "w")
-        wifiItem.target = self
-        wifiItem.state = wifiActive ? .on : .off
-        wifiItem.image = NSImage(systemSymbolName: "wifi", accessibilityDescription: nil)
-        menu.addItem(wifiItem)
-
         let cleanScreenItem = NSMenuItem(title: "清洁屏幕", action: #selector(cleanScreenAction), keyEquivalent: "k")
         cleanScreenItem.target = self
         cleanScreenItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
         menu.addItem(cleanScreenItem)
 
         menu.addItem(.separator())
-
-        let upsItem = NSMenuItem(title: "UPS 关机设置", action: #selector(openUPSSettings), keyEquivalent: "")
-        upsItem.target = self
-        upsItem.image = NSImage(systemSymbolName: "bolt.shield", accessibilityDescription: nil)
-        menu.addItem(upsItem)
 
         let settingsItem = NSMenuItem(title: "功能与选项设置…", action: #selector(openCustomizationWindow), keyEquivalent: ",")
         settingsItem.target = self
@@ -435,16 +423,8 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    @objc private func toggleWiFiLatency() {
-        WiFiLowLatencyManager.shared.toggleLowLatency()
-    }
-
     @objc private func cleanScreenAction() {
         ScreenCleanerWindowController.shared.startCleaning()
-    }
-
-    @objc private func openUPSSettings() {
-        MainStudioWindowController.shared.showWindow(section: .upsCenter)
     }
 
     @objc private func openCustomizationWindow() {
@@ -474,7 +454,9 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             PanelCoordinator.shared.activeScreen = .dashboard
             PowerSourceEngine.shared.setPanelVisible(true)
             SystemResourceMonitor.shared.refreshNow()
-            DiskGuardian.shared.refreshDisks()
+            if FeatureToggleManager.shared.enablePluginUPSManager {
+                DiskGuardian.shared.refreshDisks()
+            }
 
             let newPopover = makePopover()
             self.popover = newPopover
@@ -502,7 +484,9 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             // Mark panel visible and refresh latest hardware telemetry
             PowerSourceEngine.shared.setPanelVisible(true)
             SystemResourceMonitor.shared.refreshNow()
-            DiskGuardian.shared.refreshDisks()
+            if FeatureToggleManager.shared.enablePluginUPSManager {
+                DiskGuardian.shared.refreshDisks()
+            }
 
             // Create popover on-demand and show
             let newPopover = makePopover()

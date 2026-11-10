@@ -99,6 +99,13 @@ public final class SystemUPSSettingsManager {
         if let action = d.string(forKey: "PG_UPS_ProtectionAction") {
             self.protectionAction = action
         }
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            readSystemDefaults()
+        }
+    }
+
+    public func refreshIfEnabled() {
+        guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
         readSystemDefaults()
     }
 

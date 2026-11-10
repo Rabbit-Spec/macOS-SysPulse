@@ -160,45 +160,6 @@ public struct NetworkMonitorSection: View {
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.primaryText)
                 }
-
-                // Row 4: WiFi 低延迟模式开关
-                HStack {
-                    HStack(spacing: 5) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Color.cyan)
-                        Text("WiFi 低延迟模式")
-                            .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                            .foregroundStyle(theme.primaryText)
-                    }
-                    Spacer()
-                    Button {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                            wifiLL.toggleLowLatency()
-                        }
-                    } label: {
-                        Text(wifiLL.isLowLatencyActive ? "已开启" : "开启低延迟")
-                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                            .foregroundStyle(wifiLL.isLowLatencyActive ? Color.black : Color.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 3.5)
-                            .background(
-                                Capsule().fill(wifiLL.isLowLatencyActive ? Color.cyan : Color.gray.opacity(0.4))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5.5)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.cyan.opacity(colorScheme == .dark ? 0.08 : 0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(Color.cyan.opacity(0.2), lineWidth: 0.8)
-                        )
-                )
             }
         }
     }

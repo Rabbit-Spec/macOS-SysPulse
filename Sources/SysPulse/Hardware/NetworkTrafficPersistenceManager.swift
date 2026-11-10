@@ -14,11 +14,47 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
     private let lock = NSLock()
 
-    // 内存中实时累计数据 (以字节为单位)
-    public private(set) var monthDownloadBytes: UInt64 = 0
-    public private(set) var monthUploadBytes: UInt64 = 0
-    public private(set) var todayDownloadBytes: UInt64 = 0
-    public private(set) var todayUploadBytes: UInt64 = 0
+    public struct TrafficTotalsSnapshot: Sendable {
+        public let todayDownloadBytes: UInt64
+        public let todayUploadBytes: UInt64
+        public let monthDownloadBytes: UInt64
+        public let monthUploadBytes: UInt64
+        public let hourlyBytes: [UInt64]
+    }
+
+    // 线程安全实时累计数据读取器 (以字节为单位)
+    public var monthDownloadBytes: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.monthDownloadBytes
+    }
+    public var monthUploadBytes: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.monthUploadBytes
+    }
+    public var todayDownloadBytes: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.todayDownloadBytes
+    }
+    public var todayUploadBytes: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.todayUploadBytes
+    }
+
+    public func currentSnapshot() -> TrafficTotalsSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return TrafficTotalsSnapshot(
+            todayDownloadBytes: state.todayDownloadBytes,
+            todayUploadBytes: state.todayUploadBytes,
+            monthDownloadBytes: state.monthDownloadBytes,
+            monthUploadBytes: state.monthUploadBytes,
+            hourlyBytes: state.hourlyBytes ?? Array(repeating: 0, count: 24)
+        )
+    }
 
     // 单个网卡的基准线快照
     private struct InterfaceSnapshot: Codable {
@@ -60,7 +96,11 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
     private var state: PersistenceState
     private var lastDiskSaveTime: Date = Date.distantPast
-    public private(set) var hourlyBytes: [UInt64] = Array(repeating: 0, count: 24)
+    public var hourlyBytes: [UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.hourlyBytes ?? Array(repeating: 0, count: 24)
+    }
 
     // MARK: - Storage Path
 
@@ -136,24 +176,16 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
             }
         }
 
-        self.monthDownloadBytes = self.state.monthDownloadBytes
-        self.monthUploadBytes = self.state.monthUploadBytes
-        self.todayDownloadBytes = self.state.todayDownloadBytes
-        self.todayUploadBytes = self.state.todayUploadBytes
-
-        if let hb = self.state.hourlyBytes, hb.count == 24 {
-            self.hourlyBytes = hb
-        } else {
+        if self.state.hourlyBytes?.count != 24 {
             var defaultHourly = [UInt64](repeating: 0, count: 24)
             let curHour = Calendar.current.component(.hour, from: now)
             if curHour < 24 {
-                defaultHourly[curHour] = self.todayDownloadBytes + self.todayUploadBytes
+                defaultHourly[curHour] = self.state.todayDownloadBytes + self.state.todayUploadBytes
             }
-            self.hourlyBytes = defaultHourly
             self.state.hourlyBytes = defaultHourly
         }
 
-        persistToDisk(force: true)
+        persistToDiskLocked(force: true)
 
         // 注册退出与失焦通知，确保正常退出或切入后台时立即刷盘
         NotificationCenter.default.addObserver(
@@ -197,8 +229,7 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
             state.hourlyBytes = Array(repeating: 0, count: 24)
             state.interfaceSnapshots[iface] = InterfaceSnapshot(inBytes: hardwareIn, outBytes: hardwareOut, bootTime: curBoot)
             state.lastBootTime = curBoot
-            syncPublicProperties()
-            persistToDisk(force: true)
+            persistToDiskLocked(force: true)
             return
         }
 
@@ -233,8 +264,7 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
             state.interfaceSnapshots[iface] = InterfaceSnapshot(inBytes: hardwareIn, outBytes: hardwareOut, bootTime: curBoot)
             state.lastBootTime = curBoot
-            syncPublicProperties()
-            persistToDisk(force: true)
+            persistToDiskLocked(force: true)
             return
         }
 
@@ -274,20 +304,10 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
         state.interfaceSnapshots[iface] = InterfaceSnapshot(inBytes: hardwareIn, outBytes: hardwareOut, bootTime: curBoot)
         state.lastBootTime = curBoot
 
-        syncPublicProperties()
-
         // 7. 磁盘保存（节流控制：有增量且间隔 >= 1秒，或增量巨大时写盘）
         if (deltaIn > 0 || deltaOut > 0) && (now.timeIntervalSince(lastDiskSaveTime) >= 1.0 || (deltaIn + deltaOut) > 500_000) {
-            persistToDisk(force: false)
+            persistToDiskLocked(force: false)
         }
-    }
-
-    private func syncPublicProperties() {
-        self.monthDownloadBytes = state.monthDownloadBytes
-        self.monthUploadBytes = state.monthUploadBytes
-        self.todayDownloadBytes = state.todayDownloadBytes
-        self.todayUploadBytes = state.todayUploadBytes
-        self.hourlyBytes = state.hourlyBytes ?? Array(repeating: 0, count: 24)
     }
 
     // MARK: - App Traffic Persistence (应用流量记忆)
@@ -362,6 +382,12 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
     // MARK: - Disk & UserDefaults Persistence
 
     public func persistToDisk(force: Bool = false) {
+        lock.lock()
+        defer { lock.unlock() }
+        persistToDiskLocked(force: force)
+    }
+
+    private func persistToDiskLocked(force: Bool = false) {
         let now = Date()
         if !force && now.timeIntervalSince(lastDiskSaveTime) < 1.0 {
             return

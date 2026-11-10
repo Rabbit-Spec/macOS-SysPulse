@@ -254,7 +254,7 @@ public final class SystemDiagnosticsCollector {
         let diskRootSummary = "\(diskUsed) / \(diskTotal) (\(monitor.hardware.statfsUsedPercent)%)"
 
         let batteryAndUPSSummary: String = {
-            if engine.telemetry.isConnected {
+            if toggles.enablePluginUPSManager && engine.telemetry.isConnected {
                 let stateStr = engine.telemetry.state.isAC ? (engine.telemetry.isCharging ? "Charging" : "AC Online") : "On Battery"
                 return "\(engine.telemetry.batteryLevel)% · \(stateStr) (\(engine.telemetry.deviceName) · \(Int(engine.telemetry.voltageVolts))V)"
             } else if monitor.loadRuntime.hasInternalBattery {
@@ -301,9 +301,9 @@ public final class SystemDiagnosticsCollector {
             case .maxCool: return "maxCool (100%)"
             }
         }()
-        let wifiLowLatencyStatus = wifiLL.isLowLatencyActive ? "on (awdl0 down)" : "off"
-        let upsProtectionStatus = upsSettings.softwareProtectionEnabled ? "on (\(upsSettings.protectionAction))" : "off"
-        let diskGuardianStatus = diskGuardian.isAutoEjectEnabled ? "on (\(diskGuardian.delayMinutes)m delay)" : "off"
+        let wifiLowLatencyStatus = toggles.enablePluginWiFiLatency ? (wifiLL.isLowLatencyActive ? "on (awdl0 down)" : "off") : "plugin disabled"
+        let upsProtectionStatus = toggles.enablePluginUPSManager ? (upsSettings.softwareProtectionEnabled ? "on (\(upsSettings.protectionAction))" : "off") : "plugin disabled"
+        let diskGuardianStatus = toggles.enablePluginUPSManager ? (diskGuardian.isAutoEjectEnabled ? "on (\(diskGuardian.delayMinutes)m delay)" : "off") : "plugin disabled"
         let proxySummary = Self.querySystemProxy()
 
         let sipStatus = Self.querySIPStatus()

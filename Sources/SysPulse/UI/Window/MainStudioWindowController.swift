@@ -8,6 +8,7 @@ public enum StudioTopTab: String, CaseIterable, Identifiable, Sendable {
     case cleaner = "清理"
     case software = "软件"
     case space = "空间"
+    case plugins = "模块"
 
     public var id: String { rawValue }
 }
@@ -15,7 +16,6 @@ public enum StudioTopTab: String, CaseIterable, Identifiable, Sendable {
 public enum StudioModalTab: String, CaseIterable, Identifiable, Sendable {
     case cleaner = "清理设置"
     case settings = "系统设置"
-    case ups = "UPS 设置"
     case about = "关于 SysPulse"
 
     public var id: String { rawValue }
@@ -27,6 +27,7 @@ public enum StudioWindowSection: String, CaseIterable, Identifiable, Sendable {
     case appManager = "appManager"
     case spaceAnalysis = "spaceAnalysis"
     case networkMonitor = "networkMonitor"
+    case plugins = "plugins"
     case upsCenter = "upsCenter"
     case customization = "customization"
     case about = "about"
@@ -40,7 +41,8 @@ public enum StudioWindowSection: String, CaseIterable, Identifiable, Sendable {
         case .appManager: return "软件"
         case .spaceAnalysis: return "空间"
         case .networkMonitor: return "网络"
-        case .upsCenter: return "UPS 设置"
+        case .plugins: return "模块"
+        case .upsCenter: return "UPS 电源管理"
         case .customization: return "设置"
         case .about: return "关于 SysPulse"
         }
@@ -53,6 +55,7 @@ public enum StudioWindowSection: String, CaseIterable, Identifiable, Sendable {
         case .appManager: return "应用空间占用分析、一键彻底卸载与残留垃圾扫描"
         case .spaceAnalysis: return "目录层级深度钻取、巨量大文件穿透与容易漏掉的空间解读"
         case .networkMonitor: return "实时掌控上下行带宽、链路延迟与应用流量分布，内置硬件级链路遥测与测速诊断"
+        case .plugins: return "PS Portal 串流画质增强与独立模块化扩展中心"
         case .upsCenter: return "外接 UPS 监控、断电保护与外接盘安全推出"
         case .customization: return "开启或关闭监测模块、菜单栏显示与弹窗项目"
         case .about: return "连接 UPS 与版本信息"
@@ -66,6 +69,7 @@ public enum StudioWindowSection: String, CaseIterable, Identifiable, Sendable {
         case .appManager: return "app.badge.checkmark.fill"
         case .spaceAnalysis: return "circle.hexagongrid.fill"
         case .networkMonitor: return "network"
+        case .plugins: return "puzzlepiece.extension.fill"
         case .upsCenter: return "bolt.shield.fill"
         case .customization: return "gearshape.fill"
         case .about: return "info.circle.fill"
@@ -109,6 +113,8 @@ public final class StudioWindowNavigationState {
     public var isUpdateModalPresented: Bool = false
     public var hoveredOverviewCardID: String? = nil
     public var hoveredPopoverCardID: String? = nil
+    public var hoveredTopTab: StudioTopTab? = nil
+    public var isScrubbingTab: Bool = false
 
     public func toggleSort(field: ProcessSortField) {
         if processSortField == field {
@@ -166,7 +172,6 @@ public final class StudioWindowNavigationState {
                 switch activeModalTab {
                 case .cleaner: return .smartCleaner
                 case .settings: return .customization
-                case .ups: return .upsCenter
                 case .about: return .about
                 }
             }
@@ -176,6 +181,7 @@ public final class StudioWindowNavigationState {
             case .software: return .appManager
             case .space: return .spaceAnalysis
             case .network: return .networkMonitor
+            case .plugins: return .plugins
             }
         }
         set {
@@ -195,10 +201,15 @@ public final class StudioWindowNavigationState {
             case .networkMonitor:
                 selectedTab = .network
                 isModalPresented = false
+            case .plugins:
+                selectedTab = .plugins
+                isModalPresented = false
             case .customization:
                 openModal(tab: .settings)
             case .upsCenter:
-                openModal(tab: .ups)
+                selectedTab = .plugins
+                isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = .upsManager
             case .about:
                 openModal(tab: .about)
             }
@@ -230,7 +241,9 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         // Refresh telemetry & hardware monitors immediately
         PowerSourceEngine.shared.setPanelVisible(true)
         SystemResourceMonitor.shared.refreshNow()
-        DiskGuardian.shared.refreshDisks()
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            DiskGuardian.shared.refreshDisks()
+        }
 
         let defaultWidth: CGFloat = 1200
         let defaultHeight: CGFloat = 822

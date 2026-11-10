@@ -18,7 +18,22 @@ public final class WiFiLowLatencyManager {
     public private(set) var statusMessage: String = "开启低延迟"
 
     private init() {
+        if FeatureToggleManager.shared.enablePluginWiFiLatency {
+            checkAWDLState()
+        }
+    }
+
+    public func activate() {
         checkAWDLState()
+    }
+
+    public func deactivate() {
+        if isLowLatencyActive {
+            _ = Self.runInstalledHelperSilently(modeArg: "up")
+        }
+        isBusy = false
+        isLowLatencyActive = false
+        statusMessage = "开启低延迟"
     }
 
     /// Checks the real-time kernel status of awdl0 via Darwin getifaddrs

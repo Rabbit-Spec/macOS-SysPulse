@@ -10,7 +10,7 @@ public struct MainStudioWindowView: View {
     @Bindable var monitor = SystemResourceMonitor.shared
     @Bindable var toggles = FeatureToggleManager.shared
     @Bindable var diskGuardian = DiskGuardian.shared
-    @Bindable var upsSettings = SystemUPSSettingsManager.shared
+    @Namespace private var tabAnimation
 
     private var theme: LiquidGlassTheme {
         LiquidGlassTheme(colorScheme: colorScheme)
@@ -30,7 +30,7 @@ public struct MainStudioWindowView: View {
 
             ZStack {
                 // Adaptive Liquid Glass Window Background
-                WindowLiquidBackdrop(state: engine.telemetry.state, theme: theme)
+                WindowLiquidBackdrop(state: toggles.enablePluginUPSManager ? engine.telemetry.state : .acPower, theme: theme)
                     .ignoresSafeArea()
 
                 VStack(spacing: 0) {
@@ -75,6 +75,12 @@ public struct MainStudioWindowView: View {
                                 canvasWidth: logicalW,
                                 canvasHeight: logicalH
                             )
+                        case .plugins:
+                            PluginsDashboardView(
+                                theme: theme,
+                                canvasWidth: logicalW,
+                                canvasHeight: logicalH
+                            )
                         }
                     }
                     .frame(width: logicalW, height: logicalH - 79, alignment: .top)
@@ -97,13 +103,8 @@ public struct MainStudioWindowView: View {
     // MARK: - 顶部导航栏
 
     private var topNavigationBar: some View {
-        HStack(spacing: 0) {
-            Spacer()
-                .frame(width: 80)
-
-            Spacer()
-
-            // 居中胶囊导航栏
+        ZStack {
+            // 1. 绝对数学居中导航栏：无论左右两端如何变化，永远处于窗口水平正中央！
             HStack(spacing: 0) {
                 // 1. 左上角应用图标下拉菜单按钮
                 Button {
@@ -127,76 +128,215 @@ public struct MainStudioWindowView: View {
                 Spacer()
                     .frame(width: 14)
 
-                // 2. 顶部模块切换标签
+                // 2. 顶部模块切换标签 (支持单击 + 长按连续滑动选择 Continuous Scrubbing)
                 HStack(spacing: 6) {
                     ForEach(StudioTopTab.allCases) { tab in
                         let isSelected = (navState.selectedTab == tab && !navState.isModalPresented)
+                        let isHovered = (navState.hoveredTopTab == tab && !isSelected)
                         Button {
-                            withAnimation(.spring(duration: 0.2, bounce: 0.0)) {
+                            withAnimation(.spring(response: 0.30, dampingFraction: 0.78, blendDuration: 0)) {
                                 navState.selectedTab = tab
                                 navState.isModalPresented = false
                             }
                         } label: {
                             ZStack {
-                                Capsule(style: .continuous)
-                                    .fill(isSelected ? (colorScheme == .dark ? Color.white : Color(white: 0.15)) : Color.black.opacity(0.0001))
+                                // 选中态：官方原生液态玻璃高透凸透镜流体滑块
+                                if isSelected {
+                                    selectedLiquidGlassPill
+                                        .matchedGeometryEffect(id: "selected_liquid_glass_tab", in: tabAnimation)
+                                } else if isHovered {
+                                    // 未选中项悬停微光
+                                    Capsule(style: .continuous)
+                                        .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
+                                        .transition(.opacity)
+                                }
 
                                 Text(tab.rawValue)
                                     .font(.system(size: 14, weight: isSelected ? .bold : .medium, design: .rounded))
-                                    .foregroundStyle(isSelected ? (colorScheme == .dark ? Color.black : Color.white) : theme.primaryText.opacity(0.85))
+                                    .foregroundStyle(
+                                        isSelected
+                                            ? (colorScheme == .dark ? Color.white : Color.black.opacity(0.88))
+                                            : theme.primaryText.opacity(0.78)
+                                    )
+                                    .shadow(
+                                        color: (isSelected && colorScheme == .dark) ? Color.black.opacity(0.35) : Color.clear,
+                                        radius: 1,
+                                        x: 0,
+                                        y: 1
+                                    )
                             }
                             .frame(width: 70, height: 36)
                             .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .pointingHandOnHover()
+                        .onHover { hovering in
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                if hovering {
+                                    navState.hoveredTopTab = tab
+                                } else if navState.hoveredTopTab == tab {
+                                    navState.hoveredTopTab = nil
+                                }
+                            }
+                        }
                     }
                 }
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            navState.isScrubbingTab = true
+                            let itemPitch: CGFloat = 76.0
+                            let totalPitch = CGFloat(StudioTopTab.allCases.count) * itemPitch - 6
+                            let clampedX = max(0, min(value.location.x, totalPitch))
+                            let index = min(max(0, Int(clampedX / itemPitch)), StudioTopTab.allCases.count - 1)
+                            let targetTab = StudioTopTab.allCases[index]
+                            if navState.selectedTab != targetTab {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.72, blendDuration: 0)) {
+                                    navState.selectedTab = targetTab
+                                    navState.isModalPresented = false
+                                }
+                            }
+                        }
+                        .onEnded { value in
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.75, blendDuration: 0)) {
+                                navState.isScrubbingTab = false
+                                let itemPitch: CGFloat = 76.0
+                                let totalPitch = CGFloat(StudioTopTab.allCases.count) * itemPitch - 6
+                                let clampedX = max(0, min(value.location.x, totalPitch))
+                                let index = min(max(0, Int(clampedX / itemPitch)), StudioTopTab.allCases.count - 1)
+                                let targetTab = StudioTopTab.allCases[index]
+                                navState.selectedTab = targetTab
+                                navState.isModalPresented = false
+                            }
+                        }
+                )
                 .padding(.trailing, 2)
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
             .background(
                 Capsule(style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.05))
+                    .fill(.ultraThinMaterial)
                     .overlay(
                         Capsule(style: .continuous)
-                            .strokeBorder(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08), lineWidth: 0.8)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(colorScheme == .dark ? 0.16 : 0.45),
+                                        Color.white.opacity(colorScheme == .dark ? 0.04 : 0.12)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(colorScheme == .dark ? 0.35 : 0.70),
+                                        Color.white.opacity(colorScheme == .dark ? 0.10 : 0.20)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                ),
+                                lineWidth: 0.8
+                            )
+                    )
+                    .shadow(
+                        color: colorScheme == .dark ? Color.black.opacity(0.35) : Color.black.opacity(0.08),
+                        radius: 12,
+                        x: 0,
+                        y: 4
                     )
             )
 
-            Spacer()
+            // 2. 右侧对齐的版本号与检查更新按钮 (独立悬浮，绝不挤压居中导航栏)
+            HStack(spacing: 0) {
+                Spacer()
 
-            // 右上角版本号与检查更新按钮
-            Button {
-                withAnimation(.snappy(duration: 0.2)) {
-                    AppUpdateManager.shared.checkForUpdates(userInitiated: true)
+                Button {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        AppUpdateManager.shared.checkForUpdates(userInitiated: true)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan : Color.green)
+                            .frame(width: 6, height: 6)
+                        Text(AppUpdateManager.shared.hasUpdateAvailable ? "\(AppMetadata.versionDisplay) · 有更新" : AppMetadata.versionDisplay)
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan : theme.secondaryText)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(theme.cardFill)
+                            .overlay(Capsule().strokeBorder(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan.opacity(0.45) : theme.cardBorder, lineWidth: 0.6))
+                    )
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan : Color.green)
-                        .frame(width: 6, height: 6)
-                    Text(AppUpdateManager.shared.hasUpdateAvailable ? "\(AppMetadata.versionDisplay) · 有更新" : AppMetadata.versionDisplay)
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundStyle(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan : theme.secondaryText)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule()
-                        .fill(theme.cardFill)
-                        .overlay(Capsule().strokeBorder(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan.opacity(0.45) : theme.cardBorder, lineWidth: 0.6))
-                )
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+                .help("点击检查 GitHub 最新版本更新")
+                .padding(.trailing, 24)
             }
-            .buttonStyle(.plain)
-            .pointingHandOnHover()
-            .help("点击检查 GitHub 最新版本更新")
-            .padding(.trailing, 24)
         }
         .frame(height: 44)
         .padding(.top, 35)
         .padding(.horizontal, 8)
+    }
+
+    // MARK: - 选中的原生液态玻璃微凸透镜胶囊
+
+    private var selectedLiquidGlassPill: some View {
+        Capsule(style: .continuous)
+            // 1. 基底高透折射微磨砂层 (通透不失真，保留底层折射与色彩透出)
+            .fill(
+                colorScheme == .dark
+                    ? Color.white.opacity(navState.isScrubbingTab ? 0.24 : 0.18)
+                    : Color.white.opacity(navState.isScrubbingTab ? 0.82 : 0.72)
+            )
+            // 2. 纵向微凸透镜表面张力高光膜 (模拟凸透镜受顶光散射)
+            .overlay(
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(colorScheme == .dark ? (navState.isScrubbingTab ? 0.42 : 0.32) : (navState.isScrubbingTab ? 0.75 : 0.65)),
+                                Color.white.opacity(colorScheme == .dark ? 0.05 : 0.15)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            )
+            // 3. 极细棱镜反光边缘 (Prismatic Edge Rim，营造立体物理厚度)
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(colorScheme == .dark ? (navState.isScrubbingTab ? 0.75 : 0.55) : (navState.isScrubbingTab ? 0.95 : 0.85)),
+                                Color.white.opacity(colorScheme == .dark ? 0.12 : 0.25)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.8
+                    )
+            )
+            // 4. 空间悬浮微阴影与按压张力
+            .shadow(
+                color: colorScheme == .dark ? Color.black.opacity(navState.isScrubbingTab ? 0.42 : 0.28) : Color.black.opacity(navState.isScrubbingTab ? 0.18 : 0.10),
+                radius: navState.isScrubbingTab ? 6 : 4,
+                x: 0,
+                y: navState.isScrubbingTab ? 3 : 2
+            )
+            .scaleEffect(navState.isScrubbingTab ? CGSize(width: 1.05, height: 0.95) : CGSize(width: 1.0, height: 1.0))
+            .animation(.spring(response: 0.22, dampingFraction: 0.70), value: navState.isScrubbingTab)
     }
 
     // MARK: - 应用图标下拉菜单
@@ -301,15 +441,6 @@ public struct MainStudioWindowView: View {
                                     CleanerSettingsModalView(theme: theme)
                                 case .settings:
                                     CustomizationTogglesSection(toggles: toggles, theme: theme)
-                                case .ups:
-                                    UPSCenterSection(
-                                        engine: engine,
-                                        monitor: monitor,
-                                        upsSettings: upsSettings,
-                                        diskGuardian: diskGuardian,
-                                        toggles: toggles,
-                                        theme: theme
-                                    )
                                 case .about:
                                     WindowAboutSection(engine: engine, theme: theme)
                                 }
@@ -356,7 +487,7 @@ private struct StatusOverviewSection: View {
     private var processCardH: CGFloat { max(316, (contentH - 28) - 2 * cardRowH) }
     private var rowScale: CGFloat { max(1.0, cardRowH / 170.0) }
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 14) {
             // 2x4 核心状态指标卡片网格
             VStack(spacing: 14) {
@@ -648,11 +779,12 @@ private struct StatusOverviewSection: View {
 
     // 5. 供电与电池卡片
     private var powerBatteryCard: some View {
-        let isMacBook = toggles.enableMacBookDemoMode || (monitor.loadRuntime.hasInternalBattery && !engine.telemetry.isConnected)
-        let batteryLevel = engine.telemetry.isConnected
+        let upsConnected = toggles.enablePluginUPSManager && engine.telemetry.isConnected
+        let isMacBook = toggles.enableMacBookDemoMode || (monitor.loadRuntime.hasInternalBattery && !upsConnected)
+        let batteryLevel = upsConnected
             ? engine.telemetry.batteryLevel
             : (monitor.loadRuntime.hasInternalBattery ? monitor.loadRuntime.internalBatteryPercent : 100)
-        let isOnline = engine.telemetry.isConnected ? engine.telemetry.state.isAC : (isMacBook ? monitor.loadRuntime.isInternalCharging : true)
+        let isOnline = upsConnected ? engine.telemetry.state.isAC : (isMacBook ? monitor.loadRuntime.isInternalCharging : true)
         let curWatts = monitor.power.totalSystemWatts
         let peakWatts = max(monitor.power.peakWatts, curWatts)
         let topEnergyApp = monitor.topEnergyApps.first?.name ?? "WindowServer"
@@ -662,11 +794,11 @@ private struct StatusOverviewSection: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     PulsingHeaderSymbolView(
-                        systemName: isMacBook ? "battery.100.bolt" : (engine.telemetry.isConnected ? "bolt.fill" : "powerplug.fill"),
+                        systemName: isMacBook ? "battery.100.bolt" : (upsConnected ? "bolt.fill" : "powerplug.fill"),
                         size: 13,
                         color: Color(red: 0.35, green: 0.82, blue: 0.55)
                     )
-                    Text(isMacBook ? "电池" : (engine.telemetry.isConnected ? "UPS 供电" : "AC 供电"))
+                    Text(isMacBook ? "电池" : (upsConnected ? "UPS 供电" : "AC 供电"))
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
                     Spacer()
@@ -854,32 +986,6 @@ private struct StatusOverviewSection: View {
                         .font(.system(size: 12.5))
                         .foregroundStyle(theme.secondaryText)
                     Spacer()
-
-                    let wifiLL = WiFiLowLatencyManager.shared
-                    Button(action: {
-                        wifiLL.toggleLowLatency()
-                    }) {
-                        HStack(spacing: 4) {
-                            if wifiLL.isBusy {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .scaleEffect(0.65)
-                            } else if wifiLL.isLowLatencyActive {
-                                Circle()
-                                    .fill(Color.green)
-                                    .frame(width: 6, height: 6)
-                            }
-                            Text(wifiLL.statusMessage)
-                                .font(.system(size: 12.5, weight: wifiLL.isLowLatencyActive ? .medium : .regular))
-                                .foregroundStyle(wifiLL.isLowLatencyActive ? Color.green : theme.secondaryText)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-                    .help(wifiLL.isLowLatencyActive
-                        ? "低延迟模式已开启：暂停隔空投送、iPhone 镜像及其他 AWDL 直连，关闭即可恢复。"
-                        : "开启后暂停隔空投送、iPhone 镜像及其他 AWDL 直连，消除信道跳跃延迟波动；关闭即可恢复。")
                 }
                 .lineLimit(1)
             }
@@ -1602,7 +1708,7 @@ struct MiniWaveformLine: View {
     var history: [Double] = []
     var color: Color
 
-    var body: some View {
+    public var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
@@ -1698,7 +1804,7 @@ struct DualSparklineView: View {
     var uploadHistory: [Double] = []
     var color: Color
 
-    var body: some View {
+    public var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
@@ -1850,7 +1956,7 @@ public struct EnergyAppRowView: View {
 private struct AppIconImageView: View {
     let pid: pid_t
 
-    var body: some View {
+    public var body: some View {
         let icon: NSImage = {
             if let running = NSRunningApplication(processIdentifier: pid), let img = running.icon {
                 return img
@@ -1864,296 +1970,40 @@ private struct AppIconImageView: View {
     }
 }
 
-// MARK: - Section 3: UPS & Battery Center (UPS 续航中枢)
+// MARK: - Discrete Aligned Slider (macOS 原生液态玻璃流体滑块)
 
-private struct UPSCenterSection: View {
-    var engine: PowerSourceEngine
-    var monitor: SystemResourceMonitor
-    @Bindable var upsSettings: SystemUPSSettingsManager
-    @Bindable var diskGuardian: DiskGuardian
-    var toggles: FeatureToggleManager
-    let theme: LiquidGlassTheme
+public struct DiscreteAlignedSlider: View {
+    public let title: String
+    @Binding public var enabled: Bool
+    @Binding public var value: Int
+    public let options: [Int]
+    public let unit: String
+    public let theme: LiquidGlassTheme
+    @Environment(\.colorScheme) private var colorScheme
 
-    var body: some View {
-        VStack(spacing: 16) {
-            // 1. MacBook + Desktop UPS Replacement Banner
-            HStack(spacing: 14) {
-                Image(systemName: "laptopcomputer.and.ipad")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(.cyan)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(Color.cyan.opacity(0.14)))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text("完美替代 macOS 系统 UPS 设置")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.primaryText)
-                        Text("USB HID 直连")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.green)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.green.opacity(0.15)))
-                    }
-                    Text("macOS 在 MacBook 接入外置 UPS 时默认隐藏系统的 UPS 设置面板。SysPulse 通过底层 IOKit 与 USB HID 直接读取外置 UPS 电量、电压与供电状态，并提供独立的断电保护，在 MacBook 与 Mac 桌面设备上均可完整接管 UPS 控制。")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(theme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(theme.cardFill)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color.cyan.opacity(0.35), lineWidth: 1.0)
-                    )
-            )
-
-            // 2. Active Software Protection + System UPS Thresholds
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Label("UPS 自动断电保护策略", systemImage: "bolt.shield.fill")
-                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Spacer()
-                    Button {
-                        upsSettings.commitChangesToSystem(forceAuthorize: true) {}
-                    } label: {
-                        Label("同步写入系统", systemImage: "checkmark.shield.fill")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.cyan)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(Color.cyan.opacity(0.15)))
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-                }
-
-                // Software Watchdog Mode for MacBook & Desktop
-                HStack {
-                    Toggle("启用断电自动休眠 / 关机保护（MacBook 推荐）", isOn: $upsSettings.softwareProtectionEnabled)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(theme.primaryText)
-                        .pointingHandOnHover()
-
-                    Spacer()
-
-                    Picker("触发阈值后执行：", selection: $upsSettings.protectionAction) {
-                        Text("安全退出外接盘并睡眠 (推荐)").tag("sleep")
-                        Text("安全退出外接盘并关机").tag("shutdown")
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 250)
-                    .font(.system(size: 12))
-                    .pointingHandOnHover()
-                }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.pillFill))
-
-                // 3 Discrete Threshold Sliders with Pixel-Perfect Alignment
-                DiscreteAlignedSlider(
-                    title: "使用 UPS 电池供电达到此时间时保护 Mac",
-                    enabled: $upsSettings.haltAfterEnabled,
-                    value: $upsSettings.haltAfterMinutes,
-                    options: SystemUPSSettingsManager.validMinuteOptions,
-                    unit: "分钟",
-                    theme: theme
-                )
-
-                DiscreteAlignedSlider(
-                    title: "UPS 电池剩余使用时间低于此时间时保护 Mac",
-                    enabled: $upsSettings.haltRemainEnabled,
-                    value: $upsSettings.haltRemainMinutes,
-                    options: SystemUPSSettingsManager.validMinuteOptions,
-                    unit: "分钟",
-                    theme: theme
-                )
-
-                DiscreteAlignedSlider(
-                    title: "UPS 电池电量低于此水平时保护 Mac",
-                    enabled: $upsSettings.haltLevelEnabled,
-                    value: $upsSettings.haltLevelPercent,
-                    options: SystemUPSSettingsManager.validPercentOptions,
-                    unit: "%",
-                    theme: theme
-                )
-            }
-            .padding(18)
-            .background(cardBackground)
-
-            // 3. External Disk Escape Pod Settings
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label("外置磁盘安全逃生舱", systemImage: "externaldrive.fill.badge.timemachine")
-                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Spacer()
-                    Toggle("断电自动退盘保护", isOn: $diskGuardian.autoEjectEnabled)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .font(.system(size: 12, weight: .semibold))
-                        .pointingHandOnHover()
-                }
-
-                HStack {
-                    Text("断电后自动安全推出延时：")
-                        .font(.system(size: 12))
-                        .foregroundStyle(theme.secondaryText)
-                    Picker("", selection: $diskGuardian.delayMinutes) {
-                        Text("断电后 1 分钟").tag(1)
-                        Text("断电后 3 分钟 (推荐)").tag(3)
-                        Text("断电后 5 分钟").tag(5)
-                        Text("断电后 10 分钟").tag(10)
-                    }
-                    .frame(width: 180)
-                    .pointingHandOnHover()
-                    Spacer()
-                    Button("立即推出所有外接盘") {
-                        diskGuardian.emergencyEjectAll()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .pointingHandOnHover()
-                }
-            }
-            .padding(18)
-            .background(cardBackground)
-
-            // 4. 供电事件记录
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Label("供电事件记录", systemImage: "clock.arrow.circlepath")
-                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Spacer()
-                    if !engine.events.isEmpty {
-                        Button {
-                            withAnimation(.spring(duration: 0.28, bounce: 0.0)) {
-                                engine.clearEvents()
-                            }
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 10, weight: .medium))
-                                Text("清空记录")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundStyle(theme.secondaryText)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(theme.pillFill))
-                        }
-                        .buttonStyle(.plain)
-                        .pointingHandOnHover()
-                        .help("清空所有供电事件记录")
-                    } else {
-                        Text("0 条记录")
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundStyle(theme.secondaryText)
-                    }
-                }
-
-                if engine.events.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 6) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .font(.system(size: 22))
-                                .foregroundStyle(Color.green.opacity(0.8))
-                            Text("市电供电稳定，暂无电网中断或告警事件")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(theme.secondaryText)
-                        }
-                        .padding(.vertical, 14)
-                        Spacer()
-                    }
-                } else {
-                    VStack(spacing: 8) {
-                        ForEach(engine.events.prefix(10)) { event in
-                            HStack(spacing: 12) {
-                                Circle()
-                                    .fill(powerEventColor(event.type))
-                                    .frame(width: 8, height: 8)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(event.type.rawValue)
-                                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(theme.primaryText)
-                                    Text(event.details)
-                                        .font(.system(size: 10.5))
-                                        .foregroundStyle(theme.secondaryText)
-                                }
-
-                                Spacer()
-
-                                Text(event.timestamp.formatted(date: .numeric, time: .standard))
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(theme.secondaryText)
-                            }
-                            .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(theme.pillFill))
-                        }
-                    }
-                }
-            }
-            .padding(18)
-            .background(cardBackground)
-        }
+    public init(title: String, enabled: Binding<Bool>, value: Binding<Int>, options: [Int], unit: String, theme: LiquidGlassTheme) {
+        self.title = title
+        self._enabled = enabled
+        self._value = value
+        self.options = options
+        self.unit = unit
+        self.theme = theme
     }
 
-    private func powerEventColor(_ type: PowerEventType) -> Color {
-        switch type {
-        case .powerCut, .batteryLow:
-            return LiquidTheme.crimsonAlert
-        case .powerRestored:
-            return LiquidTheme.mintGreen
-        case .voltageDip, .voltageSurge:
-            return LiquidTheme.amberWarning
-        case .diskEjected, .networkNotified:
-            return Color.cyan
-        case .selfTest:
-            return Color.purple
-        }
-    }
-
-    private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(theme.cardFill)
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(theme.cardBorder, lineWidth: 0.9)
-            )
-    }
-}
-
-// MARK: - Discrete Aligned Slider
-
-private struct DiscreteAlignedSlider: View {
-    let title: String
-    @Binding var enabled: Bool
-    @Binding var value: Int
-    let options: [Int]
-    let unit: String
-    let theme: LiquidGlassTheme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Toggle(title, isOn: $enabled)
                     .toggleStyle(.checkbox)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(theme.primaryText)
                     .pointingHandOnHover()
+
                 Spacer()
+
                 Text("\(value) \(unit)")
-                    .font(.system(size: 12.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(enabled ? .cyan : theme.secondaryText)
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(enabled ? Color.orange : theme.secondaryText)
             }
 
             GeometryReader { geo in
@@ -2179,18 +2029,46 @@ private struct DiscreteAlignedSlider: View {
                 let thumbX = trackInset + usableWidth * activeRatio
 
                 ZStack(alignment: .topLeading) {
-                    Capsule()
-                        .fill(theme.gaugeTrack)
-                        .frame(width: usableWidth, height: 4)
-                        .position(x: trackInset + usableWidth / 2, y: 11)
+                    // 1. 液态玻璃底槽 (7pt 圆角胶囊滑道，带微光阴影)
+                    Capsule(style: .continuous)
+                        .fill(theme.cardFill.opacity(0.85))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(theme.cardBorder.opacity(0.65), lineWidth: 0.8)
+                        )
+                        .frame(width: usableWidth, height: 7)
+                        .position(x: trackInset + usableWidth / 2, y: 12)
 
+                    // 2. 润泽激活水流填充层 (带有表面张力反光)
                     if enabled && selectedIdx > 0 {
-                        Capsule()
-                            .fill(Color.cyan)
-                            .frame(width: usableWidth * activeRatio, height: 4)
-                            .position(x: trackInset + (usableWidth * activeRatio) / 2, y: 11)
+                        Capsule(style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color.orange.opacity(0.95),
+                                        Color.yellow.opacity(0.85)
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .strokeBorder(
+                                        LinearGradient(
+                                            colors: [Color.white.opacity(0.55), Color.clear],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        ),
+                                        lineWidth: 0.6
+                                    )
+                            )
+                            .shadow(color: Color.orange.opacity(0.35), radius: 3, x: 0, y: 1)
+                            .frame(width: usableWidth * activeRatio, height: 7)
+                            .position(x: trackInset + (usableWidth * activeRatio) / 2, y: 12)
                     }
 
+                    // 3. 刻度点与刻度文字
                     ForEach(Array(options.enumerated()), id: \.offset) { idx, opt in
                         let ratio = CGFloat(idx) / CGFloat(max(1, count - 1))
                         let xPos = trackInset + usableWidth * ratio
@@ -2198,24 +2076,24 @@ private struct DiscreteAlignedSlider: View {
 
                         Circle()
                             .fill(
-                                !enabled ? theme.secondaryText.opacity(0.25) :
-                                (idx <= selectedIdx ? Color.cyan : theme.secondaryText.opacity(0.4))
+                                !enabled ? theme.secondaryText.opacity(0.20) :
+                                (idx <= selectedIdx ? Color.white.opacity(0.95) : theme.secondaryText.opacity(0.35))
                             )
-                            .frame(width: 4, height: 4)
-                            .position(x: xPos, y: 11)
+                            .frame(width: idx == selectedIdx ? 5 : 3.5, height: idx == selectedIdx ? 5 : 3.5)
+                            .position(x: xPos, y: 12)
 
                         Text("\(opt)\(unit)")
                             .font(.system(size: 10.5, weight: isCurrent && enabled ? .bold : .medium, design: .monospaced))
                             .foregroundStyle(
                                 !enabled ? theme.secondaryText.opacity(0.35) :
-                                (isCurrent ? .cyan : theme.secondaryText)
+                                (isCurrent ? Color.orange : theme.secondaryText)
                             )
                             .fixedSize()
-                            .position(x: xPos, y: 28)
+                            .position(x: xPos, y: 31)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 if enabled {
-                                    withAnimation(.spring(duration: 0.2)) {
+                                    withAnimation(.spring(response: 0.24, dampingFraction: 0.75)) {
                                         value = opt
                                     }
                                 }
@@ -2223,16 +2101,8 @@ private struct DiscreteAlignedSlider: View {
                             .pointingHandOnHover()
                     }
 
-                    Circle()
-                        .fill(enabled ? Color.white : Color.gray.opacity(0.6))
-                        .frame(width: 16, height: 16)
-                        .shadow(color: Color.black.opacity(0.22), radius: 2, x: 0, y: 1)
-                        .overlay(
-                            Circle()
-                                .stroke(enabled ? Color.cyan : Color.secondary.opacity(0.4), lineWidth: 2)
-                        )
-                        .position(x: thumbX, y: 11)
-                        .pointingHandOnHover()
+                    // 4. 原生液态玻璃微凸透镜滑块 (Lens Puck)
+                    liquidGlassSliderThumb(thumbX: thumbX)
                         .gesture(
                             DragGesture(minimumDistance: 0)
                                 .onChanged { gesture in
@@ -2243,16 +2113,67 @@ private struct DiscreteAlignedSlider: View {
                                     let nearestIdx = Int(round(ratio * CGFloat(count - 1)))
                                     let targetVal = options[max(0, min(count - 1, nearestIdx))]
                                     if value != targetVal {
-                                        value = targetVal
+                                        withAnimation(.spring(response: 0.24, dampingFraction: 0.75)) {
+                                            value = targetVal
+                                        }
                                     }
                                 }
                         )
                 }
             }
-            .frame(height: 38)
+            .frame(height: 42)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.pillFill))
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(theme.pillFill))
+    }
+
+    private func liquidGlassSliderThumb(thumbX: CGFloat) -> some View {
+        ZStack {
+            // 1. 基底高透折射微磨砂层 (通透有厚度)
+            Circle()
+                .fill(
+                    enabled
+                        ? (colorScheme == .dark ? Color.white.opacity(0.22) : Color.white.opacity(0.85))
+                        : Color.gray.opacity(0.25)
+                )
+
+            // 2. 纵向微凸透镜表面张力高光膜 (模拟凸透镜受顶光反射)
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(enabled ? (colorScheme == .dark ? 0.42 : 0.75) : 0.15),
+                            Color.white.opacity(enabled ? (colorScheme == .dark ? 0.08 : 0.20) : 0.05)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+            // 3. 极细棱镜反光边缘 (Prismatic Rim Light)
+            Circle()
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(enabled ? (colorScheme == .dark ? 0.65 : 0.95) : 0.3),
+                            Color.white.opacity(enabled ? (colorScheme == .dark ? 0.15 : 0.30) : 0.1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.9
+                )
+
+            // 4. 中央微核冷光水滴 (Lens Core)
+            Circle()
+                .fill(enabled ? Color.orange : Color.gray.opacity(0.5))
+                .frame(width: 7, height: 7)
+                .shadow(color: enabled ? Color.orange.opacity(0.5) : Color.clear, radius: 2)
+        }
+        .frame(width: 22, height: 22)
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.15), radius: 4, x: 0, y: 2)
+        .position(x: thumbX, y: 12)
+        .pointingHandOnHover()
     }
 }
 
@@ -2263,7 +2184,7 @@ private struct CustomizationTogglesSection: View {
     let theme: LiquidGlassTheme
     @Bindable var permissions = SystemPermissionManager.shared
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 16) {
             // 系统权限状态检测
             permissionCheckGroup
@@ -2448,7 +2369,7 @@ private struct WindowAboutSection: View {
     var engine: PowerSourceEngine
     let theme: LiquidGlassTheme
 
-    var body: some View {
+    public var body: some View {
         VStack(spacing: 16) {
             PowerGlassAppIconView(size: 80, forcedColorScheme: colorScheme)
                 .padding(.top, 8)
@@ -2545,7 +2466,7 @@ private struct WindowLiquidBackdrop: View {
     let state: PowerSupplyState
     let theme: LiquidGlassTheme
 
-    var body: some View {
+    public var body: some View {
         ZStack {
             LinearGradient(
                 colors: theme.backdropGradientColors(isAC: state.isAC),
@@ -2580,10 +2501,6 @@ public struct AppIconDropdownMenuView: View {
             menuRow(icon: "gearshape", title: "系统设置") {
                 navState.isIconMenuPresented = false
                 navState.openModal(tab: .settings)
-            }
-            menuRow(icon: "bolt.shield", title: "UPS 设置") {
-                navState.isIconMenuPresented = false
-                navState.openModal(tab: .ups)
             }
             menuRow(icon: "info.circle", title: "关于 SysPulse") {
                 navState.isIconMenuPresented = false

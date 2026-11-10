@@ -367,7 +367,7 @@ public final class SystemCleanerEngine {
                     CleanItem(
                         name: "废纸篓待清空文件 (系统与外置盘)",
                         category: .userTrash,
-                        bucket: .suggested,
+                        bucket: .needsReview,
                         path: primaryTrash,
                         sizeBytes: displaySize,
                         detail: "包含系统盘与外置挂载硬盘中等待永久清空的内容\(itemCountText)"
@@ -452,41 +452,24 @@ public final class SystemCleanerEngine {
             var freed: Int64 = 0
             var count = 0
 
-            for (idx, item) in toClean.enumerated() {
+            // 分离普通清理项与废纸篓收尾项
+            let regularItems = toClean.filter { $0.category != .userTrash && $0.path.lastPathComponent != ".Trash" }
+            let trashItems = toClean.filter { $0.category == .userTrash || $0.path.lastPathComponent == ".Trash" }
+
+            let totalSteps = max(1, regularItems.count + (trashItems.isEmpty ? 0 : 1))
+            var currentStep = 0
+
+            // 阶段一：清理常规临时垃圾与残留
+            for item in regularItems {
                 if Task.isCancelled { return }
                 guard matcher.isSafeToClean(url: item.path) else { continue }
 
-                let pct = Double(idx + 1) / Double(toClean.count)
+                currentStep += 1
+                let pct = Double(currentStep) / Double(totalSteps)
                 await self?.updateCleanProgress(progress: pct, name: "正在清理: \(item.name)")
 
-                if item.category == .userTrash || item.path.lastPathComponent == ".Trash" || item.path.lastPathComponent.hasPrefix(".Trash") {
-                    // 1. 原生委托 macOS Finder 清空所有卷的废纸篓（内置盘 + 外置盘，绕过 TCC 限制）
-                    let appleScriptSource = "tell application \"Finder\" to empty trash"
-                    if let script = NSAppleScript(source: appleScriptSource) {
-                        var err: NSDictionary?
-                        script.executeAndReturnError(&err)
-                    }
-
-                    // 2. 双保险：遍历所有已知的 Trash 目录尝试清理子项
-                    let allTrashes = Self.discoverAllTrashLocations()
-                    var directRemovedCount = 0
-                    for tURL in allTrashes {
-                        if let subs = try? fm.contentsOfDirectory(at: tURL, includingPropertiesForKeys: nil, options: []) {
-                            for sub in subs {
-                                if (try? fm.removeItem(at: sub)) != nil {
-                                    directRemovedCount += 1
-                                }
-                            }
-                        }
-                    }
-
-                    freed += item.sizeBytes
-                    count += max(1, directRemovedCount)
-
-                    // 通知访达系统文件状态已变更，立即刷新废纸篓图标为“空”
-                    NSWorkspace.shared.noteFileSystemChanged(item.path.path)
-                } else if item.path.pathExtension.lowercased() == "dmg" || item.path.pathExtension.lowercased() == "pkg" {
-                    // Remove installer file
+                if item.path.pathExtension.lowercased() == "dmg" || item.path.pathExtension.lowercased() == "pkg" || item.path.pathExtension.lowercased() == "iso" {
+                    // 安装包残留：遵循用户选择的安全模式（移到废纸篓留后悔药 vs 物理直接删除）
                     if mode == .moveToTrash {
                         if (try? fm.trashItem(at: item.path, resultingItemURL: nil)) != nil {
                             freed += item.sizeBytes
@@ -499,7 +482,7 @@ public final class SystemCleanerEngine {
                         }
                     }
                 } else {
-                    // Clean folder contents and only count actually deleted bytes
+                    // 系统与应用缓存、运行日志、Xcode/Homebrew/npm 开发产物：纯临时衍生垃圾，直接安全物理释放，绝不污染倒灌废纸篓
                     if let subs = try? fm.contentsOfDirectory(at: item.path, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: []) {
                         var folderFreed: Int64 = 0
                         var allRemoved = !subs.isEmpty
@@ -509,13 +492,7 @@ public final class SystemCleanerEngine {
                                 continue
                             }
                             let subSize = Self.calculateItemOrDirectorySize(url: sub)
-                            let removed: Bool
-                            if mode == .moveToTrash {
-                                removed = (try? fm.trashItem(at: sub, resultingItemURL: nil)) != nil
-                            } else {
-                                removed = (try? fm.removeItem(at: sub)) != nil
-                            }
-                            if removed {
+                            if (try? fm.removeItem(at: sub)) != nil {
                                 count += 1
                                 folderFreed += subSize
                             } else {
@@ -528,6 +505,43 @@ public final class SystemCleanerEngine {
                             freed += min(item.sizeBytes, folderFreed)
                         }
                     }
+                }
+            }
+
+            // 阶段二：用户明确勾选废纸篓时的压轴清空（最后一步统一执行）
+            if !trashItems.isEmpty {
+                if Task.isCancelled { return }
+                currentStep += 1
+                let pct = Double(currentStep) / Double(totalSteps)
+                await self?.updateCleanProgress(progress: pct, name: "正在清空系统与外置盘废纸篓…")
+
+                // 1. 原生委托 macOS Finder 清空所有卷的废纸篓（内置盘 + 外置盘）
+                let appleScriptSource = "tell application \"Finder\" to empty trash"
+                if let script = NSAppleScript(source: appleScriptSource) {
+                    var err: NSDictionary?
+                    script.executeAndReturnError(&err)
+                }
+
+                // 2. 双保险：遍历所有已知的 Trash 目录尝试清理子项
+                let allTrashes = Self.discoverAllTrashLocations()
+                var directRemovedCount = 0
+                for tURL in allTrashes {
+                    if let subs = try? fm.contentsOfDirectory(at: tURL, includingPropertiesForKeys: nil, options: []) {
+                        for sub in subs {
+                            if (try? fm.removeItem(at: sub)) != nil {
+                                directRemovedCount += 1
+                            }
+                        }
+                    }
+                }
+
+                let trashSize = trashItems.reduce(0) { $0 + $1.sizeBytes }
+                freed += trashSize
+                count += max(1, directRemovedCount)
+
+                // 通知访达系统文件状态已变更，立即刷新废纸篓图标为“空”
+                if let firstTrash = trashItems.first?.path {
+                    NSWorkspace.shared.noteFileSystemChanged(firstTrash.path)
                 }
             }
 

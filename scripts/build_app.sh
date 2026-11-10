@@ -79,6 +79,19 @@ for t in 1 2 3 4; do
         cp "$HERE/Resources/HealthRabbit-Tier${t}-1024.png" "$RESOURCES_DIR/"
     fi
 done
+# 编译 PS Portal 串流画质增强原生 BPF 注入引擎 portal_engine
+if [ -f "$HERE/scripts/portal_engine.c" ]; then
+    mkdir -p "$HERE/Resources/Plugins/PSPortal"
+    /usr/bin/clang -O2 -arch arm64 \
+        "$HERE/scripts/portal_engine.c" \
+        -o "$HERE/Resources/Plugins/PSPortal/portal_engine"
+    chmod 755 "$HERE/Resources/Plugins/PSPortal/portal_engine"
+fi
+
+if [ -d "$HERE/Resources/Plugins" ]; then
+    mkdir -p "$RESOURCES_DIR/Plugins"
+    cp -R "$HERE/Resources/Plugins/"* "$RESOURCES_DIR/Plugins/"
+fi
 "$MACOS_DIR/$APP_NAME" --generate-icons "$ICON_TMP_DIR"
 /usr/bin/iconutil -c icns "$ICON_TMP_DIR/AppIcon-Light.iconset" -o "$RESOURCES_DIR/AppIcon-Light.icns"
 /usr/bin/iconutil -c icns "$ICON_TMP_DIR/AppIcon-Dark.iconset" -o "$RESOURCES_DIR/AppIcon-Dark.icns"
@@ -118,6 +131,8 @@ cat << EOF > "$CONTENTS_DIR/Info.plist"
     </dict>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>SysPulse 需要使用蓝牙功能读取妙控键盘、妙控鼠标、触控板及 AirPods 的真实电量状态。</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SysPulse 需要访问局域网以发现 PS5、PS Portal 及其他局域网网络设备并进行通信测量。</string>
 </dict>
 </plist>
 EOF
@@ -155,12 +170,19 @@ echo "✅ 打包并启动完成:"
 echo "   - 独立 App: $HERE/../build/$APP_NAME.app"
 echo "   - 可分享 DMG: $DMG_OUTPUT"
 
-# 下次编译自动递增 0.0.1（若为带后缀的测试支线则保持当前测试版本号）
+# 下次编译自动递增版本号
 if [[ "$patch" != *"_"* ]]; then
     NEXT_PATCH=$((PATCH_NUM + 1))
     NEXT_VERSION="${major}.${minor}.${NEXT_PATCH}"
     echo "$NEXT_VERSION" > "$VERSION_FILE"
     echo "🔢 下一次编译版本将自动递增为: v$NEXT_VERSION"
+elif [[ "$VERSION" =~ (.*_Test)([0-9]+)$ ]]; then
+    PREFIX="${BASH_REMATCH[1]}"
+    NUM="${BASH_REMATCH[2]}"
+    NEXT_NUM=$((NUM + 1))
+    NEXT_VERSION="${PREFIX}${NEXT_NUM}"
+    echo "$NEXT_VERSION" > "$VERSION_FILE"
+    echo "🔢 下一次编译测试版本将自动递增为: v$NEXT_VERSION"
 else
     echo "🧪 当前为测试支线版本: v$VERSION"
 fi

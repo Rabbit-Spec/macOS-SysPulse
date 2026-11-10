@@ -58,6 +58,74 @@ public final class FeatureToggleManager {
         didSet { save("SP_Mod_MacBookDemoMode", enableMacBookDemoMode) }
     }
 
+    // MARK: - 3. Plugins Center Module Switches (插件中心按需解耦开关，首次安装默认全关)
+
+    public var enablePluginPSPortal: Bool {
+        didSet { save("SP_Plugin_PSPortal", enablePluginPSPortal) }
+    }
+    public var enablePluginWiFiLatency: Bool {
+        didSet { save("SP_Plugin_WiFiLatency", enablePluginWiFiLatency) }
+    }
+    public var enablePluginARPSniffer: Bool {
+        didSet { save("SP_Plugin_ARPSniffer", enablePluginARPSniffer) }
+    }
+    public var enablePluginUPSManager: Bool {
+        didSet { save("SP_Plugin_UPSManager", enablePluginUPSManager) }
+    }
+
+    public var enabledPluginsCount: Int {
+        [enablePluginPSPortal, enablePluginWiFiLatency, enablePluginARPSniffer, enablePluginUPSManager].filter { $0 }.count
+    }
+
+    public func isPluginEnabled(_ type: PluginModuleType) -> Bool {
+        switch type {
+        case .psPortal: return enablePluginPSPortal
+        case .wifiLatency: return enablePluginWiFiLatency
+        case .arpSniffer: return enablePluginARPSniffer
+        case .upsManager: return enablePluginUPSManager
+        }
+    }
+
+    public func setPluginEnabled(_ type: PluginModuleType, _ enabled: Bool) {
+        switch type {
+        case .psPortal:
+            guard enablePluginPSPortal != enabled else { return }
+            enablePluginPSPortal = enabled
+            if enabled {
+                PSPortalPluginManager.shared.activate()
+            } else {
+                PSPortalPluginManager.shared.deactivate()
+            }
+        case .wifiLatency:
+            guard enablePluginWiFiLatency != enabled else { return }
+            enablePluginWiFiLatency = enabled
+            if enabled {
+                WiFiLowLatencyManager.shared.activate()
+            } else {
+                WiFiLowLatencyManager.shared.deactivate()
+            }
+        case .arpSniffer:
+            guard enablePluginARPSniffer != enabled else { return }
+            enablePluginARPSniffer = enabled
+            if enabled {
+                LanDeviceSnifferEngine.shared.activate()
+            } else {
+                LanDeviceSnifferEngine.shared.deactivate()
+            }
+        case .upsManager:
+            guard enablePluginUPSManager != enabled else { return }
+            enablePluginUPSManager = enabled
+            if enabled {
+                PowerSourceEngine.shared.activate()
+                SystemUPSSettingsManager.shared.refreshIfEnabled()
+                DiskGuardian.shared.refreshDisks()
+            } else {
+                PowerSourceEngine.shared.deactivate()
+                DiskGuardian.shared.handlePowerRestored()
+            }
+        }
+    }
+
     // MARK: - Persistence Engine
 
     private static var settingsFileURL: URL {
@@ -104,6 +172,11 @@ public final class FeatureToggleManager {
         self.enablePowerEvents = readBool("SP_Mod_PowerEvents", legacyKey: "PG_Mod_PowerEvents", defaultValue: true)
         self.enableMacBookDemoMode = readBool("SP_Mod_MacBookDemoMode", legacyKey: "PG_enableMacBookDemoMode", defaultValue: false)
 
+        self.enablePluginPSPortal = readBool("SP_Plugin_PSPortal", defaultValue: false)
+        self.enablePluginWiFiLatency = readBool("SP_Plugin_WiFiLatency", defaultValue: false)
+        self.enablePluginARPSniffer = readBool("SP_Plugin_ARPSniffer", defaultValue: false)
+        self.enablePluginUPSManager = readBool("SP_Plugin_UPSManager", defaultValue: false)
+
         saveAllToDisk()
     }
 
@@ -129,7 +202,12 @@ public final class FeatureToggleManager {
             "SP_Mod_StorageCleaner": enableStorageCleaner,
             "SP_Mod_AppManager": enableAppManager,
             "SP_Mod_PowerEvents": enablePowerEvents,
-            "SP_Mod_MacBookDemoMode": enableMacBookDemoMode
+            "SP_Mod_MacBookDemoMode": enableMacBookDemoMode,
+
+            "SP_Plugin_PSPortal": enablePluginPSPortal,
+            "SP_Plugin_WiFiLatency": enablePluginWiFiLatency,
+            "SP_Plugin_ARPSniffer": enablePluginARPSniffer,
+            "SP_Plugin_UPSManager": enablePluginUPSManager
         ]
         if let data = try? JSONEncoder().encode(dict) {
             try? data.write(to: Self.settingsFileURL, options: .atomic)
@@ -152,6 +230,11 @@ public final class FeatureToggleManager {
         enableAppManager = true
         enablePowerEvents = true
         enableMacBookDemoMode = false
+
+        setPluginEnabled(.psPortal, false)
+        setPluginEnabled(.wifiLatency, false)
+        setPluginEnabled(.arpSniffer, false)
+        setPluginEnabled(.upsManager, false)
         saveAllToDisk()
     }
 }

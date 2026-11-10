@@ -321,7 +321,7 @@ public final class SystemResourceMonitor {
                 let needDisk = toggles.enableDiskIOMonitor
                 let needApps = toggles.enableTopEnergyAppsMonitor
                 let needRuntime = toggles.enableLoadRuntimeMonitor
-                let upsTelemetry = PowerSourceEngine.shared.telemetry
+                let upsTelemetry = toggles.enablePluginUPSManager ? PowerSourceEngine.shared.telemetry : UPSTelemetry()
 
                 self.workerQueue.async {
                     let snapshot = state.collectSnapshot(

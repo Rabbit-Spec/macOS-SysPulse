@@ -31,20 +31,8 @@ public final class NetworkMonitorViewModel {
     public var selectedRankingTab: AppRankingSubTab = .apps
     public var appTrafficSortMode: AppTrafficSortMode = .today
 
-    // 24-Hour Real Traffic Data (0:00 - 23:00) in MB
-    public var hourlyTrafficMB: [Double] {
-        let curHour = Calendar.current.component(.hour, from: Date())
-        let mgr = NetworkTrafficPersistenceManager.shared
-        var rawMB = mgr.hourlyBytes.map { Double($0) / (1024.0 * 1024.0) }
-
-        // If today has recorded traffic but hourly sum is 0, attribute today's traffic to current hour
-        let todayMB = (todayDownloadGB + todayUploadGB) * 1024.0
-        let sumMB = rawMB.reduce(0, +)
-        if sumMB < 0.1 && todayMB > 0 && curHour < 24 {
-            rawMB[curHour] = todayMB
-        }
-        return rawMB
-    }
+    // 24-Hour Real Traffic Data (0:00 - 23:00) in MB (@MainActor 主线程安全快照，防止多线程竞争读取)
+    public private(set) var hourlyTrafficMB: [Double] = Array(repeating: 0.0, count: 24)
 
     public var peakHourIndex: Int {
         let curHour = Calendar.current.component(.hour, from: Date())
@@ -154,18 +142,9 @@ public final class NetworkMonitorViewModel {
     private var lastTrafficPollTime: Date = Date.distantPast
 
     private init() {
-        // Safe decoupled initialization backed by NetworkTrafficPersistenceManager
-        let mgr = NetworkTrafficPersistenceManager.shared
-        let tIn = Double(mgr.todayDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
-        let tOut = Double(mgr.todayUploadBytes) / (1024.0 * 1024.0 * 1024.0)
-        let mIn = Double(mgr.monthDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
-        let mOut = Double(mgr.monthUploadBytes) / (1024.0 * 1024.0 * 1024.0)
-
-        self.todayDownloadGB = tIn
-        self.todayUploadGB = tOut
-        self.monthDownloadGB = mIn
-        self.monthUploadGB = mOut
-        self.updateHourlyDistribution()
+        // Safe decoupled initialization backed by NetworkTrafficPersistenceManager atomic snapshot
+        let snapshot = NetworkTrafficPersistenceManager.shared.currentSnapshot()
+        applyTrafficSnapshot(snapshot)
     }
 
     public func refreshStats(gatewayIP: String? = nil, iface: String? = nil) {
@@ -415,22 +394,14 @@ public final class NetworkMonitorViewModel {
                     hardwareOut: outBytes
                 )
 
-                let mgr = NetworkTrafficPersistenceManager.shared
-                let tInGB = Double(mgr.todayDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
-                let tOutGB = Double(mgr.todayUploadBytes) / (1024.0 * 1024.0 * 1024.0)
-                let mInGB = Double(mgr.monthDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
-                let mOutGB = Double(mgr.monthUploadBytes) / (1024.0 * 1024.0 * 1024.0)
-
+                let snapshot = NetworkTrafficPersistenceManager.shared.currentSnapshot()
                 await MainActor.run {
-                    self.todayDownloadGB = tInGB
-                    self.todayUploadGB = tOutGB
-                    self.monthDownloadGB = mInGB
-                    self.monthUploadGB = mOutGB
-                    self.updateHourlyDistribution()
+                    self.applyTrafficSnapshot(snapshot)
                 }
             } else {
+                let snapshot = NetworkTrafficPersistenceManager.shared.currentSnapshot()
                 await MainActor.run {
-                    self.updateHourlyDistribution()
+                    self.applyTrafficSnapshot(snapshot)
                 }
             }
         }
@@ -459,8 +430,28 @@ public final class NetworkMonitorViewModel {
         return (0, 0)
     }
 
-    private func updateHourlyDistribution() {
-        // Hourly distribution is now driven directly by NetworkTrafficPersistenceManager.shared.hourlyBytes
+    private func applyTrafficSnapshot(_ snapshot: NetworkTrafficPersistenceManager.TrafficTotalsSnapshot) {
+        let tInGB = Double(snapshot.todayDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
+        let tOutGB = Double(snapshot.todayUploadBytes) / (1024.0 * 1024.0 * 1024.0)
+        let mInGB = Double(snapshot.monthDownloadBytes) / (1024.0 * 1024.0 * 1024.0)
+        let mOutGB = Double(snapshot.monthUploadBytes) / (1024.0 * 1024.0 * 1024.0)
+
+        self.todayDownloadGB = tInGB
+        self.todayUploadGB = tOutGB
+        self.monthDownloadGB = mInGB
+        self.monthUploadGB = mOutGB
+
+        let curHour = Calendar.current.component(.hour, from: Date())
+        var rawMB = snapshot.hourlyBytes.map { Double($0) / (1024.0 * 1024.0) }
+        if rawMB.count < 24 {
+            rawMB = Array(repeating: 0.0, count: 24)
+        }
+        let todayMB = (tInGB + tOutGB) * 1024.0
+        let sumMB = rawMB.reduce(0, +)
+        if sumMB < 0.1 && todayMB > 0 && curHour < 24 {
+            rawMB[curHour] = todayMB
+        }
+        self.hourlyTrafficMB = rawMB
     }
 
     // MARK: - 3. Active Sockets & Interfaces (lsof 进程网络拓扑实时动态遥测)

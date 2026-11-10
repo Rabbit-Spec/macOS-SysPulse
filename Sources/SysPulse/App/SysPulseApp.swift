@@ -326,8 +326,10 @@ struct SysPulseApp {
                 StudioWindowNavigationState.shared.selectedTab = .cleaner
                 StudioWindowNavigationState.shared.openModal(tab: .cleaner)
                 CleanProtectionStore.shared.showingProtectionList = true
-            } else if sectionName == "upsModal" {
-                StudioWindowNavigationState.shared.openModal(tab: .ups)
+            } else if sectionName == "upsModal" || sectionName == "ups" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = .upsManager
             } else if sectionName == "aboutModal" {
                 StudioWindowNavigationState.shared.openModal(tab: .about)
             }
@@ -352,6 +354,9 @@ struct SysPulseApp {
                 while SystemCleanerEngine.shared.isScanning && Date() < deadline {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.2))
                 }
+            } else if sectionName == "plugins" || sectionName == "psportal" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
             } else if sectionName == "space" || sectionName == "spaceAnalysis" {
                 StudioWindowNavigationState.shared.selectedTab = .space
                 StorageAnalysisEngine.shared.startScan(location: .downloads)
@@ -804,6 +809,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tab5.target = self
         moduleMenu.addItem(tab5)
 
+        let tab6 = NSMenuItem(title: "模块中心", action: #selector(menuSwitchToPlugins), keyEquivalent: "6")
+        tab6.target = self
+        moduleMenu.addItem(tab6)
+
         // 4. 窗口菜单
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
@@ -850,5 +859,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuSwitchToSpace() {
         MainStudioWindowController.shared.showWindow(section: .spaceAnalysis)
+    }
+
+    @objc private func menuSwitchToPlugins() {
+        MainStudioWindowController.shared.showWindow(section: .plugins)
     }
 }

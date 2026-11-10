@@ -38,15 +38,32 @@ public final class PowerSourceEngine {
     private var hasTriggeredSoftwareProtectionThisOutage: Bool = false
 
     public init() {
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            activate()
+        }
+    }
+
+    public func activate() {
         setupHIDWatchdog()
         refresh(forceUIUpdate: true)
         startListening()
         seedInitialEvent()
     }
 
+    public func deactivate() {
+        stopListening()
+        isSimulationOutage = false
+        outageStartTime = nil
+        previousState = .unknown
+        lastHIDSnapshot = nil
+        hasTriggeredSoftwareProtectionThisOutage = false
+        telemetry = UPSTelemetry(isConnected: false)
+        onTelemetryUpdated?()
+    }
+
     public func setPanelVisible(_ visible: Bool) {
         isPanelVisible = visible
-        if visible {
+        if visible && FeatureToggleManager.shared.enablePluginUPSManager {
             HIDHardwareWatchdog.shared.triggerManualPoll()
             refresh(forceUIUpdate: true)
         }
