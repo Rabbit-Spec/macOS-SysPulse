@@ -104,16 +104,16 @@ public final class PSPortalPluginManager {
         pluginDirectoryURL.appendingPathComponent("manifest.json")
     }
 
-    private var scriptFileURL: URL {
-        let appSupportScript = pluginDirectoryURL.appendingPathComponent("portal_relay.py")
-        if FileManager.default.fileExists(atPath: appSupportScript.path) {
-            return appSupportScript
+    private var engineFileURL: URL {
+        let appSupportEngine = pluginDirectoryURL.appendingPathComponent("portal_engine")
+        if FileManager.default.isExecutableFile(atPath: appSupportEngine.path) {
+            return appSupportEngine
         }
-        if let bundleScript = Bundle.main.resourceURL?.appendingPathComponent("Plugins/PSPortal/portal_relay.py"),
-           FileManager.default.fileExists(atPath: bundleScript.path) {
-            return bundleScript
+        if let bundleEngine = Bundle.main.resourceURL?.appendingPathComponent("Plugins/PSPortal/portal_engine"),
+           FileManager.default.isExecutableFile(atPath: bundleEngine.path) {
+            return bundleEngine
         }
-        return appSupportScript
+        return appSupportEngine
     }
 
     private var isBootstrapped: Bool = false
@@ -193,15 +193,15 @@ public final class PSPortalPluginManager {
             return
         }
 
-        // 全量同步官方原版开源代码与内置 Python 依赖
+        // 全量同步原生引擎二进制、官方开源参考脚本与 manifest
         if let items = try? fileManager.contentsOfDirectory(atPath: bundlePluginDir.path) {
             for item in items {
                 let src = bundlePluginDir.appendingPathComponent(item)
                 let dst = dir.appendingPathComponent(item)
-                if !fileManager.fileExists(atPath: dst.path) || item.hasSuffix(".py") || item == "scapy" || item == "manifest.json" {
+                if !fileManager.fileExists(atPath: dst.path) || item.hasSuffix(".py") || item == "scapy" || item == "manifest.json" || item == "portal_engine" {
                     try? fileManager.removeItem(at: dst)
                     try? fileManager.copyItem(at: src, to: dst)
-                    if item.hasSuffix(".py") {
+                    if item.hasSuffix(".py") || item == "portal_engine" {
                         try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
                     }
                 }
@@ -223,16 +223,6 @@ public final class PSPortalPluginManager {
         }
         """
         try? json.write(to: manifestFileURL, atomically: true, encoding: .utf8)
-    }
-
-    private func writeDefaultScript() {
-        let code = """
-        #!/usr/bin/env python3
-        # -*- coding: utf-8 -*-
-        import sys, time
-        print("[SysPulse] PS Portal Relay 就绪", flush=True)
-        """
-        try? code.write(to: scriptFileURL, atomically: true, encoding: .utf8)
     }
 
     // MARK: - 属性与配置读取
@@ -396,10 +386,6 @@ public final class PSPortalPluginManager {
         self.isScanningDevices = true
         self.appendLog("[SysPulse] 正在扫描局域网活动设备 (ARP 协议表与网络探测)...")
 
-        let bundleScript = Bundle.main.resourceURL?.appendingPathComponent("Plugins/PSPortal/portal_relay.py").path
-        let appSupportScript = pluginDirectoryURL.appendingPathComponent("portal_relay.py").path
-        let script = (bundleScript != nil && FileManager.default.fileExists(atPath: bundleScript!)) ? bundleScript! : appSupportScript
-        let iface = selectedInterface
         let currentPS5 = self.ps5IP
         let currentPortal = self.portalIP
 
@@ -407,38 +393,21 @@ public final class PSPortalPluginManager {
             var results: [DiscoveredDevice] = []
             var seen = Set<String>()
 
-            // 0. 尝试轻量并发 Ping 常见节点与已知目标以激活局域网 ARP 响应
+            // 1. 并发轻量 Ping 常见节点与已知目标以刷新系统 ARP 表（纯原生命令，不依赖 Python）
             let testHosts = ["192.168.50.1", "192.168.50.50", "192.168.50.107", currentPS5, currentPortal].filter { !$0.isEmpty }
+            var pingTasks: [Process] = []
             for host in testHosts {
                 let pingTask = Process()
                 pingTask.executableURL = URL(fileURLWithPath: "/sbin/ping")
                 pingTask.arguments = ["-c", "1", "-W", "150", host]
                 pingTask.standardOutput = Pipe()
                 pingTask.standardError = Pipe()
-                try? pingTask.run()
-            }
-
-            // 1. 优先调用内置 Python 引擎执行多维局域网 ARP 扫描
-            if FileManager.default.fileExists(atPath: script) {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                proc.arguments = [script, "--scan", "--interface", iface]
-                let pipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = Pipe()
-
-                if (try? proc.run()) != nil {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if let decoded = try? JSONDecoder().decode([DiscoveredDevice].self, from: data), !decoded.isEmpty {
-                        for dev in decoded {
-                            if !seen.contains(dev.ip) {
-                                seen.insert(dev.ip)
-                                results.append(dev)
-                            }
-                        }
-                    }
+                if (try? pingTask.run()) != nil {
+                    pingTasks.append(pingTask)
                 }
+            }
+            for task in pingTasks {
+                task.waitUntilExit()
             }
 
             // 2. 深度读取系统内核 ARP 表（/usr/sbin/arp -a -n）
@@ -587,9 +556,9 @@ public final class PSPortalPluginManager {
         }
         saveConfig()
 
-        let script = scriptFileURL.path
-        guard FileManager.default.fileExists(atPath: script) else {
-            lastError = "未找到插件主运行脚本: portal_relay.py"
+        let engine = engineFileURL.path
+        guard FileManager.default.isExecutableFile(atPath: engine) else {
+            lastError = "未找到插件原生中继引擎: portal_engine"
             appendLog("[错误] \(lastError!)")
             return
         }
@@ -599,39 +568,37 @@ public final class PSPortalPluginManager {
         isListening = true
         isStreamActive = false
 
-        appendLog("[SysPulse] 启动 PS Portal 串流画质增强模块...")
+        appendLog("[SysPulse] 启动 PS Portal 串流画质增强模块 (原生引擎)...")
         appendLog("[配置] 目标码率: \(targetBitrate.rawValue) | 网卡: \(selectedInterface)")
         appendLog("[配置] PS5: \(ps5IP) | PS Portal: \(portalIP)")
 
         if runWithAdmin {
-            startPrivilegedRelay(script: script)
+            startPrivilegedRelay(engine: engine)
         } else {
-            startStandardRelay(script: script)
+            startStandardRelay(engine: engine)
         }
     }
 
-    private func startPrivilegedRelay(script: String) {
+    private func startPrivilegedRelay(engine: String) {
         try? "".write(toFile: logFilePath, atomically: true, encoding: .utf8)
         lastLogOffset = 0
 
         // 智能检测是否已具备 sudo 免密特权 (例如 /etc/sudoers.d/syspulse_portal)
         let checkProcess = Process()
         checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        checkProcess.arguments = ["-n", "/usr/bin/python3", script, "--check-privilege"]
+        checkProcess.arguments = ["-n", engine, "--check-privilege"]
         let isPasswordless: Bool = (try? checkProcess.run()) != nil && {
             checkProcess.waitUntilExit()
             return checkProcess.terminationStatus == 0
         }()
 
         if isPasswordless {
-            appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在静默秒启官方原版注入模块...")
+            appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在静默秒启原生 BPF 注入引擎...")
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             var args = [
                 "-n",
-                "/usr/bin/python3",
-                "-u",
-                script,
+                engine,
                 "--interface", selectedInterface,
                 "--bitrate", targetBitrate.shortTag
             ]
@@ -671,16 +638,13 @@ public final class PSPortalPluginManager {
             }
         }
 
-        // 常规 AppleScript 提权（在提权同时一键写入 sudoers.d 免密规则，从下次起永久免密）
-        appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以执行官方原版 ARP 注入与数据包修改...")
-        
-        let sudoersRule = "ALL ALL=(root) NOPASSWD: /usr/bin/python3 *portal_relay.py*"
-        let installSudoersCmd = "mkdir -p /etc/sudoers.d && echo '\(sudoersRule)' > /etc/sudoers.d/syspulse_portal && chmod 0440 /etc/sudoers.d/syspulse_portal"
+        // 常规 AppleScript 提权（在提权同时由引擎自身校验并写入 sudoers.d 绝对路径免密规则，从下次起永久免密）
+        appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以执行原生 ARP 注入与数据包修改...")
 
-        var cmd = "export SUDO_UID=\(getuid()) SUDO_GID=\(getgid()); /usr/bin/python3 -u '\(script)' --interface '\(selectedInterface)' --bitrate '\(targetBitrate.shortTag)'"
+        var cmd = "'\(engine)' --install-sudoers >/dev/null 2>&1 || true; '\(engine)' --interface '\(selectedInterface)' --bitrate '\(targetBitrate.shortTag)'"
         if !ps5IP.isEmpty { cmd += " --ps5 '\(ps5IP)'" }
         if !portalIP.isEmpty { cmd += " --portal '\(portalIP)'" }
-        cmd += " > '\(logFilePath)' 2>&1 & echo $! > '\(pidFilePath)'; (\(installSudoersCmd) 2>/dev/null || true)"
+        cmd += " > '\(logFilePath)' 2>&1 & echo $! > '\(pidFilePath)'"
 
         let appleScript = "do shell script \"\(cmd)\" with administrator privileges"
 
@@ -695,7 +659,7 @@ public final class PSPortalPluginManager {
                     let errMsg = err[NSAppleScript.errorMessage] as? String ?? "用户取消授权"
                     self.appendLog("[提示] 特权授权未完成: \(errMsg)")
                     self.appendLog("[降级] 正在以受限免 root 模式启动...")
-                    self.startStandardRelay(script: script)
+                    self.startStandardRelay(engine: engine)
                 } else {
                     self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (已建立免密通道)。")
                     self.startTailingLogFile()
@@ -704,12 +668,10 @@ public final class PSPortalPluginManager {
         }
     }
 
-    private func startStandardRelay(script: String) {
+    private func startStandardRelay(engine: String) {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.executableURL = URL(fileURLWithPath: engine)
         var args = [
-            "-u",
-            script,
             "--interface", selectedInterface,
             "--bitrate", targetBitrate.shortTag
         ]
@@ -797,7 +759,19 @@ public final class PSPortalPluginManager {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
 
-        // 清理特权后台进程（若进程仍在运行，普通用户态发送退出信号，绝不调用特权弹窗）
+        // 清理特权后台进程（通过免密 sudo portal_engine --stop 优雅通知 root 引擎复原 ARP 后退出）
+        let engine = engineFileURL.path
+        if FileManager.default.isExecutableFile(atPath: engine) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let stopProc = Process()
+                stopProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                stopProc.arguments = ["-n", engine, "--stop"]
+                stopProc.standardOutput = Pipe()
+                stopProc.standardError = Pipe()
+                try? stopProc.run()
+                stopProc.waitUntilExit()
+            }
+        }
         if let pidStr = try? String(contentsOfFile: pidFilePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let pid = Int32(pidStr), pid > 0 {
             kill(pid, SIGINT)
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) {
@@ -826,57 +800,42 @@ public final class PSPortalPluginManager {
             isListening = true
             isStreamActive = false
             startListenCountdown(seconds: 120)
-        } else if line.contains("Startup packet modified") || line.contains("截获并修改 LaunchSpec") {
-            appendLog("[注入] 🎯 截获并成功修改 LaunchSpec 握手参数为 \(targetBitrate.rawValue)！正在等待 PS5 协商确认...")
         } else if line.contains("PS5 reported high target bitrate") || line.contains("Target confirmed") || line.contains("[ACCEPTED]") || line.contains("已确认并接受高码率协商") {
             isStreamActive = true
             isListening = false
             stopListenCountdown()
-            appendLog("[成功] 🎉 PS5 已确认并接受高码率协商！局域网直连路由已彻底复原！")
-
-            // 握手成功并输出报告后，延迟 1.5 秒自动平滑收敛运行状态，将按钮切回“启动画质增强”
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self = self else { return }
-                self.isRunning = false
-                self.isListening = false
-                self.stopListenCountdown()
-                self.relayProcess = nil
-                self.logWatchTimer?.invalidate()
-                self.logWatchTimer = nil
-            }
+            scheduleRelayReset(after: 1.5)
         } else if line.contains("未生效") || line.contains("未检测到 PS Portal 握手请求") || line.contains("NOT APPLIED") {
             isListening = false
             isStreamActive = false
             stopListenCountdown()
             lastError = "未检测到 PS Portal 握手请求（120 秒内未收到连接，或 Portal 仍处于休眠状态）。"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                guard let self = self else { return }
-                self.isRunning = false
-                self.isListening = false
-                self.stopListenCountdown()
-                self.relayProcess = nil
-                self.logWatchTimer?.invalidate()
-                self.logWatchTimer = nil
-            }
+            scheduleRelayReset(after: 0.8)
         } else if line.contains("未确认目标码率") || line.contains("UNCONFIRMED") {
             isListening = false
             isStreamActive = false
             stopListenCountdown()
             lastError = "握手修改已发送，但未能在规定时间内检测到 PS5 连续 3 次高码率遥测确认。"
+            scheduleRelayReset(after: 0.8)
         } else if line.contains("RESTORATION FAILED") || line.contains("路由恢复异常") {
             isListening = false
             stopListenCountdown()
             lastError = "网络恢复异常，请检查网络配置。"
-        } else if line.contains("报告存档:") || line.contains("report.json") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self else { return }
-                self.isRunning = false
-                self.isListening = false
-                self.stopListenCountdown()
-                self.relayProcess = nil
-                self.logWatchTimer?.invalidate()
-                self.logWatchTimer = nil
-            }
+            scheduleRelayReset(after: 0.8)
+        } else if line.contains("报告存档:") || line.contains("report.json") || line.contains("引擎模式:") {
+            scheduleRelayReset(after: 1.0)
+        }
+    }
+
+    private func scheduleRelayReset(after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            self.isRunning = false
+            self.isListening = false
+            self.stopListenCountdown()
+            self.relayProcess = nil
+            self.logWatchTimer?.invalidate()
+            self.logWatchTimer = nil
         }
     }
 

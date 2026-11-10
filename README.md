@@ -62,7 +62,7 @@
 
 ## 下载与安装
 
-1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.8.dmg`。
+1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.9.dmg`。
 2. 双击打开 DMG 镜像，将 **`SysPulse.app`** 拖入 **`Applications`（应用程序）** 文件夹。
 3. 首次打开如果遇到 macOS 未签名开发者提示，可在终端运行以下命令放行：
    ```bash
