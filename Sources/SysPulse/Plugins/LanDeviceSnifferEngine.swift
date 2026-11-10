@@ -3,6 +3,7 @@ import SwiftUI
 import Observation
 import Darwin
 import AppKit
+import SystemConfiguration
 import UniformTypeIdentifiers
 
 /// 活跃物理网卡信息
@@ -13,7 +14,75 @@ public struct ActiveInterfaceInfo: Identifiable, Hashable, Sendable {
     public let label: String
 
     public var displayName: String {
-        "\(label) (\(name)) · \(ip)"
+        ip.isEmpty ? "\(label) (\(name))" : "\(label) (\(name)) · \(ip)"
+    }
+
+    public var compactDisplayName: String {
+        ip.isEmpty ? name : "\(name) · \(ip)"
+    }
+
+    /// 统一探测当前真实活跃且已分配有效 IPv4 的物理网卡，并将系统默认网关出口置顶
+    nonisolated public static func discoverActive() -> (interfaces: [ActiveInterfaceInfo], defaultInterface: String) {
+        var bsdTypeMap: [String: String] = [:]
+        if let scInterfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] {
+            for iface in scInterfaces {
+                if let bsd = SCNetworkInterfaceGetBSDName(iface) as String?,
+                   let type = SCNetworkInterfaceGetInterfaceType(iface) as String? {
+                    bsdTypeMap[bsd] = type
+                }
+            }
+        }
+
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return ([], "") }
+        defer { freeifaddrs(ifaddr) }
+
+        var list: [ActiveInterfaceInfo] = []
+        var seenNames = Set<String>()
+        let (_, defaultIface) = NetworkDetailModel.detectGatewayAndInterface()
+
+        var ptr = ifaddr
+        while let current = ptr {
+            let ifa = current.pointee
+            let flags = Int32(ifa.ifa_flags)
+            let isUpAndRunning = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0 && (flags & IFF_LOOPBACK) == 0
+
+            if isUpAndRunning, let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                let name = String(cString: ifa.ifa_name)
+                if name.hasPrefix("en") && !name.contains("awdl") && !name.contains("llw") && !seenNames.contains(name) {
+                    let sin = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_in.self).pointee
+                    var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    var sinAddr = sin.sin_addr
+                    inet_ntop(AF_INET, &sinAddr, &ipStr, socklen_t(INET_ADDRSTRLEN))
+                    let ip = String(decoding: ipStr.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+
+                    if !ip.isEmpty && ip != "127.0.0.1" && !ip.hasPrefix("169.254.") {
+                        seenNames.insert(name)
+                        let scType = bsdTypeMap[name]
+                        let friendlyLabel: String
+                        if scType == (kSCNetworkInterfaceTypeIEEE80211 as String) {
+                            friendlyLabel = "无线局域网"
+                        } else if scType == (kSCNetworkInterfaceTypeEthernet as String) {
+                            friendlyLabel = "以太网"
+                        } else if name == "en0" {
+                            friendlyLabel = "无线局域网"
+                        } else {
+                            friendlyLabel = "以太网"
+                        }
+                        list.append(ActiveInterfaceInfo(name: name, ip: ip, label: friendlyLabel))
+                    }
+                }
+            }
+            ptr = ifa.ifa_next
+        }
+
+        list.sort { a1, a2 in
+            if a1.name == defaultIface { return true }
+            if a2.name == defaultIface { return false }
+            return a1.name < a2.name
+        }
+
+        return (list, defaultIface)
     }
 }
 
@@ -84,6 +153,10 @@ public final class LanDeviceSnifferEngine {
     public var lastScannedAt: Date? = nil
     public var selectedInterface: String = "en0"
     public var activeInterfaces: [ActiveInterfaceInfo] = []
+    public var selectedInterfaceInfo: ActiveInterfaceInfo? {
+        activeInterfaces.first(where: { $0.name == selectedInterface })
+    }
+    private var hasExplicitInterfaceSelection: Bool = false
     public var searchQuery: String = ""
     public var copiedNotice: String? = nil
 
@@ -153,62 +226,37 @@ public final class LanDeviceSnifferEngine {
         lastScannedAt = nil
     }
 
+    /// 手动切换嗅探网卡并触发重新扫描
+    public func selectInterface(_ name: String) {
+        selectedInterface = name
+        hasExplicitInterfaceSelection = true
+        startScan()
+    }
+
     /// 智能识别系统当前真实活跃的物理网卡（排除离线、未配置或虚拟接口）
     public func detectActiveInterfaces() {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return }
-        defer { freeifaddrs(ifaddr) }
+        let (list, defaultIface) = ActiveInterfaceInfo.discoverActive()
+        self.activeInterfaces = list.isEmpty
+            ? [ActiveInterfaceInfo(name: defaultIface.isEmpty ? "en0" : defaultIface, ip: "", label: "未检测到活跃 IP")]
+            : list
 
-        var list: [ActiveInterfaceInfo] = []
-        var ptr = ifaddr
-
-        let (_, defaultIface) = NetworkDetailModel.detectGatewayAndInterface()
-
-        while ptr != nil {
-            let ifa = ptr!.pointee
-            let flags = Int32(ifa.ifa_flags)
-            let isUpAndRunning = (flags & IFF_UP) != 0 && (flags & IFF_RUNNING) != 0
-
-            if isUpAndRunning, let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                let name = String(cString: ifa.ifa_name)
-                // 仅保留 en 开头的物理物理网卡，排除虚拟桥接、awdl 与环回
-                if name.hasPrefix("en") && !name.contains("awdl") && !name.contains("llw") {
-                    let sin = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_in.self).pointee
-                    var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    var sinAddr = sin.sin_addr
-                    inet_ntop(AF_INET, &sinAddr, &ipStr, socklen_t(INET_ADDRSTRLEN))
-                    let ip = String(cString: ipStr)
-
-                    if !ip.isEmpty && ip != "127.0.0.1" && !ip.hasPrefix("169.254.") {
-                        var friendlyLabel = "局域网"
-                        if name == "en0" { friendlyLabel = "无线局域网 (Wi-Fi)" }
-                        else if name.hasPrefix("en") { friendlyLabel = "以太网" }
-
-                        list.append(ActiveInterfaceInfo(name: name, ip: ip, label: friendlyLabel))
-                    }
-                }
+        let isSelectedActive = list.contains(where: { $0.name == selectedInterface })
+        if !hasExplicitInterfaceSelection || !isSelectedActive {
+            if !defaultIface.isEmpty && list.contains(where: { $0.name == defaultIface }) {
+                selectedInterface = defaultIface
+            } else if let firstActive = list.first {
+                selectedInterface = firstActive.name
+            } else {
+                selectedInterface = defaultIface.isEmpty ? "en0" : defaultIface
             }
-            ptr = ifa.ifa_next
-        }
-
-        // 优先将默认路由网关承载接口置顶
-        list.sort { a1, a2 in
-            if a1.name == defaultIface { return true }
-            if a2.name == defaultIface { return false }
-            return a1.name < a2.name
-        }
-
-        self.activeInterfaces = list.isEmpty ? [ActiveInterfaceInfo(name: "en0", ip: "192.168.50.54", label: "无线局域网 (Wi-Fi)")] : list
-        if !activeInterfaces.contains(where: { $0.name == selectedInterface }) {
-            selectedInterface = defaultIface.isEmpty ? (activeInterfaces.first?.name ?? "en0") : defaultIface
         }
     }
 
     /// 执行局域网全面嗅探与活动设备发现 (包含全网段极速轻量并发探活)
     public func startScan() {
         guard !isScanning else { return }
-        self.isScanning = true
         detectActiveInterfaces()
+        self.isScanning = true
 
         let targetIface = self.selectedInterface
         let localComputerName = Host.current().localizedName?.replacingOccurrences(of: ".local", with: "").trimmingCharacters(in: .whitespacesAndNewlines) ?? "Apple Mac"

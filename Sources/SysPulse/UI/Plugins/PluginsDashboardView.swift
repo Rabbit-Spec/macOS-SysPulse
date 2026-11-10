@@ -50,11 +50,17 @@ public struct PluginsDashboardView: View {
         .padding(.bottom, 24)
         .onAppear {
             DispatchQueue.main.async {
-                if toggles.enablePluginARPSniffer && lanSniffer.discoveredDevices.isEmpty && !lanSniffer.isScanning {
-                    lanSniffer.startScan()
+                if toggles.enablePluginARPSniffer {
+                    lanSniffer.detectActiveInterfaces()
+                    if lanSniffer.discoveredDevices.isEmpty && !lanSniffer.isScanning {
+                        lanSniffer.startScan()
+                    }
                 }
-                if toggles.enablePluginPSPortal && pluginManager.discoveredDevices.isEmpty && !pluginManager.isScanningDevices {
-                    pluginManager.scanLocalDevices()
+                if toggles.enablePluginPSPortal {
+                    pluginManager.detectInterfaces()
+                    if pluginManager.discoveredDevices.isEmpty && !pluginManager.isScanningDevices {
+                        pluginManager.scanLocalDevices()
+                    }
                 }
             }
         }
@@ -203,7 +209,7 @@ public struct PluginsDashboardView: View {
                             .foregroundStyle(Color.blue)
                         Text("·")
                             .foregroundStyle(theme.secondaryText)
-                        Text("网卡: \(pluginManager.selectedInterface)")
+                        Text("网卡: \(pluginManager.selectedInterfaceInfo?.compactDisplayName ?? pluginManager.selectedInterface)")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(theme.secondaryText)
                     }
@@ -439,7 +445,7 @@ public struct PluginsDashboardView: View {
 
             HStack {
                 if enabled {
-                    Text("当前网卡: \(lanSniffer.selectedInterface) | \(lanSniffer.discoveredDevices.isEmpty ? "等待扫描" : "已发现 \(lanSniffer.discoveredDevices.count) 个活动节点")")
+                    Text("当前网卡: \(lanSniffer.selectedInterfaceInfo?.compactDisplayName ?? lanSniffer.selectedInterface) | \(lanSniffer.discoveredDevices.isEmpty ? "等待扫描" : "已发现 \(lanSniffer.discoveredDevices.count) 个活动节点")")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(theme.secondaryText)
                 } else {
@@ -885,6 +891,9 @@ public struct PluginsDashboardView: View {
                 .frame(width: contentW)
                 .frame(maxHeight: .infinity)
         }
+        .onAppear {
+            pluginManager.detectInterfaces()
+        }
     }
 
     // MARK: - Wi-Fi 低延迟专属工作台
@@ -1056,57 +1065,16 @@ public struct PluginsDashboardView: View {
 
                     Spacer()
 
-                    // 真实物理网卡展示与选择
-                    if lanSniffer.activeInterfaces.count > 1 {
-                        Menu {
-                            ForEach(lanSniffer.activeInterfaces) { iface in
-                                Button {
-                                    lanSniffer.selectedInterface = iface.name
-                                    lanSniffer.startScan()
-                                } label: {
-                                    if lanSniffer.selectedInterface == iface.name {
-                                        Label(iface.displayName, systemImage: "checkmark")
-                                    } else {
-                                        Text(iface.displayName)
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "cable.connector")
-                                    .font(.system(size: 11))
-                                Text(lanSniffer.selectedInterface)
-                                    .font(.system(size: 11, design: .monospaced))
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 9))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(theme.cardFill)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-                            )
-                            .foregroundStyle(theme.primaryText)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 6, height: 6)
-                            Text(lanSniffer.activeInterfaces.first?.displayName ?? "无线局域网 (Wi-Fi · en0)")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(theme.primaryText)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(theme.cardFill)
-                                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-                        )
-                    }
+                    // 真实物理网卡展示与选择（统一复用活跃网卡菜单）
+                    activeInterfaceSelector(
+                        activeInterfaces: lanSniffer.activeInterfaces,
+                        selectedInterface: lanSniffer.selectedInterface,
+                        selectedInfo: lanSniffer.selectedInterfaceInfo,
+                        disabled: lanSniffer.isScanning,
+                        useCardStyle: true,
+                        onSelect: { lanSniffer.selectInterface($0) },
+                        onRefresh: { lanSniffer.detectActiveInterfaces() }
+                    )
 
                     // 导入路由器 DHCP 备份 CSV 批量改名
                     Button {
@@ -1283,8 +1251,11 @@ public struct PluginsDashboardView: View {
             }
         }
         .onAppear {
-            if toggles.enablePluginARPSniffer && lanSniffer.discoveredDevices.isEmpty && !lanSniffer.isScanning {
-                lanSniffer.startScan()
+            if toggles.enablePluginARPSniffer {
+                lanSniffer.detectActiveInterfaces()
+                if lanSniffer.discoveredDevices.isEmpty && !lanSniffer.isScanning {
+                    lanSniffer.startScan()
+                }
             }
         }
     }
@@ -2406,21 +2377,22 @@ public struct PluginsDashboardView: View {
                     }
 
                     HStack(spacing: 12) {
-                        // 网络网卡选择
+                        // 网络网卡选择（仅列出当前真实活跃有 IP 的物理网卡）
                         VStack(alignment: .leading, spacing: 4) {
                             Text("网卡接口")
                                 .font(.system(size: 11))
                                 .foregroundStyle(theme.secondaryText)
 
-                            Picker("", selection: $pluginManager.selectedInterface) {
-                                ForEach(pluginManager.availableInterfaces, id: \.self) { iface in
-                                    Text(iface).tag(iface)
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                            .frame(width: 100)
-                            .disabled(pluginManager.isRunning)
+                            activeInterfaceSelector(
+                                activeInterfaces: pluginManager.activeInterfaces,
+                                selectedInterface: pluginManager.selectedInterface,
+                                selectedInfo: pluginManager.selectedInterfaceInfo,
+                                disabled: pluginManager.isRunning,
+                                width: 175,
+                                useCardStyle: false,
+                                onSelect: { pluginManager.selectInterface($0) },
+                                onRefresh: { pluginManager.detectInterfaces() }
+                            )
                         }
 
                         // PS5 IP 输入框 (科技蓝专属)
@@ -2472,7 +2444,7 @@ public struct PluginsDashboardView: View {
                         }
                     }
                 }
-                .frame(width: 480)
+                .frame(width: 530)
             }
         }
         .padding(18)
@@ -2614,6 +2586,71 @@ public struct PluginsDashboardView: View {
                 .fill(theme.cardFill)
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
         )
+    }
+
+    private func activeInterfaceSelector(
+        activeInterfaces: [ActiveInterfaceInfo],
+        selectedInterface: String,
+        selectedInfo: ActiveInterfaceInfo?,
+        disabled: Bool,
+        width: CGFloat? = nil,
+        useCardStyle: Bool,
+        onSelect: @escaping (String) -> Void,
+        onRefresh: @escaping () -> Void
+    ) -> some View {
+        let hasIP = !(selectedInfo?.ip ?? "").isEmpty
+        let labelText = selectedInfo?.compactDisplayName ?? selectedInterface
+        let cornerRadius: CGFloat = useCardStyle ? 8 : 6
+        let fillColor: Color = useCardStyle
+            ? theme.cardFill
+            : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
+
+        return Menu {
+            ForEach(activeInterfaces) { iface in
+                Button {
+                    onSelect(iface.name)
+                } label: {
+                    if selectedInterface == iface.name {
+                        Label(iface.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(iface.displayName)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                onRefresh()
+            } label: {
+                Label("重新检测活跃网卡", systemImage: "arrow.clockwise")
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(hasIP ? Color.green : Color.orange)
+                    .frame(width: 6, height: 6)
+                Text(labelText)
+                    .font(.system(size: useCardStyle ? 11 : 11.5, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                if width != nil {
+                    Spacer(minLength: 2)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(theme.secondaryText)
+            }
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, useCardStyle ? 10 : 8)
+            .padding(.vertical, useCardStyle ? 6 : 5.5)
+            .frame(width: width)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(fillColor)
+                    .overlay(RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandOnHover()
+        .disabled(disabled)
     }
 
     private func logColor(for line: String) -> Color {

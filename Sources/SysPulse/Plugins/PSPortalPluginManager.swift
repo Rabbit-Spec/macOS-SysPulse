@@ -63,7 +63,10 @@ public final class PSPortalPluginManager {
     public var isStreamActive: Bool = false
     public var targetBitrate: BitrateProfile = .mbps100
     public var selectedInterface: String = "en0"
-    public var availableInterfaces: [String] = ["en0"]
+    public var activeInterfaces: [ActiveInterfaceInfo] = []
+    public var selectedInterfaceInfo: ActiveInterfaceInfo? {
+        activeInterfaces.first(where: { $0.name == selectedInterface })
+    }
     public var ps5IP: String = ""
     public var portalIP: String = ""
     public var discoveredDevices: [DiscoveredDevice] = []
@@ -87,6 +90,7 @@ public final class PSPortalPluginManager {
     private var listenCountdownTimer: Timer?
     private var listenDeadline: Date?
     private var lastLogOffset: UInt64 = 0
+    private var hasExplicitInterfaceConfig: Bool = false
 
     private let logFilePath = "/tmp/syspulse_psportal.log"
     private let pidFilePath = "/tmp/syspulse_psportal.pid"
@@ -250,8 +254,12 @@ public final class PSPortalPluginManager {
                 self.targetBitrate = matched
             }
         }
-        if let iface = json["interface"] as? String, !iface.isEmpty {
+        let isManualInterface = (json["interfaceManualSelection"] as? Bool) ?? false
+        if isManualInterface, let iface = json["interface"] as? String, !iface.isEmpty {
             self.selectedInterface = iface
+            self.hasExplicitInterfaceConfig = true
+        } else {
+            self.hasExplicitInterfaceConfig = false
         }
         if let ps5 = json["ps5IP"] as? String, !ps5.isEmpty {
             self.ps5IP = ps5
@@ -272,6 +280,7 @@ public final class PSPortalPluginManager {
         let dict: [String: Any] = [
             "targetBitrate": targetBitrate.shortTag,
             "interface": selectedInterface,
+            "interfaceManualSelection": hasExplicitInterfaceConfig,
             "ps5IP": ps5IP,
             "portalIP": portalIP,
             "runWithAdmin": runWithAdmin
@@ -355,34 +364,33 @@ public final class PSPortalPluginManager {
 
     // MARK: - 网络接口与设备扫描
 
+    public func selectInterface(_ name: String) {
+        selectedInterface = name
+        hasExplicitInterfaceConfig = true
+        saveConfig()
+    }
+
     public func detectInterfaces() {
-        var ifaces: [String] = []
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        if getifaddrs(&ifaddr) == 0 {
-            var ptr = ifaddr
-            while let current = ptr {
-                let name = String(cString: current.pointee.ifa_name)
-                if (name.hasPrefix("en") || name.hasPrefix("bridge") || name.hasPrefix("ap")) && !ifaces.contains(name) {
-                    ifaces.append(name)
-                }
-                ptr = current.pointee.ifa_next
+        let (list, defaultIface) = ActiveInterfaceInfo.discoverActive()
+        self.activeInterfaces = list.isEmpty
+            ? [ActiveInterfaceInfo(name: defaultIface.isEmpty ? "en0" : defaultIface, ip: "", label: "未检测到活跃 IP")]
+            : list
+
+        let isSelectedActive = list.contains(where: { $0.name == selectedInterface })
+        if !hasExplicitInterfaceConfig || !isSelectedActive {
+            if !defaultIface.isEmpty && list.contains(where: { $0.name == defaultIface }) {
+                selectedInterface = defaultIface
+            } else if let firstActive = list.first {
+                selectedInterface = firstActive.name
+            } else {
+                selectedInterface = defaultIface.isEmpty ? "en0" : defaultIface
             }
-            freeifaddrs(ifaddr)
-        }
-        if ifaces.isEmpty {
-            ifaces = ["en0", "en1"]
-        }
-        let primaryIfaces = ifaces.filter { $0.hasPrefix("en") }.sorted()
-        let otherIfaces = ifaces.filter { !$0.hasPrefix("en") }.sorted()
-        let combined = primaryIfaces + otherIfaces
-        self.availableInterfaces = combined.isEmpty ? ["en0"] : combined
-        if !availableInterfaces.contains(selectedInterface) {
-            selectedInterface = availableInterfaces.first(where: { $0 == "en0" }) ?? availableInterfaces.first ?? "en0"
         }
     }
 
     public func scanLocalDevices() {
         guard !isScanningDevices else { return }
+        detectInterfaces()
         self.isScanningDevices = true
         self.appendLog("[SysPulse] 正在扫描局域网活动设备 (ARP 协议表与网络探测)...")
 
