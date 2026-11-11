@@ -209,6 +209,11 @@ public struct PluginsDashboardView: View {
                             .foregroundStyle(Color.blue)
                         Text("·")
                             .foregroundStyle(theme.secondaryText)
+                        Text(pluginManager.relayMode == .oneWayDirect ? "单向直连" : "双向遥测")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                        Text("·")
+                            .foregroundStyle(theme.secondaryText)
                         Text("网卡: \(pluginManager.selectedInterfaceInfo?.compactDisplayName ?? pluginManager.selectedInterface)")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(theme.secondaryText)
@@ -2228,38 +2233,65 @@ public struct PluginsDashboardView: View {
 
                 Spacer()
 
-                // 一键启停主按钮
-                Button {
-                    if pluginManager.isRunning {
-                        pluginManager.stopRelay()
-                    } else {
-                        pluginManager.startRelay()
+                HStack(spacing: 10) {
+                    // 兜底复原网络直连入口
+                    Button {
+                        pluginManager.restoreNetworkDirect()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.uturn.backward.circle")
+                                .font(.system(size: 12))
+                            Text("恢复直连")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            Capsule()
+                                .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
+                                .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                        )
+                        .foregroundStyle(theme.secondaryText)
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: pluginManager.isRunning ? "stop.fill" : "play.fill")
-                            .font(.system(size: 13, weight: .bold))
-                        Text(pluginManager.isRunning ? "停止增强" : "启动画质增强")
-                            .font(.system(size: 14, weight: .bold))
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .disabled(pluginManager.isRunning || pluginManager.isStopping)
+                    .help("异常退出后若设备无法连接，点此立即清理 ARP 缓存并恢复直连")
+
+                    // 一键启停主按钮
+                    Button {
+                        if pluginManager.isRunning {
+                            pluginManager.stopRelay()
+                        } else {
+                            pluginManager.startRelay()
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: pluginManager.isRunning ? "stop.fill" : "play.fill")
+                                .font(.system(size: 13, weight: .bold))
+                            Text(pluginManager.isStopping ? "停止中..." : (pluginManager.isRunning ? "停止增强" : "启动画质增强"))
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(
+                                    pluginManager.isRunning
+                                        ? Color.red.opacity(pluginManager.isStopping ? 0.5 : 0.85)
+                                        : (colorScheme == .dark ? Color.white : Color(white: 0.15))
+                                )
+                        )
+                        .foregroundStyle(
+                            pluginManager.isRunning
+                                ? Color.white
+                                : (colorScheme == .dark ? Color.black : Color.white)
+                        )
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(
-                        Capsule()
-                            .fill(
-                                pluginManager.isRunning
-                                    ? Color.red.opacity(0.85)
-                                    : (colorScheme == .dark ? Color.white : Color(white: 0.15))
-                            )
-                    )
-                    .foregroundStyle(
-                        pluginManager.isRunning
-                            ? Color.white
-                            : (colorScheme == .dark ? Color.black : Color.white)
-                    )
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .disabled(pluginManager.isStopping)
                 }
-                .buttonStyle(.plain)
-                .pointingHandOnHover()
             }
 
             if let errorText = pluginManager.lastError {
@@ -2348,6 +2380,49 @@ public struct PluginsDashboardView: View {
                             .disabled(pluginManager.isRunning)
                         }
                     }
+
+                    // 中继模式切换 (方案 A 单向直连 vs 方案 B 双向遥测)
+                    HStack(spacing: 8) {
+                        Text("中继模式:")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(theme.secondaryText)
+
+                        HStack(spacing: 4) {
+                            ForEach(PortalRelayMode.allCases) { mode in
+                                let isModeActive = pluginManager.relayMode == mode
+                                Button {
+                                    pluginManager.relayMode = mode
+                                    pluginManager.saveConfig()
+                                } label: {
+                                    Text(mode.title)
+                                        .font(.system(size: 11, weight: isModeActive ? .semibold : .medium))
+                                        .foregroundStyle(isModeActive ? Color.white : theme.secondaryText)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            Capsule()
+                                                .fill(isModeActive ? Color.blue.opacity(0.85) : Color.clear)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .pointingHandOnHover()
+                                .help(mode.subtitle)
+                            }
+                        }
+                        .padding(3)
+                        .background(
+                            Capsule()
+                                .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
+                                .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                        )
+                        .disabled(pluginManager.isRunning)
+
+                        Text(pluginManager.relayMode.subtitle)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(theme.secondaryText.opacity(0.85))
+                            .lineLimit(1)
+                    }
+                    .padding(.top, 2)
                 }
                 .frame(maxWidth: .infinity)
 
@@ -2378,9 +2453,9 @@ public struct PluginsDashboardView: View {
 
                     HStack(spacing: 12) {
                         // 网络网卡选择（仅列出当前真实活跃有 IP 的物理网卡）
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text("网卡接口")
-                                .font(.system(size: 11))
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(theme.secondaryText)
 
                             activeInterfaceSelector(
@@ -2388,61 +2463,130 @@ public struct PluginsDashboardView: View {
                                 selectedInterface: pluginManager.selectedInterface,
                                 selectedInfo: pluginManager.selectedInterfaceInfo,
                                 disabled: pluginManager.isRunning,
-                                width: 175,
+                                width: 190,
                                 useCardStyle: false,
+                                controlHeight: 38,
+                                fontSize: 13,
+                                horizontalPadding: 10,
+                                verticalPadding: 8.5,
+                                dotSize: 7,
+                                controlCornerRadius: 8,
                                 onSelect: { pluginManager.selectInterface($0) },
                                 onRefresh: { pluginManager.detectInterfaces() }
                             )
                         }
 
                         // PS5 IP 输入框 (科技蓝专属)
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Image(systemName: "tv.fill")
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                 Text("PS5 IP (必填)")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                             }
                             .foregroundStyle(Color.blue)
 
-                            TextField("例如 192.168.50.50", text: $pluginManager.ps5IP)
+                            TextField("例如 192.168.1.50", text: $pluginManager.ps5IP)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Color.blue)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8.5)
+                                .frame(minHeight: 38)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 6)
+                                    RoundedRectangle(cornerRadius: 8)
                                         .fill(Color.blue.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.blue.opacity(0.35), lineWidth: 0.8))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.blue.opacity(0.35), lineWidth: 0.8))
                                 )
                                 .disabled(pluginManager.isRunning)
                         }
 
                         // PS Portal IP 输入框 (幻彩靛蓝专属)
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Image(systemName: "gamecontroller.fill")
-                                    .font(.system(size: 10))
+                                    .font(.system(size: 11))
                                 Text("PS Portal IP (必填)")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                             }
                             .foregroundStyle(Color.indigo)
 
-                            TextField("例如 192.168.50.107", text: $pluginManager.portalIP)
+                            TextField("例如 192.168.1.107", text: $pluginManager.portalIP)
                                 .textFieldStyle(.plain)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Color.indigo)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8.5)
+                                .frame(minHeight: 38)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 6)
+                                    RoundedRectangle(cornerRadius: 8)
                                         .fill(Color.indigo.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.indigo.opacity(0.35), lineWidth: 0.8))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.indigo.opacity(0.35), lineWidth: 0.8))
                                 )
                                 .disabled(pluginManager.isRunning)
                         }
                     }
+
+                    // 扫描到的 Sony 设备快捷填入条（保持固定最低高度，确保与左侧底部间距一致）
+                    let sonyDevices = pluginManager.discoveredDevices.filter { $0.isLikelySony }
+                    Group {
+                        if !sonyDevices.isEmpty {
+                            HStack(spacing: 8) {
+                                Text("检测到 Sony 设备:")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(theme.secondaryText)
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(sonyDevices) { dev in
+                                            Menu {
+                                                Button("设为 PS5 IP (\(dev.ip))") {
+                                                    pluginManager.ps5IP = dev.ip
+                                                    pluginManager.saveConfig()
+                                                }
+                                                Button("设为 PS Portal IP (\(dev.ip))") {
+                                                    pluginManager.portalIP = dev.ip
+                                                    pluginManager.saveConfig()
+                                                }
+                                            } label: {
+                                                let isPS5Role = dev.role == .ps5Host
+                                                let roleTag = isPS5Role ? "PS5" : (dev.role == .portalClient ? "Portal" : "Sony")
+                                                let iconName = isPS5Role ? "tv.fill" : "gamecontroller.fill"
+                                                let tintColor: Color = isPS5Role ? .blue : .indigo
+                                                HStack(spacing: 4.5) {
+                                                    Image(systemName: iconName)
+                                                        .font(.system(size: 10.5))
+                                                    Text("\(roleTag) · \(dev.ip)")
+                                                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                                                }
+                                                .foregroundStyle(tintColor)
+                                                .padding(.horizontal, 9)
+                                                .padding(.vertical, 4)
+                                                .background(
+                                                    Capsule()
+                                                        .fill(tintColor.opacity(0.12))
+                                                        .overlay(Capsule().strokeBorder(tintColor.opacity(0.3), lineWidth: 0.8))
+                                                )
+                                            }
+                                            .buttonStyle(.plain)
+                                            .pointingHandOnHover()
+                                            .disabled(pluginManager.isRunning || pluginManager.isStopping)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            HStack(spacing: 6) {
+                                Image(systemName: "info.circle")
+                                    .font(.system(size: 11))
+                                Text("点击右上角「扫描局域网设备」可自动识别 PS5 / Portal IP")
+                                    .font(.system(size: 11.5))
+                            }
+                            .foregroundStyle(theme.secondaryText.opacity(0.75))
+                        }
+                    }
+                    .frame(minHeight: 28, alignment: .leading)
+                    .padding(.top, 2)
                 }
                 .frame(width: 530)
             }
@@ -2543,22 +2687,22 @@ public struct PluginsDashboardView: View {
                                 .foregroundStyle(Color.white.opacity(0.55))
                                 .padding(.vertical, 8)
                         } else {
-                            let activeReadyIdx = pluginManager.logs.lastIndex(where: { $0.hasPrefix("[准备] ⚡️ 网络协商就绪") })
-                            ForEach(Array(pluginManager.logs.enumerated()), id: \.offset) { idx, line in
+                            let activeReadyId = pluginManager.logs.last(where: { $0.text.hasPrefix("[准备] ⚡️ 网络协商就绪") })?.id
+                            ForEach(pluginManager.logs) { entry in
                                 let displayLine: String = {
                                     if pluginManager.isListening,
-                                       idx == activeReadyIdx,
+                                       entry.id == activeReadyId,
                                        let remaining = pluginManager.listenRemainingSeconds {
-                                        return "[准备] ⚡️ 网络协商就绪！请在 \(remaining) 秒内在 PS Portal 上点击连接 PS5..."
+                                        return "[准备] ⚡️ 网络协商就绪！请在 \(remaining) 秒内在 Portal 上点击连接 PS5..."
                                     }
-                                    return line
+                                    return entry.text
                                 }()
                                 Text(displayLine)
                                     .font(.system(size: 12, design: .monospaced))
                                     .monospacedDigit()
                                     .foregroundStyle(logColor(for: displayLine))
                                     .textSelection(.enabled)
-                                    .id(idx)
+                                    .id(entry.id)
                             }
                         }
                         Spacer(minLength: 0)
@@ -2566,10 +2710,10 @@ public struct PluginsDashboardView: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
                 }
-                .onChange(of: pluginManager.logs.count) { _, newCount in
-                    if newCount > 0 {
+                .onChange(of: pluginManager.logs.last?.id) { _, lastId in
+                    if let lastId {
                         withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo(newCount - 1, anchor: .bottom)
+                            proxy.scrollTo(lastId, anchor: .bottom)
                         }
                     }
                 }
@@ -2595,12 +2739,21 @@ public struct PluginsDashboardView: View {
         disabled: Bool,
         width: CGFloat? = nil,
         useCardStyle: Bool,
+        controlHeight: CGFloat? = nil,
+        fontSize: CGFloat? = nil,
+        horizontalPadding: CGFloat? = nil,
+        verticalPadding: CGFloat? = nil,
+        dotSize: CGFloat = 6,
+        controlCornerRadius: CGFloat? = nil,
         onSelect: @escaping (String) -> Void,
         onRefresh: @escaping () -> Void
     ) -> some View {
         let hasIP = !(selectedInfo?.ip ?? "").isEmpty
         let labelText = selectedInfo?.compactDisplayName ?? selectedInterface
-        let cornerRadius: CGFloat = useCardStyle ? 8 : 6
+        let cornerRadius: CGFloat = controlCornerRadius ?? (useCardStyle ? 8 : 6)
+        let resolvedFontSize: CGFloat = fontSize ?? (useCardStyle ? 11 : 11.5)
+        let resolvedHorizontalPadding: CGFloat = horizontalPadding ?? (useCardStyle ? 10 : 8)
+        let resolvedVerticalPadding: CGFloat = verticalPadding ?? (useCardStyle ? 6 : 5.5)
         let fillColor: Color = useCardStyle
             ? theme.cardFill
             : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
@@ -2627,21 +2780,23 @@ public struct PluginsDashboardView: View {
             HStack(spacing: 6) {
                 Circle()
                     .fill(hasIP ? Color.green : Color.orange)
-                    .frame(width: 6, height: 6)
+                    .frame(width: dotSize, height: dotSize)
                 Text(labelText)
-                    .font(.system(size: useCardStyle ? 11 : 11.5, weight: .medium, design: .monospaced))
+                    .font(.system(size: resolvedFontSize, weight: .medium, design: .monospaced))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 if width != nil {
                     Spacer(minLength: 2)
                 }
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9))
+                    .font(.system(size: fontSize != nil ? 10 : 9))
                     .foregroundStyle(theme.secondaryText)
             }
             .foregroundStyle(theme.primaryText)
-            .padding(.horizontal, useCardStyle ? 10 : 8)
-            .padding(.vertical, useCardStyle ? 6 : 5.5)
+            .padding(.horizontal, resolvedHorizontalPadding)
+            .padding(.vertical, resolvedVerticalPadding)
             .frame(width: width)
+            .frame(minHeight: controlHeight)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(fillColor)
@@ -2654,16 +2809,16 @@ public struct PluginsDashboardView: View {
     }
 
     private func logColor(for line: String) -> Color {
-        if line.contains("[ACCEPTED]") || line.contains("[ACTIVE]") || line.contains("[SUCCESS]") || line.contains("🎉") {
+        if line.contains("[成功]") || line.contains("[ACCEPTED]") || line.contains("[ACTIVE]") || line.contains("[SUCCESS]") || line.contains("🎉") || line.contains("✅") {
             return Color.green
         }
-        if line.contains("[PATCH]") || line.contains("[FORWARD]") || line.contains("🚀") || line.contains("🎯") {
+        if line.contains("[注入]") || line.contains("[响应]") || line.contains("[路由]") || line.contains("[识别]") || line.contains("[PATCH]") || line.contains("[FORWARD]") || line.contains("🚀") || line.contains("🎯") {
             return Color.cyan
         }
-        if line.contains("[WARNING]") || line.contains("[WAITING]") || line.contains("⚡️") {
+        if line.contains("[警告]") || line.contains("[准备]") || line.contains("[诊断]") || line.contains("[WARNING]") || line.contains("[WAITING]") || line.contains("⚡️") || line.contains("⚠️") {
             return Color.yellow
         }
-        if line.contains("[ERROR]") || line.contains("Traceback") || line.contains("Error") {
+        if line.contains("[错误]") || line.contains("[失败]") || line.contains("[ERROR]") || line.contains("❌") || line.contains("Traceback") || line.contains("Error") {
             return Color.red
         }
         return Color.white.opacity(0.92)

@@ -38,9 +38,10 @@
 ### 4. 模块中心（按需启用）
 首次安装后四个功能模块均处于未启用状态，未启用时不启动后台定时任务与硬件轮询；用户可在顶部导航栏 **「模块」**（`⌘6`）按需开启或停用：
 
-- **PS Portal 串流画质增强（v1.0.1）**
-  - 拦截局域网 UDP 9296 握手包并修改 LaunchSpec 目标码率，支持选择 `65 Mbps`、`100 Mbps`、`200 Mbps` 档位。
-  - 支持扫描局域网设备并填入 PS5 与 PS Portal IP 地址，提供 120 秒握手等待实时倒计时，并依据真实数据包注入与质量回报输出生效状态，握手完成后自动恢复局域网直连。
+- **PS Portal 串流画质增强（v0.1.2）**
+  - 原生 C BPF 注入引擎，支持 **方案 A：单向视频直连**（默认，仅劫持 Portal 上行握手，下行视频流全程直连不经过 Mac 限速）与 **方案 B：双向遥测验证**（捕获 PS5 确认与码率回报后自动切回直连）。
+  - 兼容 Takion 分片 `LaunchSpec` 协议载荷，支持 `65 Mbps`、`100 Mbps`、`200 Mbps` 目标码率档位。
+  - 集成 PlayStation DDP（UDP 9302）主动探测与 OUI 分级识别，精准区分 PS5 主机与 PS Portal 掌机并自动填入 IP，提供 120 秒握手等待实时倒计时与异常直连一键复原。
 - **Wi-Fi 低延迟**
   - 控制 macOS `awdl0` 接口开关，暂停后台隔空扫描与信道切换。
   - 停用模块或退出应用时自动恢复 `awdl0` 状态。
@@ -62,7 +63,7 @@
 
 ## 下载与安装
 
-1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.10.dmg`。
+1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.11.dmg`。
 2. 双击打开 DMG 镜像，将 **`SysPulse.app`** 拖入 **`Applications`（应用程序）** 文件夹。
 3. 首次打开如果遇到 macOS 未签名开发者提示，可在终端运行以下命令放行：
    ```bash

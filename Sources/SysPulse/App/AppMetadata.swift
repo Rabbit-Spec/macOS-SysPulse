@@ -2,11 +2,11 @@ import Foundation
 
 public struct AppMetadata {
     public static var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.10"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.11"
     }
 
     public static var build: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "10"
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "11"
     }
 
     public static var versionDisplay: String {

@@ -6,6 +6,15 @@ import AppKit
 import SystemConfiguration
 import UniformTypeIdentifiers
 
+/// PlayStation 设备发现协议 (DDP UDP 9302) 返回信息
+public struct PlayStationDDPInfo: Sendable {
+    public let ip: String
+    public let hostType: String
+    public let hostName: String
+    public let systemVersion: String
+    public let isStandby: Bool
+}
+
 /// 活跃物理网卡信息
 public struct ActiveInterfaceInfo: Identifiable, Hashable, Sendable {
     public var id: String { name }
@@ -83,6 +92,32 @@ public struct ActiveInterfaceInfo: Identifiable, Hashable, Sendable {
         }
 
         return (list, defaultIface)
+    }
+
+    /// 获取指定物理网卡的真实子网掩码与子网广播 IPv4（避免多网段下写死 .255）
+    nonisolated public static func ipv4SubnetInfo(for interfaceName: String) -> (ip: UInt32, mask: UInt32, broadcast: String)? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        defer { freeifaddrs(ifaddr) }
+
+        var ptr = ifaddr
+        while let current = ptr {
+            let ifa = current.pointee
+            if let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
+               let maskAddr = ifa.ifa_netmask, maskAddr.pointee.sa_family == UInt8(AF_INET),
+               String(cString: ifa.ifa_name) == interfaceName {
+                let ipHost = UInt32(bigEndian: UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr)
+                let maskHost = UInt32(bigEndian: UnsafeRawPointer(maskAddr).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr)
+                let bcastHost = (ipHost & maskHost) | ~maskHost
+                var bcastNet = in_addr(s_addr: bcastHost.bigEndian)
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                inet_ntop(AF_INET, &bcastNet, &buf, socklen_t(INET_ADDRSTRLEN))
+                let bcastStr = String(decoding: buf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+                return (ip: ipHost, mask: maskHost, broadcast: bcastStr)
+            }
+            ptr = ifa.ifa_next
+        }
+        return nil
     }
 }
 
@@ -284,6 +319,19 @@ public final class LanDeviceSnifferEngine {
                 rawEntries = Self.readArpTableViaCli()
             }
 
+            // 4.5 PlayStation DDP (UDP 9302) 主动探测以精准识别 PS5 主机与主机名
+            let candidateIPs = rawEntries.map { $0.ip }.filter { ip in
+                ip.contains(".") && ip != "127.0.0.1" && ip != gatewayIP && !ip.hasSuffix(".255") && !ip.hasPrefix("224.") && !ip.hasPrefix("239.")
+            }
+            var ddpBroadcasts: [String] = ["255.255.255.255"]
+            if gatewayIP.contains(".") {
+                let gwParts = gatewayIP.split(separator: ".")
+                if gwParts.count == 4 {
+                    ddpBroadcasts.append("\(gwParts[0]).\(gwParts[1]).\(gwParts[2]).255")
+                }
+            }
+            let ddpMap = Self.probePlayStationDDP(targetIPs: candidateIPs, broadcastIPs: ddpBroadcasts, timeoutMs: 260)
+
             // 5. 解析、去重与智能设备画像
             var mapByIP: [String: LanDeviceItem] = [:]
 
@@ -307,8 +355,15 @@ public final class LanDeviceSnifferEngine {
                 let isGW = (ip == gatewayIP)
                 let isLocal = (ip == "192.168.50.54" || entry.isLocal)
 
-                // 智能识别设备标识名称、厂商与图标
-                let (deviceName, vendor, icon) = Self.identifyDevice(ip: ip, mac: mac, isGateway: isGW, isLocal: isLocal, localName: localComputerName)
+                // 智能识别设备标识名称、厂商与图标（优先使用 DDP 真实响应）
+                let (deviceName, vendor, icon) = Self.identifyDevice(
+                    ip: ip,
+                    mac: mac,
+                    isGateway: isGW,
+                    isLocal: isLocal,
+                    localName: localComputerName,
+                    ddp: ddpMap[ip]
+                )
 
                 mapByIP[ip] = LanDeviceItem(
                     id: "\(ip)-\(mac)",
@@ -343,10 +398,17 @@ public final class LanDeviceSnifferEngine {
     }
 
     /// 全网段极速轻量探活 (向网段 1~254 发送轻量无阻塞 UDP 触发内核自动 ARP 解析)
-    nonisolated private static func sweepSubnetFast(basePrefix: String) {
+    nonisolated public static func sweepSubnetFast(basePrefix: String, interfaceName: String? = nil) {
         let sock = socket(AF_INET, SOCK_DGRAM, 0)
         guard sock >= 0 else { return }
         defer { close(sock) }
+
+        if let interfaceName, !interfaceName.isEmpty {
+            var ifIndex = if_nametoindex(interfaceName)
+            if ifIndex != 0 {
+                setsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &ifIndex, socklen_t(MemoryLayout<UInt32>.size))
+            }
+        }
 
         _ = fcntl(sock, F_SETFL, O_NONBLOCK)
 
@@ -367,7 +429,7 @@ public final class LanDeviceSnifferEngine {
     }
 
     /// 直接从 macOS 物理内核通过 BSD 路由 Sysctl 读取 ARP 链路层路由缓存表 (零子进程依赖，100% 成功)
-    nonisolated private static func readArpTableViaKernelSysctl() -> [(ip: String, mac: String, ifName: String, isLocal: Bool)] {
+    nonisolated public static func readArpTableViaKernelSysctl() -> [(ip: String, mac: String, ifName: String, isLocal: Bool)] {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_LLINFO]
         var len: size_t = 0
         if sysctl(&mib, 6, nil, &len, nil, 0) < 0 || len == 0 {
@@ -398,7 +460,7 @@ public final class LanDeviceSnifferEngine {
                 var ipAddr = sin.sin_addr
                 var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 inet_ntop(AF_INET, &ipAddr, &ipStr, socklen_t(INET_ADDRSTRLEN))
-                let ip = String(cString: ipStr)
+                let ip = String(decoding: ipStr.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
 
                 let saLen = Int(rtaxDst.sa_len > 0 ? rtaxDst.sa_len : UInt8(MemoryLayout<sockaddr>.size))
                 let roundedLen = (saLen + 3) & ~3
@@ -412,7 +474,7 @@ public final class LanDeviceSnifferEngine {
 
                     var ifNameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
                     if_indextoname(UInt32(sdl.sdl_index), &ifNameBuf)
-                    let ifName = String(cString: ifNameBuf)
+                    let ifName = String(decoding: ifNameBuf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
 
                     let isLocal = (rtm.rtm_flags & RTF_LOCAL) != 0
                     results.append((ip: ip, mac: mac, ifName: ifName, isLocal: isLocal))
@@ -425,7 +487,7 @@ public final class LanDeviceSnifferEngine {
     }
 
     /// Fallback 读取外部 /usr/sbin/arp 工具输出
-    nonisolated private static func readArpTableViaCli() -> [(ip: String, mac: String, ifName: String, isLocal: Bool)] {
+    nonisolated public static func readArpTableViaCli() -> [(ip: String, mac: String, ifName: String, isLocal: Bool)] {
         var rawLines: [String] = []
         let arpTask = Process()
         arpTask.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
@@ -484,14 +546,132 @@ public final class LanDeviceSnifferEngine {
         return 10
     }
 
-    nonisolated private static func ipToComparable(_ ip: String) -> UInt32 {
+    nonisolated public static func ipToComparable(_ ip: String) -> UInt32 {
         let parts = ip.split(separator: ".").compactMap { UInt32($0) }
         guard parts.count == 4 else { return 0 }
         return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
     }
 
+    /// 统一 Sony PlayStation / Portal IEEE OUI 判定
+    nonisolated public static func isSonyOUI(_ mac: String) -> Bool {
+        let oui = String(mac.prefix(8)).lowercased()
+        let sonyOUIs: Set<String> = [
+            "00:04:1f", "00:13:15", "00:15:c1", "00:19:c5", "00:1d:0d",
+            "00:1f:a7", "00:24:8d", "00:d9:d1", "00:e4:21", "28:0d:fc",
+            "28:40:dd", "2c:cc:44", "40:16:7e", "70:9e:29", "78:c8:81",
+            "84:20:96", "98:fa:2e", "a8:47:4a", "a8:e3:ee", "b4:0a:d8",
+            "bc:60:a7", "c8:63:f1", "cc:de:80", "d4:4b:5e", "e8:9e:b4",
+            "f8:46:1c", "fc:0f:e6"
+        ]
+        return sonyOUIs.contains(oui)
+    }
+
+    nonisolated public static func isPortalOUI(_ mac: String) -> Bool {
+        let oui = String(mac.prefix(8)).lowercased()
+        return oui == "98:fa:2e" || oui == "a8:47:4a"
+    }
+
+    /// PlayStation Device Discovery Protocol (UDP 9302) 主动探测，精准识别 PS5 主机与主机名
+    nonisolated public static func probePlayStationDDP(
+        targetIPs: [String],
+        broadcastIPs: [String] = ["255.255.255.255"],
+        interfaceName: String? = nil,
+        timeoutMs: Int = 280
+    ) -> [String: PlayStationDDPInfo] {
+        let sock = socket(AF_INET, SOCK_DGRAM, 0)
+        guard sock >= 0 else { return [:] }
+        defer { close(sock) }
+
+        if let interfaceName, !interfaceName.isEmpty {
+            var ifIndex = if_nametoindex(interfaceName)
+            if ifIndex != 0 {
+                setsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &ifIndex, socklen_t(MemoryLayout<UInt32>.size))
+            }
+        }
+
+        var broadcastEnable: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, socklen_t(MemoryLayout<Int32>.size))
+        _ = fcntl(sock, F_SETFL, O_NONBLOCK)
+
+        let payload = Array("SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n".utf8)
+        let allTargets = Array(Set(targetIPs + broadcastIPs))
+        for ip in allTargets {
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(9302).bigEndian
+            guard inet_pton(AF_INET, ip, &addr.sin_addr) == 1 else { continue }
+            withUnsafePointer(to: &addr) { saPtr in
+                saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                    _ = sendto(sock, payload, payload.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+
+        var found: [String: PlayStationDDPInfo] = [:]
+        var recvBuf = [UInt8](repeating: 0, count: 2048)
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(50, timeoutMs)) * 1_000_000
+
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            var pfd = pollfd(fd: sock, events: Int16(POLLIN), revents: 0)
+            let remMs = Int32(min(50, max(1, Int((deadline - DispatchTime.now().uptimeNanoseconds) / 1_000_000))))
+            let ready = poll(&pfd, 1, remMs)
+            if ready <= 0 { continue }
+
+            var senderAddr = sockaddr_in()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n = withUnsafeMutablePointer(to: &senderAddr) { saPtr in
+                saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                    recvfrom(sock, &recvBuf, recvBuf.count, 0, ptr, &addrLen)
+                }
+            }
+            guard n > 0 else { continue }
+
+            var ipBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var sinAddr = senderAddr.sin_addr
+            inet_ntop(AF_INET, &sinAddr, &ipBuf, socklen_t(INET_ADDRSTRLEN))
+            let senderIP = String(decoding: ipBuf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+            guard !senderIP.isEmpty else { continue }
+
+            let text = String(decoding: recvBuf.prefix(n), as: UTF8.self)
+            let lines = text.components(separatedBy: .newlines)
+            let statusLine = lines.first ?? ""
+            let isStandby = statusLine.contains("620")
+
+            var hostType = ""
+            var hostName = ""
+            var sysVer = ""
+            for line in lines.dropFirst() {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let val = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if key == "host-type" { hostType = val }
+                else if key == "host-name" { hostName = val }
+                else if key == "system-version" { sysVer = val }
+            }
+
+            if !hostType.isEmpty {
+                found[senderIP] = PlayStationDDPInfo(
+                    ip: senderIP,
+                    hostType: hostType,
+                    hostName: hostName,
+                    systemVersion: sysVer,
+                    isStandby: isStandby
+                )
+            }
+        }
+        return found
+    }
+
     /// 权威 IEEE OUI 与局域网设备纯净智能推断 (去除硬件类型解释，保留纯净原生设备标识名)
-    nonisolated private static func identifyDevice(ip: String, mac: String, isGateway: Bool, isLocal: Bool, localName: String = "") -> (name: String, vendor: String, icon: String) {
+    nonisolated private static func identifyDevice(
+        ip: String,
+        mac: String,
+        isGateway: Bool,
+        isLocal: Bool,
+        localName: String = "",
+        ddp: PlayStationDDPInfo? = nil
+    ) -> (name: String, vendor: String, icon: String) {
         if isGateway {
             return ("华硕无线路由器", "ASUS", "network.badge.shield.half.filled")
         }
@@ -501,17 +681,19 @@ public final class LanDeviceSnifferEngine {
             return (nameToUse, "Apple", "laptopcomputer")
         }
 
+        if let ddp {
+            let display = ddp.hostName.isEmpty ? ddp.hostType : ddp.hostName
+            return (display, "Sony", "tv.fill")
+        }
+
         let prefix = mac.prefix(8).lowercased()
 
-        // 索尼 PlayStation 家族
-        if prefix.hasPrefix("28:40:dd") || ip == "192.168.50.50" {
-            return ("PlayStation 5", "Sony", "gamecontroller.fill")
-        }
-        if prefix.hasPrefix("98:fa:2e") || ip == "192.168.50.107" {
+        // 索尼 PlayStation 家族 (DDP 未响应时的 OUI 兜底推断)
+        if isPortalOUI(prefix) {
             return ("PlayStation Portal", "Sony", "gamecontroller")
         }
-        if prefix.hasPrefix("00:d9:d1") || prefix.hasPrefix("70:9e:29") || prefix.hasPrefix("bc:60:10") || prefix.hasPrefix("cc:de:80") {
-            return ("PlayStation 终端", "Sony", "gamecontroller")
+        if isSonyOUI(prefix) {
+            return ("PlayStation 终端", "Sony", "gamecontroller.fill")
         }
 
         // 苹果设备
