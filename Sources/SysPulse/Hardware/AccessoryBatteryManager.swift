@@ -41,24 +41,50 @@ public final class AccessoryBatteryManager {
     private var timer: Timer?
     private var isQueryingBluetooth: Bool = false
     private var lastBTQueryTime: Date = .distantPast
+    private var isPausedForSleep: Bool = false
 
     public init() {
-        refresh()
         startPeriodicCheck()
+        DispatchQueue.main.async { [weak self] in
+            self?.refresh()
+        }
     }
 
     public func startPeriodicCheck() {
         timer?.invalidate()
-        // Fast IOKit check every 5s; BT profiler check every 15s
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        guard !isPausedForSleep else { return }
+        // Fast IOKit check every 5s when UI is visible; BT profiler check only when UI is visible
+        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refresh()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    public func pauseForSleep() {
+        isPausedForSleep = true
+        timer?.invalidate()
+        timer = nil
+    }
+
+    public func resumeFromWake() {
+        isPausedForSleep = false
+        refresh()
+        startPeriodicCheck()
     }
 
     public func refresh(forceBluetooth: Bool = false) {
-        let isUIVisible = PowerSourceEngine.shared.isPanelVisible || MainStudioWindowController.shared.isWindowVisible
+        guard !isPausedForSleep else { return }
+        let isUIVisible = PowerSourceEngine.shared.isPanelVisible
+            || MainStudioWindowController.shared.isWindowVisible
+            || (MenuBarController.shared?.isPopoverShown ?? false)
+
+        // When no UI shows accessories, only do occasional lightweight IOKit refresh
+        guard isUIVisible || forceBluetooth || Date().timeIntervalSince(lastBTQueryTime) > 120.0 else {
+            return
+        }
 
         // 1. Instant IOKit scan for connected Apple & 3rd-party HID peripherals
         let iokitItems = scanIOKitAccessories()
@@ -66,10 +92,12 @@ public final class AccessoryBatteryManager {
         // Merge with existing BT items if available
         mergeAndPublish(iokitItems: iokitItems)
 
-        // 2. Trigger async Bluetooth scan with adaptive interval (15s when UI visible, 60s when backgrounded)
-        let btInterval: TimeInterval = forceBluetooth ? 5.0 : (isUIVisible ? 15.0 : 60.0)
-        if !isQueryingBluetooth && Date().timeIntervalSince(lastBTQueryTime) > btInterval {
-            triggerAsyncBluetoothScan()
+        // 2. Trigger async Bluetooth profiler scan ONLY when UI is visible or explicitly forced
+        if isUIVisible || forceBluetooth {
+            let btInterval: TimeInterval = forceBluetooth ? 5.0 : 20.0
+            if !isQueryingBluetooth && Date().timeIntervalSince(lastBTQueryTime) > btInterval {
+                triggerAsyncBluetoothScan()
+            }
         }
     }
 

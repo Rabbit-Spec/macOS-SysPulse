@@ -34,6 +34,8 @@ public final class PowerSourceEngine {
     private var runLoopSource: CFRunLoopSource?
     private var previousState: PowerSupplyState = .unknown
     private var lastHIDSnapshot: RawHIDPowerState?
+    private var lastPollFoundIOPS: Bool = true
+    private var isInitialized: Bool = false
     public private(set) var outageStartTime: Date?
     private var hasTriggeredSoftwareProtectionThisOutage: Bool = false
 
@@ -41,6 +43,7 @@ public final class PowerSourceEngine {
         if FeatureToggleManager.shared.enablePluginUPSManager {
             activate()
         }
+        isInitialized = true
     }
 
     public func activate() {
@@ -63,10 +66,18 @@ public final class PowerSourceEngine {
 
     public func setPanelVisible(_ visible: Bool) {
         isPanelVisible = visible
+        updateHIDPollingCadence(triggerImmediate: visible)
         if visible && FeatureToggleManager.shared.enablePluginUPSManager {
-            HIDHardwareWatchdog.shared.triggerManualPoll()
             refresh(forceUIUpdate: true)
         }
+    }
+
+    private func updateHIDPollingCadence(triggerImmediate: Bool = false) {
+        guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
+        // Keep fast polling (2.5s) while UPS UI is visible or IOPS doesn't expose UPS (HID-only fallback);
+        // dial down to 30s in background when IOPS already pushes outage/battery notifications.
+        let interval: Double = (isPanelVisible || !lastPollFoundIOPS) ? 2.5 : 30.0
+        HIDHardwareWatchdog.shared.setPollingInterval(interval, triggerImmediate: triggerImmediate)
     }
 
     // MARK: - Lifecycle & Listeners
@@ -75,7 +86,20 @@ public final class PowerSourceEngine {
         HIDHardwareWatchdog.shared.onSnapshotUpdated = { [weak self] snapshot in
             self?.handleBackgroundHIDSnapshot(snapshot)
         }
-        HIDHardwareWatchdog.shared.start(intervalSeconds: 2.5)
+        let initialInterval: Double = (isPanelVisible || !lastPollFoundIOPS) ? 2.5 : 30.0
+        HIDHardwareWatchdog.shared.start(intervalSeconds: initialInterval)
+    }
+
+    public func pauseForSleep() {
+        HIDHardwareWatchdog.shared.pauseForSleep()
+    }
+
+    public func resumeFromWake() {
+        guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
+        HIDHardwareWatchdog.shared.resumeFromWake(afterDelaySeconds: 2.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.refresh(forceUIUpdate: true)
+        }
     }
 
     private func handleBackgroundHIDSnapshot(_ snapshot: RawHIDPowerState) {
@@ -155,6 +179,14 @@ public final class PowerSourceEngine {
 
         // MacBook / Direct USB HID Fallback:
         // If IOPSCopyPowerSourcesList only listed InternalBattery-0 on a MacBook, construct UPS telemetry directly from USB HID!
+        let prevIOPSFound = lastPollFoundIOPS
+        if lastPollFoundIOPS != foundUPS {
+            lastPollFoundIOPS = foundUPS
+            if prevIOPSFound != foundUPS {
+                updateHIDPollingCadence(triggerImmediate: false)
+            }
+        }
+
         if !foundUPS, let hid = lastHIDSnapshot, hid.hasHIDDevice {
             parseHIDOnlyUPS(hid, forceUIUpdate: forceUIUpdate)
             foundUPS = true
@@ -163,6 +195,17 @@ public final class PowerSourceEngine {
         if !foundUPS {
             updateDisconnected()
         }
+    }
+
+    private func resolvedMacSystemWatts(hid: RawHIDPowerState?, isAC: Bool) -> Double {
+        let monWatts = SystemResourceMonitor.latestCachedSystemWatts()
+        if monWatts > 1.0 {
+            return monWatts
+        }
+        if let cached = hid?.macSystemWatts ?? telemetry.loadWatts, cached > 1.0 {
+            return cached
+        }
+        return isAC ? 27.0 : 29.0
     }
 
     private func parseHIDOnlyUPS(_ hid: RawHIDPowerState, forceUIUpdate: Bool) {
@@ -189,9 +232,7 @@ public final class PowerSourceEngine {
             return max(0, Int(round(24.0 * (Double(clampedPercent) / 100.0))))
         }()
 
-        let liveMacWatts = hid.macSystemWatts
-            ?? (forceUIUpdate ? HIDHardwareWatchdog.readMacSystemPowerWatts() : telemetry.loadWatts)
-            ?? (isAC ? 27.0 : 29.0)
+        let liveMacWatts = resolvedMacSystemWatts(hid: hid, isAC: isAC)
         let ratedVA = hid.configApparentPowerVA ?? 850.0
         let ratedWatts = max(300.0, ratedVA * 0.6)
         let estimatedLoadPercent = max(1.0, round((liveMacWatts / ratedWatts) * 100.0))
@@ -281,10 +322,8 @@ public final class PowerSourceEngine {
             return max(0, estimated)
         }()
 
-        // Use background-polled Mac Studio SMC wattage (avoids main-thread IOKit calls when idle)
-        let liveMacWatts = lastHIDSnapshot?.macSystemWatts
-            ?? (forceUIUpdate ? HIDHardwareWatchdog.readMacSystemPowerWatts() : telemetry.loadWatts)
-            ?? (isAC ? 27.0 : 29.0)
+        // Reuse SystemResourceMonitor Mac wattage instead of redundant main-thread IOKit polling
+        let liveMacWatts = resolvedMacSystemWatts(hid: lastHIDSnapshot, isAC: isAC)
 
         let ratedVA = lastHIDSnapshot?.configApparentPowerVA ?? 850.0
         let ratedWatts = max(300.0, ratedVA * 0.6)
@@ -400,6 +439,9 @@ public final class PowerSourceEngine {
         )
 
         self.telemetry = newTelemetry
+        if isInitialized {
+            SystemResourceMonitor.shared.refreshDemandFromMain()
+        }
         if statusBarFieldsChanged || forceUIUpdate {
             onTelemetryUpdated?()
         }

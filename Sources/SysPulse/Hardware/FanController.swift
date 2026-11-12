@@ -94,6 +94,8 @@ public final class FanController {
     private var autoRestoreTimer: Timer?
     private var keepAliveTimer: Timer?
     private var lastModeChangeAt: Date = Date()
+    private var modeBeforeSleep: FanMode = .auto
+    private var isPausedForSleep: Bool = false
 
     private init() {
         refreshFanStats()
@@ -109,10 +111,36 @@ public final class FanController {
         }
     }
 
+    public func pauseForSleep() {
+        isPausedForSleep = true
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        autoRestoreTimer?.invalidate()
+        autoRestoreTimer = nil
+
+        if activeMode != .auto {
+            modeBeforeSleep = activeMode
+            activeMode = .auto
+            statusText = "睡眠前已交还系统自动控速"
+            _ = Self.runInstalledHelperSilently(percent: 0)
+        }
+    }
+
+    public func resumeFromWake() {
+        isPausedForSleep = false
+        refreshFanStats()
+        let savedMode = modeBeforeSleep
+        modeBeforeSleep = .auto
+        if savedMode != .auto {
+            setMode(savedMode)
+        }
+    }
+
     public func setMode(_ mode: FanMode) {
         self.activeMode = mode
         self.lastModeChangeAt = Date()
         self.isTransitioning = true
+        SystemResourceMonitor.shared.refreshDemandFromMain()
 
         if mode == .auto {
             self.needsAuthorization = false

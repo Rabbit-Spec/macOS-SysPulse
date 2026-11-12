@@ -1,6 +1,8 @@
 import Foundation
 import CoreWLAN
 import CFNetwork
+import SystemConfiguration
+import Darwin
 import Observation
 import AppKit
 
@@ -74,10 +76,11 @@ public final class NetworkDetailModel {
     public static let shared = NetworkDetailModel()
 
     public private(set) var activeInterfaceName: String = "en0"
-    public private(set) var gatewayIP: String = "192.168.50.1"
-    public private(set) var primaryDNS: String = "198.18.0.2"
-    public private(set) var dnsServers: [String] = ["198.18.0.2", "192.168.50.1"]
-    public private(set) var localIPv4: String = "127.0.0.1"
+    public private(set) var gatewayIP: String = "获取中…"
+    public private(set) var primaryDNS: String = "获取中…"
+    public private(set) var dnsServers: [String] = []
+    public private(set) var physicalDNSServers: [String] = []
+    public private(set) var localIPv4: String = "获取中…"
     public private(set) var publicIP: String = "获取中…"
     public private(set) var location: String = "获取中…"
     public private(set) var carrier: String = "获取中…"
@@ -113,7 +116,7 @@ public final class NetworkDetailModel {
         if !saved.isEmpty {
             self.appNetworkItems = saved.map { entry in
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = running?.icon ?? (entry.bundleIdentifier != nil ? NSWorkspace.shared.icon(forFile: NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry.bundleIdentifier!)?.path ?? "") : nil)
+                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                 return AppNetworkItem(
                     pid: running?.processIdentifier ?? 0,
                     name: entry.name,
@@ -132,7 +135,7 @@ public final class NetworkDetailModel {
         if !savedMonth.isEmpty {
             self.monthAppNetworkItems = savedMonth.map { entry in
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = running?.icon ?? (entry.bundleIdentifier != nil ? NSWorkspace.shared.icon(forFile: NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry.bundleIdentifier!)?.path ?? "") : nil)
+                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                 return AppNetworkItem(
                     pid: running?.processIdentifier ?? 0,
                     name: entry.name,
@@ -171,149 +174,322 @@ public final class NetworkDetailModel {
         self.lastRefreshedAt = Date()
     }
 
-    // MARK: - Routing & DNS Detection
+    // MARK: - Routing & DNS Detection (Native SCDynamicStore, Zero Subprocesses)
 
-    nonisolated public static func detectGatewayAndInterface() -> (gateway: String, iface: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
-        task.arguments = ["-rn"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        if (try? task.run()) != nil {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                var candidatePhysical: (gateway: String, iface: String)? = nil
-                for line in output.components(separatedBy: .newlines) {
-                    if line.hasPrefix("default") {
-                        let parts = line.split(whereSeparator: { $0.isWhitespace })
-                        if parts.count >= 4 {
-                            let gw = String(parts[1])
-                            let iface = String(parts.last ?? "")
-                            // 优先识别物理以太网/Wi-Fi接口 (en0, en1 等)
-                            if gw.contains(".") && iface.hasPrefix("en") {
-                                return (gateway: gw, iface: iface)
-                            }
-                            if candidatePhysical == nil && gw.contains(".") && !iface.hasPrefix("utun") && !iface.hasPrefix("ppp") {
-                                candidatePhysical = (gateway: gw, iface: iface)
-                            }
+    public struct PhysicalNetworkContext: Sendable {
+        public let serviceID: String?
+        public let interfaceName: String
+        public let gateway: String
+        public let localIPv4: String
+        public let interfaceType: String?
+        public let hasVPN: Bool
+        public let serviceDNSServers: [String]
+    }
+
+    private nonisolated static let virtualInterfacePrefixes: [String] = [
+        "utun", "tun", "tap", "ppp", "ipsec", "wg",
+        "feth", "lo", "awdl", "llw", "anpi", "gif", "stf", "ap", "vnic", "vmnet"
+    ]
+
+    nonisolated public static func isVirtualInterfaceName(_ name: String) -> Bool {
+        let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return true }
+        return virtualInterfacePrefixes.contains { lower.hasPrefix($0) }
+    }
+
+    nonisolated public static func isCountablePhysicalInterfaceName(_ name: String) -> Bool {
+        guard !isVirtualInterfaceName(name) else { return false }
+        return name.hasPrefix("en") || name.hasPrefix("bridge")
+    }
+
+    nonisolated private static func isValidLANIPv4(_ ip: String) -> Bool {
+        !ip.isEmpty && ip != "127.0.0.1" && !ip.hasPrefix("169.254.")
+    }
+
+    nonisolated public static func resolvePhysicalInterface() -> PhysicalNetworkContext {
+        // 1. Collect active UP+RUNNING IPv4 addresses and detect VPN tunnels in a single getifaddrs pass
+        var activeIPv4ByIface: [String: String] = [:]
+        var hasVPN = false
+
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&ifaddr) == 0, let first = ifaddr {
+            defer { freeifaddrs(first) }
+            var ptr: UnsafeMutablePointer<ifaddrs>? = first
+            while let current = ptr {
+                let ifa = current.pointee
+                let flags = Int32(ifa.ifa_flags)
+                let isUp = (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0
+                let isRunning = (flags & IFF_RUNNING) != 0
+
+                if isUp, let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                    let name = String(cString: ifa.ifa_name)
+                    var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                    let parsed = String(decoding: host.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+
+                    if isValidLANIPv4(parsed) {
+                        if name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec") || name.hasPrefix("wg") || name.hasPrefix("tun") || name.hasPrefix("tap") {
+                            hasVPN = true
+                        }
+                        if isRunning && !isVirtualInterfaceName(name) && activeIPv4ByIface[name] == nil {
+                            activeIPv4ByIface[name] = parsed
                         }
                     }
                 }
-                if let cand = candidatePhysical {
-                    return cand
+                ptr = ifa.ifa_next
+            }
+        }
+
+        // 2. Map BSD interface names to hardware types (Ethernet / Wi-Fi / Bridge)
+        var scTypeByBSD: [String: String] = [:]
+        if let scInterfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] {
+            for iface in scInterfaces {
+                if let bsd = SCNetworkInterfaceGetBSDName(iface) as String?,
+                   let type = SCNetworkInterfaceGetInterfaceType(iface) as String? {
+                    scTypeByBSD[bsd] = type
                 }
             }
         }
-        return (gateway: "192.168.50.1", iface: "en0")
+
+        guard let store = SCDynamicStoreCreate(nil, "SysPulse.GatewayDetect" as CFString, nil, nil) else {
+            let fallbackIface = activeIPv4ByIface.keys.sorted().first ?? "en0"
+            return PhysicalNetworkContext(
+                serviceID: nil,
+                interfaceName: fallbackIface,
+                gateway: "",
+                localIPv4: activeIPv4ByIface[fallbackIface] ?? "127.0.0.1",
+                interfaceType: scTypeByBSD[fallbackIface],
+                hasVPN: hasVPN,
+                serviceDNSServers: []
+            )
+        }
+
+        func readServiceDNS(_ serviceID: String?) -> [String] {
+            guard let serviceID, !serviceID.isEmpty else {
+                return []
+            }
+            let keys = [
+                "State:/Network/Service/\(serviceID)/DNS",
+                "Setup:/Network/Service/\(serviceID)/DNS"
+            ]
+            for key in keys {
+                if let dnsDict = SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any],
+                   let addrs = dnsDict["ServerAddresses"] as? [String] {
+                    let cleaned = addrs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                    let ipv4 = cleaned.filter { $0.contains(".") }
+                    if !ipv4.isEmpty {
+                        return ipv4
+                    }
+                    if !cleaned.isEmpty {
+                        return cleaned
+                    }
+                }
+            }
+            return []
+        }
+
+        // 3. Fast path: if macOS Global/IPv4 points to a real physical interface, trust it directly
+        if let globalDict = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any] {
+            let globalIface = (globalDict["PrimaryInterface"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let globalService = (globalDict["PrimaryService"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let globalGW = (globalDict["Router"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if !globalIface.isEmpty,
+               !isVirtualInterfaceName(globalIface),
+               let activeIP = activeIPv4ByIface[globalIface] {
+                var resolvedGW = globalGW
+                if resolvedGW.isEmpty, let globalService,
+                   let svcDict = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(globalService)/IPv4" as CFString) as? [String: Any] {
+                    resolvedGW = (svcDict["Router"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                }
+                return PhysicalNetworkContext(
+                    serviceID: globalService,
+                    interfaceName: globalIface,
+                    gateway: resolvedGW,
+                    localIPv4: activeIP,
+                    interfaceType: scTypeByBSD[globalIface],
+                    hasVPN: hasVPN,
+                    serviceDNSServers: readServiceDNS(globalService)
+                )
+            }
+        }
+
+        // 4. VPN / TUN override path (e.g. utun2 is PrimaryInterface):
+        //    Follow Setup ServiceOrder to find the underlying active physical service + its real Router & IP.
+        var orderedServiceIDs: [String] = []
+        if let setupDict = SCDynamicStoreCopyValue(store, "Setup:/Network/Global/IPv4" as CFString) as? [String: Any],
+           let order = setupDict["ServiceOrder"] as? [String] {
+            orderedServiceIDs.append(contentsOf: order)
+        }
+        if let stateKeys = SCDynamicStoreCopyKeyList(store, "State:/Network/Service/.*/IPv4" as CFString) as? [String] {
+            for key in stateKeys {
+                // Format: State:/Network/Service/<serviceID>/IPv4
+                let parts = key.split(separator: "/")
+                if parts.count == 5 {
+                    let sid = String(parts[3])
+                    if !orderedServiceIDs.contains(sid) {
+                        orderedServiceIDs.append(sid)
+                    }
+                }
+            }
+        }
+
+        var backupWithoutRouter: PhysicalNetworkContext?
+
+        for sid in orderedServiceIDs {
+            guard let svcDict = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(sid)/IPv4" as CFString) as? [String: Any] else {
+                continue
+            }
+            let rawIface = (svcDict["ConfirmedInterfaceName"] as? String)
+                ?? (svcDict["InterfaceName"] as? String)
+                ?? ""
+            let iface = rawIface.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !iface.isEmpty, !isVirtualInterfaceName(iface) else { continue }
+
+            // Ensure the physical interface is actually UP & has a valid LAN IPv4
+            guard let activeIP = activeIPv4ByIface[iface] else {
+                continue
+            }
+
+            let router = (svcDict["Router"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let ctx = PhysicalNetworkContext(
+                serviceID: sid,
+                interfaceName: iface,
+                gateway: router,
+                localIPv4: activeIP,
+                interfaceType: scTypeByBSD[iface],
+                hasVPN: hasVPN,
+                serviceDNSServers: readServiceDNS(sid)
+            )
+            if !router.isEmpty {
+                return ctx
+            }
+            if backupWithoutRouter == nil {
+                backupWithoutRouter = ctx
+            }
+        }
+
+        if let backupWithoutRouter {
+            return backupWithoutRouter
+        }
+
+        // 5. Final fallback: inspect live physical interfaces sorted Ethernet -> Wi-Fi -> other en* -> bridge*
+        let sortedIfaces = activeIPv4ByIface.keys.sorted { lhs, rhs in
+            func rank(_ ifName: String) -> Int {
+                let scType = scTypeByBSD[ifName]
+                if scType == (kSCNetworkInterfaceTypeEthernet as String) { return 0 }
+                if scType == (kSCNetworkInterfaceTypeIEEE80211 as String) { return 1 }
+                if ifName.hasPrefix("en") { return 2 }
+                return 3
+            }
+            let r1 = rank(lhs), r2 = rank(rhs)
+            return r1 != r2 ? r1 < r2 : lhs < rhs
+        }
+
+        let bestIface = sortedIfaces.first ?? "en0"
+        var bestGW = ""
+        if let ifaceDict = SCDynamicStoreCopyValue(store, "State:/Network/Interface/\(bestIface)/IPv4" as CFString) as? [String: Any] {
+            bestGW = (ifaceDict["Router"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        return PhysicalNetworkContext(
+            serviceID: nil,
+            interfaceName: bestIface,
+            gateway: bestGW,
+            localIPv4: activeIPv4ByIface[bestIface] ?? "127.0.0.1",
+            interfaceType: scTypeByBSD[bestIface],
+            hasVPN: hasVPN,
+            serviceDNSServers: []
+        )
+    }
+
+    nonisolated public static func detectGatewayAndInterface() -> (gateway: String, iface: String) {
+        let ctx = resolvePhysicalInterface()
+        return (gateway: ctx.gateway, iface: ctx.interfaceName)
     }
 
     nonisolated public static func detectDNSServers() -> [String] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/scutil")
-        task.arguments = ["--dns"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        if (try? task.run()) != nil {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                var servers: [String] = []
-                for line in output.components(separatedBy: .newlines) {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    if trimmed.hasPrefix("nameserver[") {
-                        let parts = trimmed.components(separatedBy: ":")
-                        if parts.count >= 2 {
-                            let ip = parts[1].trimmingCharacters(in: .whitespaces)
-                            if ip.contains(".") && !servers.contains(ip) {
-                                servers.append(ip)
-                            }
-                        }
-                    }
-                }
-                if !servers.isEmpty {
-                    return servers
-                }
+        if let store = SCDynamicStoreCreate(nil, "SysPulse.DNSDetect" as CFString, nil, nil),
+           let dict = SCDynamicStoreCopyValue(store, "State:/Network/Global/DNS" as CFString) as? [String: Any],
+           let addrs = dict["ServerAddresses"] as? [String] {
+            let cleaned = addrs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            let ipv4Servers = cleaned.filter { $0.contains(".") }
+            if !ipv4Servers.isEmpty {
+                return ipv4Servers
+            }
+            if !cleaned.isEmpty {
+                return cleaned
             }
         }
-        return ["198.18.0.2", "192.168.50.1"]
+        let physicalDNS = resolvePhysicalInterface().serviceDNSServers
+        if !physicalDNS.isEmpty {
+            return physicalDNS
+        }
+        return ["223.5.5.5", "114.114.114.114"]
     }
 
     // MARK: - Local IP & Link
 
     private func refreshLocalNetwork() {
-        let (gw, iface) = Self.detectGatewayAndInterface()
-        self.gatewayIP = gw
-        self.activeInterfaceName = iface
+        let proxyText = self.proxy
+        Task.detached(priority: .utility) { [weak self] in
+            let ctx = Self.resolvePhysicalInterface()
+            let iface = ctx.interfaceName
+            let gw = ctx.gateway
+            let primaryIP = ctx.localIPv4
+            let hasVPN = ctx.hasVPN
+            let dnsList = Self.detectDNSServers()
+            // 默认显示物理网卡自身的真实主 DNS；仅当物理服务未提供 DNS 时回退全局 DNS
+            let primaryDNSVal = ctx.serviceDNSServers.first ?? dnsList.first ?? ""
 
-        let dnsList = Self.detectDNSServers()
-        self.dnsServers = dnsList
-        if let first = dnsList.first {
-            self.primaryDNS = first
-        }
+            let wifiClient = CWWiFiClient.shared().interface()
+            let wifiIfaceName = wifiClient?.interfaceName
 
-        let wifiIfaceName = CWWiFiClient.shared().interface()?.interfaceName ?? "en1"
-
-        var primaryIP: String = "127.0.0.1"
-        var hasVPN: Bool = false
-
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        if getifaddrs(&ifaddr) == 0, let first = ifaddr {
-            defer { freeifaddrs(ifaddr) }
-            var ptr: UnsafeMutablePointer<ifaddrs>? = first
-            while let current = ptr {
-                let flags = Int32(current.pointee.ifa_flags)
-                let name = String(cString: current.pointee.ifa_name)
-
-                if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 {
-                    if let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                        getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-                        let parsed = String(decoding: host.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-                        if !parsed.hasPrefix("169.254.") && parsed != "127.0.0.1" {
-                            if name == iface {
-                                primaryIP = parsed
-                            }
-                            if name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec") || name.hasPrefix("wg") {
-                                hasVPN = true
-                            }
-                        }
-                    }
-                }
-                ptr = current.pointee.ifa_next
-            }
-        }
-        self.localIPv4 = primaryIP
-
-        // 真实物理链路判定 (严格区分以太网与 Wi-Fi)
-        if iface == wifiIfaceName {
-            self.link = "Wi-Fi"
-        } else if iface.hasPrefix("en") {
-            self.link = "以太网"
-        } else if iface.hasPrefix("bridge") {
-            self.link = "雷雳网桥"
-        } else {
-            self.link = "局域网"
-        }
-
-        // 当前网络显示：以太网优先展示以太网，Wi-Fi时展示SSID
-        if self.link == "以太网" {
-            self.ssid = "以太网"
-        } else {
-            let client = CWWiFiClient.shared()
-            if let name = client.interface()?.ssid(), !name.isEmpty {
-                self.ssid = name
+            let linkText: String
+            if let wifiIfaceName, iface == wifiIfaceName || ctx.interfaceType == (kSCNetworkInterfaceTypeIEEE80211 as String) {
+                linkText = "Wi-Fi"
+            } else if ctx.interfaceType == (kSCNetworkInterfaceTypeEthernet as String) || iface.hasPrefix("en") {
+                linkText = "以太网"
+            } else if iface.hasPrefix("bridge") {
+                linkText = "雷雳网桥"
             } else {
-                self.ssid = "Wi-Fi 网络"
+                linkText = "以太网"
             }
-        }
 
-        // VPN / 代理状态判定
-        self.isVPNActive = hasVPN
-        if hasVPN {
-            self.vpnStatusText = "VPN 已开启"
-        } else if self.proxy != "直连" {
-            self.vpnStatusText = "系统代理开启"
-        } else {
-            self.vpnStatusText = "直连无代理"
+            let ssidText: String
+            if linkText == "Wi-Fi" {
+                if let name = wifiClient?.ssid(), !name.isEmpty {
+                    ssidText = name
+                } else {
+                    ssidText = "Wi-Fi 网络"
+                }
+            } else if linkText == "以太网" {
+                ssidText = "以太网"
+            } else {
+                ssidText = linkText
+            }
+
+            let vpnText: String
+            if hasVPN {
+                vpnText = "VPN 已开启"
+            } else if proxyText != "直连" {
+                vpnText = "系统代理开启"
+            } else {
+                vpnText = "直连无代理"
+            }
+
+            await MainActor.run {
+                guard let self else { return }
+                self.gatewayIP = gw.isEmpty ? "暂无" : gw
+                self.activeInterfaceName = iface
+                self.dnsServers = dnsList
+                self.physicalDNSServers = ctx.serviceDNSServers
+                self.primaryDNS = primaryDNSVal.isEmpty ? "暂无" : primaryDNSVal
+                self.localIPv4 = primaryIP
+                self.link = linkText
+                self.ssid = ssidText
+                self.isVPNActive = hasVPN
+                self.vpnStatusText = vpnText
+            }
         }
     }
 
@@ -482,7 +658,47 @@ public final class NetworkDetailModel {
 
     // MARK: - Real Per-App Network Usage via nettop & Real Sockets via lsof
 
-    private var prevAppBytes: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] = [:]
+    private final class UsageAndIconCache: @unchecked Sendable {
+        static let shared = UsageAndIconCache()
+        private let lock = NSLock()
+        private var prevAppBytes: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] = [:]
+        private let iconCache: NSCache<NSString, NSImage> = {
+            let c = NSCache<NSString, NSImage>()
+            c.countLimit = 128
+            return c
+        }()
+
+        func swapPrevAppBytes(with next: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)]) -> [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] {
+            lock.lock()
+            let prev = prevAppBytes
+            prevAppBytes = next
+            lock.unlock()
+            return prev
+        }
+
+        func cachedIcon(bundleID: String?, pid: Int32, runningApp: NSRunningApplication?) -> NSImage? {
+            if let bid = bundleID as NSString?, let hit = iconCache.object(forKey: bid) {
+                return hit
+            }
+            if let icon = runningApp?.icon {
+                if let bid = bundleID as NSString? {
+                    iconCache.setObject(icon, forKey: bid)
+                }
+                return icon
+            }
+            if let bundleID,
+               let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                let img = NSWorkspace.shared.icon(forFile: url.path)
+                iconCache.setObject(img, forKey: bundleID as NSString)
+                return img
+            }
+            return nil
+        }
+    }
+
+    nonisolated private static func cachedAppIcon(bundleID: String?, pid: Int32, runningApp: NSRunningApplication?) -> NSImage? {
+        UsageAndIconCache.shared.cachedIcon(bundleID: bundleID, pid: pid, runningApp: runningApp)
+    }
 
     public func refreshAppNetworkUsage() {
         Task.detached(priority: .utility) {
@@ -516,38 +732,42 @@ public final class NetworkDetailModel {
             // Sort by total bytes descending
             rawItems.sort(by: { $0.total > $1.total })
 
+            var nextSnapshot: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] = [:]
+            for raw in rawItems.prefix(80) {
+                nextSnapshot[raw.pid] = (raw.inB, raw.outB, now)
+            }
+            let prevSnapshot = UsageAndIconCache.shared.swapPrevAppBytes(with: nextSnapshot)
+
             var items: [AppNetworkItem] = []
             for raw in rawItems {
                 let pid = raw.pid
                 let runningApp = NSRunningApplication(processIdentifier: pid)
                 let displayName = runningApp?.localizedName ?? Self.cleanProcessName(raw.rawName)
-                let icon = runningApp?.icon
 
                 // 严格过滤微小无意义系统噪音（< 10KB）与系统 NTP 守护进程 timed
                 guard raw.total >= 10240, raw.rawName != "timed", displayName != "timed" else { continue }
 
                 var downSpeed: Double = 0
                 var upSpeed: Double = 0
-                if let prev = await MainActor.run(body: { self.prevAppBytes[pid] }) {
+                if let prev = prevSnapshot[pid] {
                     let dt = max(0.5, now.timeIntervalSince(prev.time))
                     if raw.inB >= prev.inBytes { downSpeed = Double(raw.inB - prev.inBytes) / dt }
                     if raw.outB >= prev.outBytes { upSpeed = Double(raw.outB - prev.outBytes) / dt }
                 }
 
-                await MainActor.run {
-                    self.prevAppBytes[pid] = (raw.inB, raw.outB, now)
-                }
+                let bundleID = runningApp?.bundleIdentifier
+                let icon = Self.cachedAppIcon(bundleID: bundleID, pid: pid, runningApp: runningApp)
 
                 NetworkTrafficPersistenceManager.shared.recordAppTraffic(
                     name: displayName,
-                    bundleID: runningApp?.bundleIdentifier,
+                    bundleID: bundleID,
                     bytes: raw.total
                 )
 
                 items.append(AppNetworkItem(
                     pid: pid,
                     name: displayName,
-                    bundleIdentifier: runningApp?.bundleIdentifier,
+                    bundleIdentifier: bundleID,
                     icon: icon,
                     downloadSpeedFormatted: Self.formatSpeed(downSpeed),
                     uploadSpeedFormatted: Self.formatSpeed(upSpeed),
@@ -564,7 +784,7 @@ public final class NetworkDetailModel {
             for entry in saved where !existingNames.contains(entry.name) {
                 guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = running?.icon ?? (entry.bundleIdentifier != nil ? NSWorkspace.shared.icon(forFile: NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry.bundleIdentifier!)?.path ?? "") : nil)
+                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                 items.append(AppNetworkItem(
                     pid: running?.processIdentifier ?? 0,
                     name: entry.name,
@@ -585,7 +805,7 @@ public final class NetworkDetailModel {
             for entry in savedMonth {
                 guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = running?.icon ?? (entry.bundleIdentifier != nil ? NSWorkspace.shared.icon(forFile: NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry.bundleIdentifier!)?.path ?? "") : nil)
+                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                 monthItems.append(AppNetworkItem(
                     pid: running?.processIdentifier ?? 0,
                     name: entry.name,
@@ -607,18 +827,23 @@ public final class NetworkDetailModel {
         }
     }
 
-    public func refreshActiveSockets() {
+    public func refreshActiveSockets(syncSummaryTo vm: NetworkMonitorViewModel? = nil) {
         Task.detached(priority: .utility) {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
             task.arguments = ["-iTCP", "-iUDP", "-n", "-P"]
             let pipe = Pipe()
             task.standardOutput = pipe
+            task.standardError = FileHandle.nullDevice
             guard (try? task.run()) != nil else { return }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let output = String(data: data, encoding: .utf8) else { return }
 
             var sockets: [ActiveSocketItem] = []
+            var tcpEstablished = 0
+            var udpCount = 0
+            var activePids = Set<Int32>()
+
             for line in output.components(separatedBy: .newlines).dropFirst() {
                 let parts = line.split(whereSeparator: { $0.isWhitespace })
                 guard parts.count >= 9 else { continue }
@@ -627,9 +852,11 @@ public final class NetworkDetailModel {
                 let proto = String(parts[7]) // TCP or UDP
                 let rest = parts[8...].joined(separator: " ")
 
+                activePids.insert(pid)
                 var state = "ACTIVE"
                 if rest.contains("ESTABLISHED") {
                     state = "ESTABLISHED"
+                    tcpEstablished += 1
                 } else if rest.contains("LISTEN") {
                     state = "LISTEN"
                 } else if rest.contains("SYN_SENT") {
@@ -640,6 +867,7 @@ public final class NetworkDetailModel {
                     state = "TIME_WAIT"
                 } else if proto == "UDP" {
                     state = "ACTIVE"
+                    udpCount += 1
                 }
 
                 let addressPart = String(rest.split(whereSeparator: { $0.isWhitespace }).first ?? "")
@@ -679,9 +907,20 @@ public final class NetworkDetailModel {
             }
 
             let allSockets = sockets
+            let summarySockets = tcpEstablished + udpCount
+            let summaryProcs = activePids.count
+            let ifCount = vm != nil ? NetworkMonitorViewModel.countActiveInterfaces() : 0
+
             await MainActor.run {
                 if !allSockets.isEmpty {
                     self.activeSockets = allSockets
+                }
+                if let vm {
+                    vm.applySocketSummary(
+                        socketCount: summarySockets,
+                        processCount: summaryProcs,
+                        interfaceCount: ifCount
+                    )
                 }
             }
         }

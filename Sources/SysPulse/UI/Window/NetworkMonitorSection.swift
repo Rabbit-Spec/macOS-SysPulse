@@ -58,22 +58,21 @@ public struct NetworkMonitorSection: View {
         .padding(.bottom, 24)
         .onAppear {
             model.refresh()
-            vm.refreshStats(gatewayIP: model.gatewayIP, iface: model.activeInterfaceName)
-            model.refreshAppNetworkUsage()
-            model.refreshActiveSockets()
+            vm.refreshRealTraffic(iface: model.activeInterfaceName)
+            vm.measureRealLatencies(gatewayIP: model.gatewayIP)
+            model.refreshActiveSockets(syncSummaryTo: vm)
         }
         .task {
-            // 每 1.5 秒持续获取 macOS 内核真实活动套接字与进程连接遥测，实时刷新硬件网卡流量，并每 6 秒自动刷新链路延迟与丢包率
+            // 每 3.0 秒合并刷新活跃连接与进程流量，共享单次 lsof 避免重复子进程；每 9.0 秒刷新链路延迟
             var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else { break }
                 tick += 1
-                vm.refreshSocketsAndInterfaces()
                 vm.refreshRealTraffic(iface: model.activeInterfaceName)
                 model.refreshAppNetworkUsage()
-                model.refreshActiveSockets()
-                if tick % 4 == 0 {
+                model.refreshActiveSockets(syncSummaryTo: vm)
+                if tick % 3 == 0 {
                     vm.measureRealLatencies(gatewayIP: model.gatewayIP)
                 }
             }
@@ -114,8 +113,9 @@ public struct NetworkMonitorSection: View {
     }
 
     private var networkDetailsCard: some View {
-        cardContainer(height: leftCard1H) {
-            VStack(alignment: .leading, spacing: 9) {
+        let edgeInset: CGFloat = 12
+        return cardContainer(height: leftCard1H, padding: edgeInset) {
+            VStack(alignment: .leading, spacing: edgeInset) {
                 HStack {
                     HStack(spacing: 6) {
                         Image(systemName: "network")
@@ -134,33 +134,50 @@ public struct NetworkMonitorSection: View {
                         .background(Capsule().fill((model.isVPNActive ? Color(red: 0.55, green: 0.55, blue: 0.95) : Color.cyan).opacity(0.12)))
                 }
 
-                // Row 1: 当前网络 (SSID)
-                infoTableRow(label: "当前网络") {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(Color.cyan)
-                            .frame(width: 5.5, height: 5.5)
-                        Text(model.ssid)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                VStack(alignment: .leading, spacing: 5) {
+                    // Row 1: 当前网络 (SSID)
+                    infoTableRow(label: "当前网络", verticalPadding: 3.5) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(Color.cyan)
+                                .frame(width: 5.5, height: 5.5)
+                            Text(model.ssid)
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.primaryText)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    // Row 2: 内网 IP
+                    infoTableRow(label: "内网 IP", verticalPadding: 3.5) {
+                        Text(model.localIPv4)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundStyle(theme.primaryText)
-                            .lineLimit(1)
+                    }
+
+                    // Row 3: 外网 IP
+                    infoTableRow(label: "外网 IP", verticalPadding: 3.5) {
+                        Text(model.publicIP)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(theme.primaryText)
+                    }
+
+                    // Row 4: 网关 IP
+                    infoTableRow(label: "网关 IP", verticalPadding: 3.5) {
+                        Text(model.gatewayIP)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(theme.primaryText)
+                    }
+
+                    // Row 5: DNS (默认显示物理网卡主 DNS)
+                    infoTableRow(label: "DNS", verticalPadding: 3.5) {
+                        Text(model.primaryDNS)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(theme.primaryText)
                     }
                 }
-
-                // Row 2: 局域网 IP
-                infoTableRow(label: "局域网 IP") {
-                    Text(model.localIPv4)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(theme.primaryText)
-                }
-
-                // Row 3: 互联网出口 IP
-                infoTableRow(label: "互联网 IP") {
-                    Text(model.publicIP)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(theme.primaryText)
-                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -1119,7 +1136,7 @@ public struct NetworkMonitorSection: View {
 
     // MARK: - Helper Components
 
-    private func infoTableRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
+    private func infoTableRow<Content: View>(label: String, verticalPadding: CGFloat = 5, expandVertically: Bool = true, @ViewBuilder content: () -> Content) -> some View {
         HStack {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
@@ -1129,7 +1146,8 @@ public struct NetworkMonitorSection: View {
             content()
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, verticalPadding)
+        .frame(maxHeight: expandVertically ? .infinity : nil)
         .background(
             RoundedRectangle(cornerRadius: 7.5, style: .continuous)
                 .fill(colorScheme == .dark ? Color.white.opacity(0.035) : Color.black.opacity(0.025))
@@ -1168,9 +1186,9 @@ public struct NetworkMonitorSection: View {
         }
     }
 
-    private func cardContainer<Content: View>(height: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+    private func cardContainer<Content: View>(height: CGFloat, padding: CGFloat = 13, @ViewBuilder content: () -> Content) -> some View {
         content()
-            .padding(13)
+            .padding(padding)
             .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(

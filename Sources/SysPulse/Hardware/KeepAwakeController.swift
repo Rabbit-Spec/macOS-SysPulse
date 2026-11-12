@@ -284,13 +284,33 @@ public final class KeepAwakeController {
 
     // MARK: - Timer Countdown
 
+    private var isPausedForSleep: Bool = false
+
+    public func pauseForSleep() {
+        isPausedForSleep = true
+        stopTimer()
+    }
+
+    public func resumeFromWake() {
+        isPausedForSleep = false
+        if isActive {
+            handleTick()
+            if isActive {
+                startTimer()
+            }
+        }
+    }
+
     private func startTimer() {
         stopTimer()
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        guard !isPausedForSleep else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.handleTick()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        tickTimer = timer
     }
 
     private func stopTimer() {

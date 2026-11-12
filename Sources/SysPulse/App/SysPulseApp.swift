@@ -589,6 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMainMenu()
         menuBarController = MenuBarController()
         AppIconManager.shared.startObservingSystemAppearance()
+        SystemSleepCoordinator.shared.start()
 
         let isBackgroundLaunch = CommandLine.arguments.contains("--background") ||
                                  CommandLine.arguments.contains("--login-item")
@@ -716,6 +717,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        SystemResourceMonitor.shared.pauseForSleep()
+        NetworkTrafficPersistenceManager.shared.persistToDisk(force: true)
+        PSPortalPluginManager.shared.stopRelaySynchronouslyForTermination()
         PowerSourceEngine.shared.stopListening()
         WiFiLowLatencyManager.shared.restoreOnTermination()
     }

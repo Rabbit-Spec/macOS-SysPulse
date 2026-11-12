@@ -95,6 +95,7 @@ public enum ProcessSortOrder: Sendable {
 public final class StudioWindowNavigationState {
     public static let shared = StudioWindowNavigationState()
     public var selectedTab: StudioTopTab = .status
+    public var isMainWindowVisible: Bool = false
     public var isModalPresented: Bool = false
     public var activeModalTab: StudioModalTab = .settings
     public var isIconMenuPresented: Bool = false
@@ -294,6 +295,8 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         }
 
         isWindowVisible = true
+        StudioWindowNavigationState.shared.isMainWindowVisible = true
+        SystemResourceMonitor.shared.refreshDemandFromMain()
         if let win = window {
             win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
             win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -325,7 +328,9 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
 
     public func windowWillClose(_ notification: Notification) {
         isWindowVisible = false
+        StudioWindowNavigationState.shared.isMainWindowVisible = false
         PowerSourceEngine.shared.setPanelVisible(false)
+        SystemResourceMonitor.shared.refreshDemandFromMain()
         // Return to lightweight menu bar agent mode so Full Screen menu bar auto-hide is never blocked
         NSApp.setActivationPolicy(.accessory)
         NSApp.deactivate()

@@ -558,8 +558,18 @@ static void save_restore_state(void) {
 }
 
 static int load_restore_state(void) {
-    FILE *f = fopen(STATE_FILE, "r");
-    if (!f) return -1;
+    int fd = open(STATE_FILE, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0) {
+        close(fd);
+        return -1;
+    }
+    FILE *f = fdopen(fd, "r");
+    if (!f) {
+        close(fd);
+        return -1;
+    }
     char iface_buf[32] = "";
     int oneway = 1, redir = -1, fwd = -1;
     unsigned int own_m[6], ps5_m[6], port_m[6];

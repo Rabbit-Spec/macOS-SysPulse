@@ -32,6 +32,19 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
     private var isCancelledFlag: Bool = false
     private let stateLock = NSLock()
 
+    private nonisolated func setCancelled(_ cancelled: Bool) {
+        stateLock.lock()
+        isCancelledFlag = cancelled
+        stateLock.unlock()
+    }
+
+    private nonisolated var isScanCancelled: Bool {
+        stateLock.lock()
+        let val = isCancelledFlag
+        stateLock.unlock()
+        return val
+    }
+
     private init() {
         populateDefaultInsights()
     }
@@ -77,7 +90,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         topLargeFiles = []
         totalScannedFiles = 0
         totalScannedBytes = 0
-        isCancelledFlag = false
+        setCancelled(false)
 
         let startTime = Date()
         let hasFDA = Task { @MainActor in
@@ -110,7 +123,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
             let cappedLargeFiles = Array(largeFilesList.prefix(100))
 
             await MainActor.run {
-                if self.isCancelledFlag {
+                if self.isScanCancelled {
                     self.status = .cancelled
                     self.isScanning = false
                     return
@@ -134,7 +147,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
     }
 
     public func cancelScan() {
-        isCancelledFlag = true
+        setCancelled(true)
         scanTask?.cancel()
         scanTask = nil
         if isScanning {
@@ -159,7 +172,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         lastUpdate: inout Date,
         hasFullDiskAccess: Bool
     ) -> AnalysisNode? {
-        if isCancelledFlag { return nil }
+        if isScanCancelled || Task.isCancelled { return nil }
 
         let fileManager = FileManager.default
         let resourceKeys: Set<URLResourceKey> = [
@@ -203,7 +216,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         var totalDirSize: Int64 = 0
 
         for itemURL in contents {
-            if isCancelledFlag { return nil }
+            if isScanCancelled || Task.isCancelled { return nil }
 
             // 未开启完全磁盘访问权限时，严格跳过 macOS 隐私保护敏感目录，防止反复向用户弹出一堆系统授权请求
             let name = itemURL.lastPathComponent
@@ -310,6 +323,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
+            if isScanCancelled || Task.isCancelled { return total }
             if let values = try? fileURL.resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey]) {
                 total += Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
             }
@@ -456,29 +470,27 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
     }
 
     public func refreshHiddenInsights() {
-        // Query system purgeable space
-        let fileManager = FileManager.default
-        let homeURL = fileManager.homeDirectoryForCurrentUser
-        if let values = try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
-            let important = values.volumeAvailableCapacityForImportantUsage ?? 0
-            let normal = Int64(values.volumeAvailableCapacity ?? 0)
-            let purgeable = max(0, important - normal)
-            if purgeable > 0 {
-                let formatted = ByteCountFormatter.string(fromByteCount: purgeable, countStyle: .file)
-                if let idx = hiddenInsights.firstIndex(where: { $0.id == "purgeable" }) {
-                    hiddenInsights[idx].detectedSize = formatted
+        // Query system purgeable space (CacheDelete) and APFS snapshots off the MainActor
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let fileManager = FileManager.default
+            let homeURL = fileManager.homeDirectoryForCurrentUser
+            var purgeableStr: String? = nil
+            if let values = try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]) {
+                let important = values.volumeAvailableCapacityForImportantUsage ?? 0
+                let normal = Int64(values.volumeAvailableCapacity ?? 0)
+                let purgeable = max(0, important - normal)
+                if purgeable > 0 {
+                    purgeableStr = ByteCountFormatter.string(fromByteCount: purgeable, countStyle: .file)
                 }
             }
-        }
 
-        // Query APFS snapshots count via tmutil
-        DispatchQueue.global(qos: .utility).async { [weak self] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
             process.arguments = ["listlocalsnapshots", "/"]
             let pipe = Pipe()
             process.standardOutput = pipe
 
+            var snapshotText: String? = nil
             do {
                 try process.run()
                 process.waitUntilExit()
@@ -486,15 +498,22 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
                 if let output = String(data: data, encoding: .utf8) {
                     let lines = output.components(separatedBy: .newlines).filter { $0.contains("com.apple.TimeMachine") }
                     let count = lines.count
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        if let idx = self.hiddenInsights.firstIndex(where: { $0.id == "apfs_snapshots" }) {
-                            self.hiddenInsights[idx].detectedSize = count > 0 ? "\(count) 个本地快照" : "未检测到积压快照"
-                        }
-                    }
+                    snapshotText = count > 0 ? "\(count) 个本地快照" : "未检测到积压快照"
                 }
             } catch {
                 // Ignore silent failure
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let formatted = purgeableStr,
+                   let idx = self.hiddenInsights.firstIndex(where: { $0.id == "purgeable" }) {
+                    self.hiddenInsights[idx].detectedSize = formatted
+                }
+                if let snapshotText,
+                   let idx = self.hiddenInsights.firstIndex(where: { $0.id == "apfs_snapshots" }) {
+                    self.hiddenInsights[idx].detectedSize = snapshotText
+                }
             }
         }
     }

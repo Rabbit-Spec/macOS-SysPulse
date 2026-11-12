@@ -7,6 +7,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover?
+    public var isPopoverShown: Bool { popover?.isShown ?? false }
     private var lastRenderedTitle: String = ""
     private var lastRenderedIconKey: String = ""
     private weak var previousActiveApp: NSRunningApplication?
@@ -453,7 +454,6 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         if popover == nil || !(popover?.isShown ?? false) {
             PanelCoordinator.shared.activeScreen = .dashboard
             PowerSourceEngine.shared.setPanelVisible(true)
-            SystemResourceMonitor.shared.refreshNow()
             if FeatureToggleManager.shared.enablePluginUPSManager {
                 DiskGuardian.shared.refreshDisks()
             }
@@ -462,6 +462,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             self.popover = newPopover
             NSApp.activate(ignoringOtherApps: true)
             newPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            SystemResourceMonitor.shared.refreshNow()
         }
     }
 
@@ -483,7 +484,6 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
 
             // Mark panel visible and refresh latest hardware telemetry
             PowerSourceEngine.shared.setPanelVisible(true)
-            SystemResourceMonitor.shared.refreshNow()
             if FeatureToggleManager.shared.enablePluginUPSManager {
                 DiskGuardian.shared.refreshDisks()
             }
@@ -493,6 +493,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             self.popover = newPopover
             NSApp.activate(ignoringOtherApps: true)
             newPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            SystemResourceMonitor.shared.refreshNow()
         }
     }
 
@@ -507,6 +508,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         popover?.contentViewController = nil
         popover?.delegate = nil
         popover = nil
+        SystemResourceMonitor.shared.refreshDemandFromMain()
 
         statusItem.button?.highlight(false)
         statusItem.button?.window?.resignKey()

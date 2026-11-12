@@ -37,50 +37,52 @@ public struct MainStudioWindowView: View {
                     // 顶部导航栏
                     topNavigationBar
 
-                    // 当前标签页内容区
+                    // 当前标签页内容区（窗口关闭隐藏时卸载子视图树，彻底停止内部动画与后台 .task 轮询）
                     ZStack(alignment: .top) {
-                        switch navState.selectedTab {
-                        case .status:
-                            StatusOverviewSection(
-                                navState: navState,
-                                engine: engine,
-                                monitor: monitor,
-                                toggles: toggles,
-                                diskGuardian: diskGuardian,
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
-                        case .network:
-                            NetworkMonitorSection(
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
-                        case .cleaner:
-                            StorageCleanerSection(
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
-                        case .software:
-                            AppUninstallerSection(
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
-                        case .space:
-                            StorageAnalysisSection(
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
-                        case .plugins:
-                            PluginsDashboardView(
-                                theme: theme,
-                                canvasWidth: logicalW,
-                                canvasHeight: logicalH
-                            )
+                        if navState.isMainWindowVisible {
+                            switch navState.selectedTab {
+                            case .status:
+                                StatusOverviewSection(
+                                    navState: navState,
+                                    engine: engine,
+                                    monitor: monitor,
+                                    toggles: toggles,
+                                    diskGuardian: diskGuardian,
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            case .network:
+                                NetworkMonitorSection(
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            case .cleaner:
+                                StorageCleanerSection(
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            case .software:
+                                AppUninstallerSection(
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            case .space:
+                                StorageAnalysisSection(
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            case .plugins:
+                                PluginsDashboardView(
+                                    theme: theme,
+                                    canvasWidth: logicalW,
+                                    canvasHeight: logicalH
+                                )
+                            }
                         }
                     }
                     .frame(width: logicalW, height: logicalH - 79, alignment: .top)

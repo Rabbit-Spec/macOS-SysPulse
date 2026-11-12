@@ -304,8 +304,8 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
         state.interfaceSnapshots[iface] = InterfaceSnapshot(inBytes: hardwareIn, outBytes: hardwareOut, bootTime: curBoot)
         state.lastBootTime = curBoot
 
-        // 7. 磁盘保存（节流控制：有增量且间隔 >= 1秒，或增量巨大时写盘）
-        if (deltaIn > 0 || deltaOut > 0) && (now.timeIntervalSince(lastDiskSaveTime) >= 1.0 || (deltaIn + deltaOut) > 500_000) {
+        // 7. 磁盘保存（节流控制：常规累计每 120 秒落盘一次，睡前/退出/切后台由生命周期通知立即强刷）
+        if (deltaIn > 0 || deltaOut > 0) && now.timeIntervalSince(lastDiskSaveTime) >= 120.0 {
             persistToDiskLocked(force: false)
         }
     }
@@ -389,7 +389,7 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
     private func persistToDiskLocked(force: Bool = false) {
         let now = Date()
-        if !force && now.timeIntervalSince(lastDiskSaveTime) < 1.0 {
+        if !force && now.timeIntervalSince(lastDiskSaveTime) < 120.0 {
             return
         }
         lastDiskSaveTime = now
@@ -397,33 +397,22 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
         let stateToSave = self.state
 
-        // 1. 保存到 JSON 文件 (原子写入)
+        // 1. 保存到 JSON 文件 (原子写入；仅当强制落盘或常规 120s 周期触发时才编码写盘)
         if let data = try? JSONEncoder().encode(stateToSave) {
             try? data.write(to: Self.storageFileURL, options: .atomic)
         }
 
-        // 2. 备份至 UserDefaults (双重保障，即使文件系统波动也能完整恢复)
-        let d = UserDefaults.standard
-        d.set(stateToSave.monthKey, forKey: "SP_Net_MonthKey")
-        d.set(stateToSave.dayKey, forKey: "SP_Net_DayKey")
-        d.set(String(stateToSave.monthDownloadBytes), forKey: "SP_Net_MonthIn")
-        d.set(String(stateToSave.monthUploadBytes), forKey: "SP_Net_MonthOut")
-        d.set(String(stateToSave.todayDownloadBytes), forKey: "SP_Net_TodayIn")
-        d.set(String(stateToSave.todayUploadBytes), forKey: "SP_Net_TodayOut")
-        d.set(stateToSave.lastBootTime, forKey: "SP_Net_LastBootTime")
-        if let hb = stateToSave.hourlyBytes,
-           let hbData = try? JSONEncoder().encode(hb) {
-            d.set(hbData, forKey: "SP_Net_HourlyBytes")
+        // 2. 轻量备份汇总数字至 UserDefaults（仅在强制刷盘如退出/睡前时写入标量，避免周期性重复序列化大字典与 synchronize）
+        if force {
+            let d = UserDefaults.standard
+            d.set(stateToSave.monthKey, forKey: "SP_Net_MonthKey")
+            d.set(stateToSave.dayKey, forKey: "SP_Net_DayKey")
+            d.set(String(stateToSave.monthDownloadBytes), forKey: "SP_Net_MonthIn")
+            d.set(String(stateToSave.monthUploadBytes), forKey: "SP_Net_MonthOut")
+            d.set(String(stateToSave.todayDownloadBytes), forKey: "SP_Net_TodayIn")
+            d.set(String(stateToSave.todayUploadBytes), forKey: "SP_Net_TodayOut")
+            d.set(stateToSave.lastBootTime, forKey: "SP_Net_LastBootTime")
         }
-        if let apps = stateToSave.appTrafficRecords,
-           let appsData = try? JSONEncoder().encode(apps) {
-            d.set(appsData, forKey: "SP_Net_AppTraffic")
-        }
-        if let monthApps = stateToSave.monthAppTrafficRecords,
-           let monthAppsData = try? JSONEncoder().encode(monthApps) {
-            d.set(monthAppsData, forKey: "SP_Net_MonthAppTraffic")
-        }
-        d.synchronize()
     }
 
     private static func loadFromDisk() -> PersistenceState? {

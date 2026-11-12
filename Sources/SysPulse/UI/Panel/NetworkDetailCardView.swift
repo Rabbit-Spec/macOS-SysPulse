@@ -43,7 +43,7 @@ public struct NetworkDetailCardView: View {
         }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else { break }
                 model.refresh()
             }
@@ -349,8 +349,10 @@ public struct NetworkDetailCardView: View {
             }
 
             VStack(spacing: 7) {
-                infoRow(key: "IPv4", label: "IPv4", value: model.localIPv4)
-                infoRow(key: "publicIP", label: "公网 IP", value: model.publicIP)
+                infoRow(key: "IPv4", label: "内网 IP", value: model.localIPv4)
+                infoRow(key: "publicIP", label: "外网 IP", value: model.publicIP)
+                infoRow(key: "gateway", label: "网关 IP", value: model.gatewayIP)
+                infoRow(key: "dns", label: "DNS", value: model.primaryDNS)
                 infoRow(key: "proxy", label: "代理", value: model.proxy)
                 infoRow(key: "link", label: "链路类型", value: model.link)
                 if model.link.contains("以太网") {

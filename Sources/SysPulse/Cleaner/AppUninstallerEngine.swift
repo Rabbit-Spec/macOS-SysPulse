@@ -758,89 +758,114 @@ public final class AppUninstallerEngine {
 
         status = .uninstalling(progress: 0.1, currentApp: "正在准备安全卸载…")
 
-        let fm = FileManager.default
-        var freedTotal: Int64 = 0
-        var totalCount = 0
-
-        // 1. Process Apps
-        for (idx, app) in appsToUninstall.enumerated() {
-            let progress = 0.1 + 0.6 * (Double(idx) / Double(max(1, appsToUninstall.count)))
-            status = .uninstalling(progress: progress, currentApp: "正在卸载 \(app.name)…")
-
-            // If app is running, terminate gracefully
+        // Graceful app termination stays on MainActor (fast IPC call)
+        for app in appsToUninstall {
             if app.isRunning, let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == app.bundleID }) {
                 running.terminate()
             }
+        }
 
-            // Remove components
-            for comp in app.components where comp.isSafeToTrash {
-                if CleanProtectionStore.shared.isProtected(path: comp.path.path) {
-                    continue
+        // Snapshot safe URLs to remove so the background task only operates on Sendable values
+        let protection = CleanProtectionStore.shared
+        let appPayloads: [(id: UUID, name: String, targets: [(url: URL, sizeBytes: Int64)])] = appsToUninstall.map { app in
+            let safeTargets = app.components
+                .filter { $0.isSafeToTrash && !protection.isProtected(path: $0.path.path) }
+                .map { ($0.path, $0.sizeBytes) }
+            return (app.id, app.name, safeTargets)
+        }
+        let residuePayloads: [(id: UUID, name: String, url: URL, sizeBytes: Int64)] = residuesToClean
+            .filter { !protection.isProtected(path: $0.path.path) }
+            .map { ($0.id, $0.originalAppName, $0.path, $0.sizeBytes) }
+        let currentDeleteMode = self.deleteMode
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let fm = FileManager.default
+            var freedTotal: Int64 = 0
+            var removedIDs: Set<UUID> = []
+            var totalCount = 0
+
+            // 1. Process Apps off-main thread so multi-GB bundles never freeze the UI
+            for (idx, app) in appPayloads.enumerated() {
+                let progress = 0.1 + 0.6 * (Double(idx) / Double(max(1, appPayloads.count)))
+                let appName = app.name
+                await MainActor.run {
+                    self?.status = .uninstalling(progress: progress, currentApp: "正在卸载 \(appName)…")
                 }
-                if fm.fileExists(atPath: comp.path.path) {
-                    do {
-                        if deleteMode == .moveToTrash {
-                            try fm.trashItem(at: comp.path, resultingItemURL: nil)
-                        } else {
-                            try fm.removeItem(at: comp.path)
+
+                for target in app.targets {
+                    if fm.fileExists(atPath: target.url.path) {
+                        do {
+                            if currentDeleteMode == .moveToTrash {
+                                try fm.trashItem(at: target.url, resultingItemURL: nil)
+                            } else {
+                                try fm.removeItem(at: target.url)
+                            }
+                            freedTotal += target.sizeBytes
+                        } catch {
+                            print("SysPulse Uninstaller: Failed to remove \(target.url): \(error)")
                         }
-                        freedTotal += comp.sizeBytes
+                    }
+                }
+                removedIDs.insert(app.id)
+                totalCount += 1
+            }
+
+            // 2. Process Residues
+            for (idx, residue) in residuePayloads.enumerated() {
+                let progress = 0.7 + 0.3 * (Double(idx) / Double(max(1, residuePayloads.count)))
+                let resName = residue.name
+                await MainActor.run {
+                    self?.status = .uninstalling(progress: progress, currentApp: "正在清理残留 \(resName)…")
+                }
+
+                if fm.fileExists(atPath: residue.url.path) {
+                    do {
+                        if currentDeleteMode == .moveToTrash {
+                            try fm.trashItem(at: residue.url, resultingItemURL: nil)
+                        } else {
+                            try fm.removeItem(at: residue.url)
+                        }
+                        freedTotal += residue.sizeBytes
+                        removedIDs.insert(residue.id)
+                        totalCount += 1
                     } catch {
-                        print("SysPulse Uninstaller: Failed to remove \(comp.path): \(error)")
+                        print("SysPulse Uninstaller: Failed to remove residue \(residue.url): \(error)")
                     }
                 }
             }
-            totalCount += 1
-        }
 
-        // 2. Process Residues
-        for (idx, residue) in residuesToClean.enumerated() {
-            let progress = 0.7 + 0.3 * (Double(idx) / Double(max(1, residuesToClean.count)))
-            status = .uninstalling(progress: progress, currentApp: "正在清理残留 \(residue.originalAppName)…")
+            let finalFreed = freedTotal
+            let finalCount = totalCount
+            let finalRemovedIDs = removedIDs
 
-            if CleanProtectionStore.shared.isProtected(path: residue.path.path) {
-                continue
+            await MainActor.run {
+                guard let self else { return }
+                self.lastUninstalledBytes = finalFreed
+                self.lastUninstallDate = Date()
+                self.lastUninstalledCount = finalCount
+                UserDefaults.standard.set(finalFreed, forKey: "PG_Uninstaller_LastFreedBytes")
+                UserDefaults.standard.set(Date(), forKey: "PG_Uninstaller_LastDate")
+
+                self.installedApps.removeAll { finalRemovedIDs.contains($0.id) }
+                self.orphanedResidues.removeAll { finalRemovedIDs.contains($0.id) }
+                self.selectedItemIDs.subtract(activeSelectedIDs)
+                self.selectedAppIDs.subtract(activeSelectedIDs)
+                self.selectedResidueIDs.subtract(activeSelectedIDs)
+
+                self.status = .finished(freedBytes: finalFreed, count: finalCount)
+
+                // Trigger disk monitor refresh
+                SystemResourceMonitor.shared.refreshNow()
+
+                // Log Power Event
+                PowerSourceEngine.shared.appendEvent(
+                    PowerEvent(
+                        type: .selfTest,
+                        details: "应用安全卸载：成功卸载并清理 \(finalCount) 款应用及残留，释放 \(self.formatBytes(finalFreed)) 磁盘空间"
+                    )
+                )
             }
-            if fm.fileExists(atPath: residue.path.path) {
-                do {
-                    if deleteMode == .moveToTrash {
-                        try fm.trashItem(at: residue.path, resultingItemURL: nil)
-                    } else {
-                        try fm.removeItem(at: residue.path)
-                    }
-                    freedTotal += residue.sizeBytes
-                    totalCount += 1
-                } catch {
-                    print("SysPulse Uninstaller: Failed to remove residue \(residue.path): \(error)")
-                }
-            }
         }
-
-        // Update local state
-        self.lastUninstalledBytes = freedTotal
-        self.lastUninstallDate = Date()
-        self.lastUninstalledCount = totalCount
-        UserDefaults.standard.set(freedTotal, forKey: "PG_Uninstaller_LastFreedBytes")
-        UserDefaults.standard.set(Date(), forKey: "PG_Uninstaller_LastDate")
-
-        self.installedApps.removeAll { activeSelectedIDs.contains($0.id) }
-        self.orphanedResidues.removeAll { activeSelectedIDs.contains($0.id) }
-        self.selectedItemIDs.removeAll()
-        self.selectedAppIDs.removeAll()
-        self.selectedResidueIDs.removeAll()
-
-        self.status = .finished(freedBytes: freedTotal, count: totalCount)
-
-        // Trigger disk monitor refresh
-        SystemResourceMonitor.shared.refreshNow()
-
-        // Log Power Event
-        PowerSourceEngine.shared.appendEvent(
-            PowerEvent(
-                type: .selfTest,
-                details: "应用安全卸载：成功卸载并清理 \(totalCount) 款应用及残留，释放 \(formatBytes(freedTotal)) 磁盘空间"
-            )
-        )
     }
 
     public func uninstallSelectedApps() {

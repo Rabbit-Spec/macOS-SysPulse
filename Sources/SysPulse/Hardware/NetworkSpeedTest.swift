@@ -191,7 +191,7 @@ public final class NetworkSpeedTest {
                 let ifa = ptr!.pointee
                 if ifa.ifa_addr != nil && ifa.ifa_addr.pointee.sa_family == UInt8(AF_LINK) {
                     let name = String(cString: ifa.ifa_name)
-                    if !name.hasPrefix("lo") {
+                    if NetworkDetailModel.isCountablePhysicalInterfaceName(name) {
                         if let data = ifa.ifa_data {
                             let ifData = data.assumingMemoryBound(to: if_data.self).pointee
                             inBytes += UInt64(ifData.ifi_ibytes)

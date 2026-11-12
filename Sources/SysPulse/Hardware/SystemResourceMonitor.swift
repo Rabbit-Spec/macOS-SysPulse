@@ -277,22 +277,124 @@ public final class SystemResourceMonitor {
 
     public var onMetricsUpdated: (@MainActor @Sendable () -> Void)?
 
+    private struct SamplingDemand: Sendable {
+        var isAnyUIVisible: Bool = false
+        var needPower: Bool = true
+        var needMem: Bool = true
+        var needDisk: Bool = false
+        var needApps: Bool = false
+        var needRuntime: Bool = false
+        var needNetworkSpeed: Bool = true
+        var needGPU: Bool = true
+        var needSMC: Bool = true
+        var needBatteryExtended: Bool = false
+        var upsTelemetry: UPSTelemetry = UPSTelemetry()
+    }
+
+    private final class DemandBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var demand = SamplingDemand()
+        private var pausedForSleep = false
+        private var cachedSystemWatts: Double = 0.0
+
+        func setDemand(_ newDemand: SamplingDemand) {
+            lock.lock()
+            demand = newDemand
+            lock.unlock()
+        }
+
+        func setPausedForSleep(_ paused: Bool) {
+            lock.lock()
+            pausedForSleep = paused
+            lock.unlock()
+        }
+
+        func isPaused() -> Bool {
+            lock.lock()
+            let p = pausedForSleep
+            lock.unlock()
+            return p
+        }
+
+        func readState() -> (isPaused: Bool, demand: SamplingDemand) {
+            lock.lock()
+            let res = (pausedForSleep, demand)
+            lock.unlock()
+            return res
+        }
+
+        func setCachedSystemWatts(_ watts: Double) {
+            lock.lock()
+            cachedSystemWatts = watts
+            lock.unlock()
+        }
+
+        func getCachedSystemWatts() -> Double {
+            lock.lock()
+            let w = cachedSystemWatts
+            lock.unlock()
+            return w
+        }
+    }
+
+    private nonisolated static let sharedDemandBox = DemandBox()
     private let workerQueue = DispatchQueue(label: "com.apple.powerglass.sysmonitor", qos: .utility)
-    private let stateLock = NSLock()
+    private let demandBox = SystemResourceMonitor.sharedDemandBox
     private var sampler = BackgroundSamplerState()
 
+    /// Non-blocking cached system wattage lookup (never triggers singleton dispatch_once).
+    public nonisolated static func latestCachedSystemWatts() -> Double {
+        sharedDemandBox.getCachedSystemWatts()
+    }
+
     private init() {
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshDemandFromMain()
+        }
         start(intervalSeconds: 1.0)
+    }
+
+    public func refreshDemandFromMain() {
+        let toggles = FeatureToggleManager.shared
+        let isUIVisible = MainStudioWindowController.shared.isWindowVisible
+            || PowerSourceEngine.shared.isPanelVisible
+            || (MenuBarController.shared?.isPopoverShown ?? false)
+        let fanManual = FanController.shared.activeMode != .auto
+        let ups = toggles.enablePluginUPSManager ? PowerSourceEngine.shared.telemetry : UPSTelemetry()
+
+        let demand = SamplingDemand(
+            isAnyUIVisible: isUIVisible,
+            needPower: (toggles.enableSystemPowerMonitor && isUIVisible)
+                || toggles.menuBarShowSystemWatts
+                || toggles.menuBarShowCpuGpu
+                || (toggles.enableLoadRuntimeMonitor && isUIVisible)
+                || (toggles.enableTopEnergyAppsMonitor && isUIVisible),
+            needMem: (toggles.enableMemoryMonitor && isUIVisible) || toggles.menuBarShowMemTemp,
+            needDisk: toggles.enableDiskIOMonitor && isUIVisible,
+            needApps: toggles.enableTopEnergyAppsMonitor && isUIVisible,
+            needRuntime: toggles.enableLoadRuntimeMonitor && isUIVisible,
+            needNetworkSpeed: toggles.menuBarShowNetworkSpeed || isUIVisible,
+            needGPU: isUIVisible || toggles.menuBarShowCpuGpu,
+            needSMC: isUIVisible || toggles.menuBarShowMemTemp || fanManual,
+            needBatteryExtended: isUIVisible,
+            upsTelemetry: ups
+        )
+
+        demandBox.setDemand(demand)
     }
 
     public func start(intervalSeconds: Double = 1.0) {
         let state = sampler
+        let box = demandBox
         workerQueue.async { [weak self] in
             guard let self else { return }
             state.timer?.cancel()
+            state.timer = nil
+
+            guard !box.isPaused() else { return }
 
             let newTimer = DispatchSource.makeTimerSource(queue: self.workerQueue)
-            newTimer.schedule(deadline: .now(), repeating: intervalSeconds)
+            newTimer.schedule(deadline: .now(), repeating: intervalSeconds, leeway: .milliseconds(100))
             newTimer.setEventHandler { [weak self] in
                 self?.pollOnBackgroundQueue(state: state)
             }
@@ -301,7 +403,30 @@ public final class SystemResourceMonitor {
         }
     }
 
+    public func pauseForSleep() {
+        demandBox.setPausedForSleep(true)
+
+        let state = sampler
+        workerQueue.async {
+            state.timer?.cancel()
+            state.timer = nil
+        }
+    }
+
+    public func resumeFromWake() {
+        refreshDemandFromMain()
+        demandBox.setPausedForSleep(false)
+
+        let state = sampler
+        workerQueue.async {
+            state.resetDeltasOnWake()
+        }
+        start(intervalSeconds: 1.0)
+        triggerImmediateRefresh(force: true)
+    }
+
     public func triggerImmediateRefresh(force: Bool = true) {
+        refreshDemandFromMain()
         let state = sampler
         workerQueue.async { [weak self] in
             self?.pollOnBackgroundQueue(state: state, force: force)
@@ -313,42 +438,39 @@ public final class SystemResourceMonitor {
     }
 
     private nonisolated func pollOnBackgroundQueue(state: BackgroundSamplerState, force: Bool = false) {
+        let (sleeping, demand) = demandBox.readState()
+        guard !sleeping else { return }
+
+        let snapshot = state.collectSnapshot(
+            needPower: demand.needPower,
+            needMem: demand.needMem,
+            needDisk: demand.needDisk,
+            needApps: demand.needApps,
+            needRuntime: demand.needRuntime,
+            needNetworkSpeed: demand.needNetworkSpeed,
+            needGPU: demand.needGPU,
+            needSMC: demand.needSMC,
+            needBatteryExtended: demand.needBatteryExtended,
+            upsTelemetry: demand.upsTelemetry,
+            force: force
+        )
+
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let toggles = FeatureToggleManager.shared
-                let needPower = toggles.enableSystemPowerMonitor || toggles.menuBarShowSystemWatts || toggles.enableLoadRuntimeMonitor || toggles.enableTopEnergyAppsMonitor || toggles.menuBarShowCpuGpu
-                let needMem = toggles.enableMemoryMonitor || toggles.menuBarShowMemTemp
-                let needDisk = toggles.enableDiskIOMonitor
-                let needApps = toggles.enableTopEnergyAppsMonitor
-                let needRuntime = toggles.enableLoadRuntimeMonitor
-                let upsTelemetry = toggles.enablePluginUPSManager ? PowerSourceEngine.shared.telemetry : UPSTelemetry()
-
-                self.workerQueue.async {
-                    let snapshot = state.collectSnapshot(
-                        needPower: needPower,
-                        needMem: needMem,
-                        needDisk: needDisk,
-                        needApps: needApps,
-                        needRuntime: needRuntime,
-                        upsTelemetry: upsTelemetry,
-                        force: force
-                    )
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            if let p = snapshot.power { self.power = p }
-                            if let m = snapshot.memory { self.memory = m }
-                            if let d = snapshot.diskIO { self.diskIO = d }
-                            if let a = snapshot.topApps { self.topEnergyApps = a }
-                            if let r = snapshot.runtime { self.loadRuntime = r }
-                            if let h = snapshot.hardware {
-                                self.hardware = h
-                                FanController.shared.refreshFanStats()
-                            }
-                            self.onMetricsUpdated?()
-                        }
-                    }
+                if let p = snapshot.power {
+                    self.power = p
+                    self.demandBox.setCachedSystemWatts(p.totalSystemWatts)
                 }
+                if let m = snapshot.memory { self.memory = m }
+                if let d = snapshot.diskIO { self.diskIO = d }
+                if let a = snapshot.topApps { self.topEnergyApps = a }
+                if let r = snapshot.runtime { self.loadRuntime = r }
+                if let h = snapshot.hardware {
+                    self.hardware = h
+                    FanController.shared.refreshFanStats()
+                }
+                self.onMetricsUpdated?()
             }
         }
     }
@@ -376,6 +498,9 @@ private final class BackgroundSamplerState: @unchecked Sendable {
     private var lastProcSampleTime: TimeInterval = 0
     private var lastDiskStorageSampleTime: TimeInterval = 0
     private var lastInterfaceKindSampleTime: TimeInterval = 0
+    private var lastImportantUsageSampleTime: TimeInterval = 0
+    private var cachedImportantFreeBytes: UInt64 = 0
+    private var cachedBootVolumeTotalBytes: UInt64 = 0
     private var isFirstSample: Bool = true
 
     private var cachedPower: SystemPowerMetrics?
@@ -396,6 +521,19 @@ private final class BackgroundSamplerState: @unchecked Sendable {
     private var cachedPerCoreLoads: [Double] = Array(repeating: 2.0, count: 18)
     private var cachedLoadAvg1Min: Double = 2.1
 
+    func resetDeltasOnWake() {
+        prevCPUTicks = nil
+        prevPerCoreTicks.removeAll(keepingCapacity: true)
+        prevDiskSample = nil
+        prevProcSamples.removeAll(keepingCapacity: true)
+        prevProcSampleTime = nil
+        prevNetworkSample = nil
+        lastBaseSampleTime = 0
+        lastProcSampleTime = 0
+        lastDiskStorageSampleTime = 0
+        lastInterfaceKindSampleTime = 0
+    }
+
     struct SnapshotResult: Sendable {
         var power: SystemPowerMetrics?
         var memory: MemoryMetrics?
@@ -412,12 +550,28 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         self.timebaseDenom = UInt64(max(1, info.denom))
     }
 
+    private func readAppleSmartBatteryProps() -> [String: Any]? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != IO_OBJECT_NULL else { return nil }
+        defer { IOObjectRelease(service) }
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any] else {
+            return nil
+        }
+        return dict
+    }
+
     func collectSnapshot(
         needPower: Bool,
         needMem: Bool,
         needDisk: Bool,
         needApps: Bool,
         needRuntime: Bool,
+        needNetworkSpeed: Bool,
+        needGPU: Bool,
+        needSMC: Bool,
+        needBatteryExtended: Bool,
         upsTelemetry: UPSTelemetry,
         force: Bool = false
     ) -> SnapshotResult {
@@ -427,15 +581,15 @@ private final class BackgroundSamplerState: @unchecked Sendable {
 
         let shouldSampleBase = isFirstSample || force || (now - lastBaseSampleTime >= 1.0)
         let shouldSampleProc = isFirstSample || (now - lastProcSampleTime >= 2.0)
-        let shouldSampleStorage = isFirstSample || (now - lastDiskStorageSampleTime >= 5.0)
+        let shouldSampleStorage = needDisk && (isFirstSample || (now - lastDiskStorageSampleTime >= 5.0))
         let shouldSampleInterface = isFirstSample || (now - lastInterfaceKindSampleTime >= 10.0)
 
-        // 1. Primary Network Interface Kind (10.0s interval)
+        // 1. Primary Network Interface Kind & Traffic Counter (10.0s interval, native zero-subprocess)
         if shouldSampleInterface {
             lastInterfaceKindSampleTime = now
             cachedInterfaceKind = detectPrimaryInterfaceKind()
 
-            // 1.1 全局后台网卡累计流量打点（防止重启清零，维持本月流量准确性）
+            // 全局后台网卡累计流量打点（零子进程 SCDynamicStore + getifaddrs，维持本月流量准确性）
             Task.detached(priority: .utility) {
                 let iface = NetworkDetailModel.detectGatewayAndInterface().iface
                 let (inBytes, outBytes) = NetworkMonitorViewModel.fetchInterfaceBytes(iface: iface)
@@ -449,7 +603,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             }
         }
 
-        // 2. Available & Used Storage via statfs (5.0s interval)
+        // 2. Available & Used Storage via statfs (5.0s interval when UI visible)
         if shouldSampleStorage {
             lastDiskStorageSampleTime = now
             var stat = statfs()
@@ -468,41 +622,51 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             }
         }
 
-        // 3. Base Telemetry (CPU, GPU, Memory, Network Throughput, Fan, Power, Runtime) (2.0s interval)
+        // 3. Base Telemetry (CPU, GPU, Memory, Network Throughput, Fan, Power, Runtime)
         if shouldSampleBase {
             lastBaseSampleTime = now
 
+            // Single AppleSmartBattery properties fetch shared across power, runtime & extended battery metrics
+            let batteryProps = (needPower || needRuntime || needBatteryExtended) ? readAppleSmartBatteryProps() : nil
+
             if needPower {
-                cachedPower = sampleSystemPower()
+                cachedPower = sampleSystemPower(batteryProps: batteryProps)
             }
             if needMem {
                 cachedMemory = sampleMemory()
             }
-            let sampledDisk = sampleDiskIO()
-            if needDisk {
+            let sampledDisk: DiskIOMetrics? = (needDisk || force) ? sampleDiskIO() : nil
+            if let sampledDisk, needDisk {
                 cachedDiskIO = sampledDisk
             }
             if needRuntime {
                 let activeWatts = cachedPower?.totalWatts ?? upsTelemetry.loadWatts ?? 28.0
-                cachedRuntime = sampleLoadRuntime(currentWatts: activeWatts, ups: upsTelemetry)
+                cachedRuntime = sampleLoadRuntime(currentWatts: activeWatts, ups: upsTelemetry, batteryProps: batteryProps)
             }
 
-            let curCpuPct = cachedPower?.cpuTotalPercent ?? 15.0
-            let curWatts = cachedPower?.totalWatts ?? 28.0
-            cachedHardware = sampleHardwareExtended(
-                cpuUsage: curCpuPct,
-                systemWatts: curWatts,
-                diskMetrics: sampledDisk,
-                upsTelemetry: upsTelemetry
-            )
+            if needNetworkSpeed || needGPU || needSMC || needBatteryExtended || isFirstSample {
+                let curCpuPct = cachedPower?.cpuTotalPercent ?? 15.0
+                let curWatts = cachedPower?.totalWatts ?? 28.0
+                cachedHardware = sampleHardwareExtended(
+                    cpuUsage: curCpuPct,
+                    systemWatts: curWatts,
+                    diskMetrics: sampledDisk,
+                    upsTelemetry: upsTelemetry,
+                    needNetworkSpeed: needNetworkSpeed,
+                    needGPU: needGPU,
+                    needSMC: needSMC,
+                    needBatteryExtended: needBatteryExtended,
+                    batteryProps: batteryProps
+                )
+            }
 
-            result.power = cachedPower
-            result.memory = cachedMemory
-            result.diskIO = cachedDiskIO
-            result.runtime = cachedRuntime
+            if needPower { result.power = cachedPower }
+            if needMem { result.memory = cachedMemory }
+            if needDisk { result.diskIO = cachedDiskIO }
+            if needRuntime { result.runtime = cachedRuntime }
         }
 
-        // 4. Top Energy Processes & Ranking (3.0s interval with Debounce / Hysteresis)
+        // 4. Top Energy Processes & Ranking (only when UI visible & enabled)
         if shouldSampleProc && needApps {
             lastProcSampleTime = now
             let activeWatts = cachedPower?.totalWatts ?? 28.0
@@ -510,7 +674,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             result.topApps = cachedTopApps
         }
 
-        // Always assemble hardware with latest cached storage, interface and proc count
+        // Assemble hardware when updated
         if shouldSampleBase || shouldSampleStorage || shouldSampleInterface || isFirstSample {
             var h = cachedHardware
             if let cds = cachedDiskStorage {
@@ -609,30 +773,21 @@ private final class BackgroundSamplerState: @unchecked Sendable {
 
     // MARK: 1. System Power & CPU Load
 
-    private func sampleSystemPower() -> SystemPowerMetrics {
+    private func sampleSystemPower(batteryProps: [String: Any]?) -> SystemPowerMetrics {
         var metrics = SystemPowerMetrics()
 
-        // Read SMC PowerTelemetryData via AppleSmartBattery
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        if service != IO_OBJECT_NULL {
-            defer { IOObjectRelease(service) }
-            if let prop = IORegistryEntryCreateCFProperty(
-                service,
-                "PowerTelemetryData" as CFString,
-                kCFAllocatorDefault,
-                0
-            )?.takeRetainedValue() as? [String: Any] {
-                let sysLoadMW = Self.doubleValue(prop["SystemLoad"]) ?? Self.doubleValue(prop["SystemPowerIn"]) ?? 27000.0
-                let lossMW = Self.doubleValue(prop["AdapterEfficiencyLoss"]) ?? 800.0
-                let voltMV = Self.doubleValue(prop["SystemVoltageIn"]) ?? 12100.0
-                let currMA = Self.doubleValue(prop["SystemCurrentIn"]) ?? 2250.0
+        // Reuse single-cycle AppleSmartBattery properties for SMC PowerTelemetryData
+        if let prop = batteryProps?["PowerTelemetryData"] as? [String: Any] {
+            let sysLoadMW = Self.doubleValue(prop["SystemLoad"]) ?? Self.doubleValue(prop["SystemPowerIn"]) ?? 27000.0
+            let lossMW = Self.doubleValue(prop["AdapterEfficiencyLoss"]) ?? 800.0
+            let voltMV = Self.doubleValue(prop["SystemVoltageIn"]) ?? 12100.0
+            let currMA = Self.doubleValue(prop["SystemCurrentIn"]) ?? 2250.0
 
-                metrics.systemLoadWatts = max(1.0, sysLoadMW / 1000.0)
-                metrics.adapterLossWatts = max(0.0, lossMW / 1000.0)
-                metrics.totalWatts = metrics.systemLoadWatts + metrics.adapterLossWatts
-                metrics.dcVoltageVolts = voltMV / 1000.0
-                metrics.dcCurrentAmps = currMA / 1000.0
-            }
+            metrics.systemLoadWatts = max(1.0, sysLoadMW / 1000.0)
+            metrics.adapterLossWatts = max(0.0, lossMW / 1000.0)
+            metrics.totalWatts = metrics.systemLoadWatts + metrics.adapterLossWatts
+            metrics.dcVoltageVolts = voltMV / 1000.0
+            metrics.dcCurrentAmps = currMA / 1000.0
         }
 
         if metrics.totalWatts > peakWatts {
@@ -825,16 +980,41 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             prevDiskSample = (now, totalR, totalW, opsR, opsW)
         }
 
-        if let values = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [
-            .volumeAvailableCapacityForImportantUsageKey,
-            .volumeTotalCapacityKey
-        ]) {
-            if let free = values.volumeAvailableCapacityForImportantUsage {
-                d.bootVolumeFreeBytes = UInt64(max(0, free))
+        let rootURL = URL(fileURLWithPath: "/")
+        // Throttle expensive CacheDelete important-usage calculation to once every 45s; use fast volumeAvailableCapacityKey in between
+        if cachedBootVolumeTotalBytes == 0 || now - lastImportantUsageSampleTime >= 45.0 {
+            lastImportantUsageSampleTime = now
+            if let values = try? rootURL.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeTotalCapacityKey
+            ]) {
+                if let free = values.volumeAvailableCapacityForImportantUsage {
+                    cachedImportantFreeBytes = UInt64(max(0, free))
+                }
+                if let total = values.volumeTotalCapacity {
+                    cachedBootVolumeTotalBytes = UInt64(max(0, total))
+                }
             }
-            if let total = values.volumeTotalCapacity {
-                d.bootVolumeTotalBytes = UInt64(max(0, total))
+        } else if cachedImportantFreeBytes == 0 {
+            if let values = try? rootURL.resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey]) {
+                if let free = values.volumeAvailableCapacity {
+                    d.bootVolumeFreeBytes = UInt64(max(0, free))
+                }
+                if let total = values.volumeTotalCapacity {
+                    cachedBootVolumeTotalBytes = UInt64(max(0, total))
+                }
             }
+        }
+
+        if cachedImportantFreeBytes > 0 {
+            d.bootVolumeFreeBytes = cachedImportantFreeBytes
+        } else if d.bootVolumeFreeBytes == 0,
+                  let values = try? rootURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
+                  let free = values.volumeAvailableCapacity {
+            d.bootVolumeFreeBytes = UInt64(max(0, free))
+        }
+        if cachedBootVolumeTotalBytes > 0 {
+            d.bootVolumeTotalBytes = cachedBootVolumeTotalBytes
         }
 
         return d
@@ -1042,13 +1222,14 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             )
         }
         prevTopApps = items
+        prevAppImpacts = prevAppImpacts.filter { groups[$0.key] != nil || newProcSamples[$0.key] != nil }
 
         return items
     }
 
     // MARK: 5. Battery & UPS Load Runtime Calculator (MacBook + Desktop UPS Dual-Mode)
 
-    private func sampleLoadRuntime(currentWatts: Double, ups: UPSTelemetry) -> LoadRuntimeMetrics {
+    private func sampleLoadRuntime(currentWatts: Double, ups: UPSTelemetry, batteryProps: [String: Any]?) -> LoadRuntimeMetrics {
         var rt = LoadRuntimeMetrics()
         let loadW = max(5.0, currentWatts)
         rt.currentLoadWatts = loadW
@@ -1103,8 +1284,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             }
         }
 
-        // Supplementary AppleSmartBattery IORegistry query for health, cycle count & voltage
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        // Reuse single-cycle AppleSmartBattery properties for health, cycle count & voltage
         var rawMaxCap = 0
         var rawCurrCap = 0
         var designCap = 0
@@ -1115,25 +1295,23 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         var smcPlugged = true
 
         var batteryInstalled = false
-        if service != IO_OBJECT_NULL {
-            defer { IOObjectRelease(service) }
-            let inst = Self.intValue(IORegistryEntryCreateCFProperty(service, "BatteryInstalled" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
-            batteryInstalled = (inst ?? 0) != 0
-            rawMaxCap = Self.intValue(IORegistryEntryCreateCFProperty(service, "AppleRawMaxCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
-                ?? Self.intValue(IORegistryEntryCreateCFProperty(service, "MaxCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
+        if let batteryProps {
+            batteryInstalled = (Self.intValue(batteryProps["BatteryInstalled"]) ?? 0) != 0
+            rawMaxCap = Self.intValue(batteryProps["AppleRawMaxCapacity"])
+                ?? Self.intValue(batteryProps["MaxCapacity"])
                 ?? 0
-            rawCurrCap = Self.intValue(IORegistryEntryCreateCFProperty(service, "AppleRawCurrentCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
-                ?? Self.intValue(IORegistryEntryCreateCFProperty(service, "CurrentCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
+            rawCurrCap = Self.intValue(batteryProps["AppleRawCurrentCapacity"])
+                ?? Self.intValue(batteryProps["CurrentCapacity"])
                 ?? 0
-            designCap = Self.intValue(IORegistryEntryCreateCFProperty(service, "DesignCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0
-            voltageMV = Self.intValue(IORegistryEntryCreateCFProperty(service, "Voltage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0
-            cycleCount = Self.intValue(IORegistryEntryCreateCFProperty(service, "CycleCount" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0
-            tempRaw = Self.intValue(IORegistryEntryCreateCFProperty(service, "Temperature" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 2900
-            smcCharging = (IORegistryEntryCreateCFProperty(service, "IsCharging" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool) ?? false
-            smcPlugged = (IORegistryEntryCreateCFProperty(service, "ExternalConnected" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool) ?? true
+            designCap = Self.intValue(batteryProps["DesignCapacity"]) ?? 0
+            voltageMV = Self.intValue(batteryProps["Voltage"]) ?? 0
+            cycleCount = Self.intValue(batteryProps["CycleCount"]) ?? 0
+            tempRaw = Self.intValue(batteryProps["Temperature"]) ?? 2900
+            smcCharging = (batteryProps["IsCharging"] as? Bool) ?? false
+            smcPlugged = (batteryProps["ExternalConnected"] as? Bool) ?? true
         }
 
-        let hasRealBattery = iopsBatteryFound || (service != IO_OBJECT_NULL && batteryInstalled && (rawMaxCap > 0 || designCap > 0))
+        let hasRealBattery = iopsBatteryFound || (batteryProps != nil && batteryInstalled && (rawMaxCap > 0 || designCap > 0))
         if hasRealBattery {
             rt.hasInternalBattery = true
 
@@ -1211,83 +1389,94 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         cpuUsage: Double,
         systemWatts: Double,
         diskMetrics: DiskIOMetrics?,
-        upsTelemetry: UPSTelemetry
+        upsTelemetry: UPSTelemetry,
+        needNetworkSpeed: Bool,
+        needGPU: Bool,
+        needSMC: Bool,
+        needBatteryExtended: Bool,
+        batteryProps: [String: Any]?
     ) -> SystemHardwareExtendedMetrics {
-        var h = SystemHardwareExtendedMetrics()
+        var h = cachedHardware
 
         // 1. Calculate real-time Network Throughput via Darwin getifaddrs
-        let now = Date().timeIntervalSince1970
-        var currentInBytes: UInt64 = 0
-        var currentOutBytes: UInt64 = 0
+        if needNetworkSpeed {
+            let now = Date().timeIntervalSince1970
+            var currentInBytes: UInt64 = 0
+            var currentOutBytes: UInt64 = 0
 
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        if getifaddrs(&ifaddr) == 0 {
-            var ptr = ifaddr
-            while ptr != nil {
-                let ifa = ptr!.pointee
-                if ifa.ifa_addr != nil && ifa.ifa_addr.pointee.sa_family == UInt8(AF_LINK) {
-                    let name = String(cString: ifa.ifa_name)
-                    if !name.hasPrefix("lo") {
-                        if let data = ifa.ifa_data {
-                            let ifData = data.assumingMemoryBound(to: if_data.self).pointee
-                            currentInBytes += UInt64(ifData.ifi_ibytes)
-                            currentOutBytes += UInt64(ifData.ifi_obytes)
+            var ifaddr: UnsafeMutablePointer<ifaddrs>?
+            if getifaddrs(&ifaddr) == 0 {
+                var ptr = ifaddr
+                while ptr != nil {
+                    let ifa = ptr!.pointee
+                    if ifa.ifa_addr != nil && ifa.ifa_addr.pointee.sa_family == UInt8(AF_LINK) {
+                        let name = String(cString: ifa.ifa_name)
+                        if NetworkDetailModel.isCountablePhysicalInterfaceName(name) {
+                            if let data = ifa.ifa_data {
+                                let ifData = data.assumingMemoryBound(to: if_data.self).pointee
+                                currentInBytes += UInt64(ifData.ifi_ibytes)
+                                currentOutBytes += UInt64(ifData.ifi_obytes)
+                            }
                         }
                     }
+                    ptr = ifa.ifa_next
                 }
-                ptr = ifa.ifa_next
+                freeifaddrs(ifaddr)
             }
-            freeifaddrs(ifaddr)
+
+            if let prev = prevNetworkSample {
+                let dt = max(0.2, now - prev.time)
+                let inDelta = currentInBytes >= prev.inBytes ? (currentInBytes - prev.inBytes) : 0
+                let outDelta = currentOutBytes >= prev.outBytes ? (currentOutBytes - prev.outBytes) : 0
+                h.networkDownloadBytesPerSec = Double(inDelta) / dt
+                h.networkUploadBytesPerSec = Double(outDelta) / dt
+            }
+            prevNetworkSample = (now, currentInBytes, currentOutBytes)
+
+            netUploadHistory.append(h.networkUploadBytesPerSec)
+            if netUploadHistory.count > 24 { netUploadHistory.removeFirst() }
+            netDownloadHistory.append(h.networkDownloadBytesPerSec)
+            if netDownloadHistory.count > 24 { netDownloadHistory.removeFirst() }
+
+            h.networkHistoryUpload = netUploadHistory
+            h.networkHistoryDownload = netDownloadHistory
+        } else {
+            prevNetworkSample = nil
         }
-
-        if let prev = prevNetworkSample {
-            let dt = max(0.2, now - prev.time)
-            let inDelta = currentInBytes >= prev.inBytes ? (currentInBytes - prev.inBytes) : 0
-            let outDelta = currentOutBytes >= prev.outBytes ? (currentOutBytes - prev.outBytes) : 0
-            h.networkDownloadBytesPerSec = Double(inDelta) / dt
-            h.networkUploadBytesPerSec = Double(outDelta) / dt
-        }
-        prevNetworkSample = (now, currentInBytes, currentOutBytes)
-
-        netUploadHistory.append(h.networkUploadBytesPerSec)
-        if netUploadHistory.count > 24 { netUploadHistory.removeFirst() }
-        netDownloadHistory.append(h.networkDownloadBytesPerSec)
-        if netDownloadHistory.count > 24 { netDownloadHistory.removeFirst() }
-
-        h.networkHistoryUpload = netUploadHistory
-        h.networkHistoryDownload = netDownloadHistory
 
         // Primary Interface Kind (Set via 10s sampling cycle)
         h.primaryInterfaceKind = cachedInterfaceKind
 
         // 2. 通过 IOAccelerator PerformanceStatistics 读取 GPU 负载
-        var sampledGpuPct: Double = 0.0
-        var gpuIter: io_iterator_t = 0
-        let match = IOServiceMatching("IOAccelerator")
-        if IOServiceGetMatchingServices(kIOMainPortDefault, match, &gpuIter) == KERN_SUCCESS {
-            defer { IOObjectRelease(gpuIter) }
-            var service = IOIteratorNext(gpuIter)
-            while service != 0 {
-                var props: Unmanaged<CFMutableDictionary>?
-                if IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
-                   let dict = props?.takeRetainedValue() as? [String: Any],
-                   let perf = dict["PerformanceStatistics"] as? [String: Any] {
-                    if let devUtil = Self.doubleValue(perf["Device Utilization %"]) {
-                        sampledGpuPct = max(sampledGpuPct, devUtil)
-                    } else if let coreUtil = Self.doubleValue(perf["GPU Core Utilization"]) {
-                        sampledGpuPct = max(sampledGpuPct, coreUtil)
+        if needGPU {
+            var sampledGpuPct: Double = 0.0
+            var gpuIter: io_iterator_t = 0
+            let match = IOServiceMatching("IOAccelerator")
+            if IOServiceGetMatchingServices(kIOMainPortDefault, match, &gpuIter) == KERN_SUCCESS {
+                defer { IOObjectRelease(gpuIter) }
+                var service = IOIteratorNext(gpuIter)
+                while service != 0 {
+                    var props: Unmanaged<CFMutableDictionary>?
+                    if IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+                       let dict = props?.takeRetainedValue() as? [String: Any],
+                       let perf = dict["PerformanceStatistics"] as? [String: Any] {
+                        if let devUtil = Self.doubleValue(perf["Device Utilization %"]) {
+                            sampledGpuPct = max(sampledGpuPct, devUtil)
+                        } else if let coreUtil = Self.doubleValue(perf["GPU Core Utilization"]) {
+                            sampledGpuPct = max(sampledGpuPct, coreUtil)
+                        }
                     }
+                    IOObjectRelease(service)
+                    service = IOIteratorNext(gpuIter)
                 }
-                IOObjectRelease(service)
-                service = IOIteratorNext(gpuIter)
             }
+            h.gpuUsagePercent = sampledGpuPct
+            gpuHistory.append(sampledGpuPct)
+            if gpuHistory.count > 24 { gpuHistory.removeFirst() }
+            h.gpuHistory = gpuHistory
+            let baseGpuWatts = (sampledGpuPct / 100.0) * max(2.5, systemWatts * 0.40)
+            h.gpuWatts = max(0.0, round(baseGpuWatts * 10.0) / 10.0)
         }
-        h.gpuUsagePercent = sampledGpuPct
-        gpuHistory.append(sampledGpuPct)
-        if gpuHistory.count > 24 { gpuHistory.removeFirst() }
-        h.gpuHistory = gpuHistory
-        let baseGpuWatts = (sampledGpuPct / 100.0) * max(2.5, systemWatts * 0.40)
-        h.gpuWatts = max(0.0, round(baseGpuWatts * 10.0) / 10.0)
 
         // 3. Disk Available Capacity via statfs (Set via 5s sampling cycle)
         if let cds = cachedDiskStorage {
@@ -1303,114 +1492,116 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         h.cpuLoadAverage1Min = cachedLoadAvg1Min
         h.cpuHistory = cpuHistory
 
-        // 5. Real AppleSMC CPU/GPU Temperature & Fan Speed (with graceful thermal fallback)
-        let smcTelemetry = AppleSMCReader.shared.sampleThermalAndFan()
+        // 5. Real AppleSMC CPU/GPU Temperature & Fan Speed (cached valid keys; skipped if no consumer needs temp/fan)
+        if needSMC {
+            let smcTelemetry = AppleSMCReader.shared.sampleThermalAndFan()
 
-        let thermState = ProcessInfo.processInfo.thermalState
-        let baseTemp: Double
-        switch thermState {
-        case .nominal: baseTemp = 38.0
-        case .fair: baseTemp = 52.0
-        case .serious: baseTemp = 68.0
-        case .critical: baseTemp = 86.0
-        @unknown default: baseTemp = 39.0
-        }
-        let fallbackCpuTemp = min(105.0, max(36.0, baseTemp + (systemWatts / 90.0) * 8.0 + (cpuUsage / 100.0) * 4.0))
-
-        if let realCpuTemp = smcTelemetry.cpuTempC, realCpuTemp >= 22.0 && realCpuTemp <= 115.0 {
-            h.cpuTemperatureC = realCpuTemp
-        } else {
-            h.cpuTemperatureC = fallbackCpuTemp
-        }
-
-        if let realGpuTemp = smcTelemetry.gpuTempC, realGpuTemp >= 22.0 && realGpuTemp <= 115.0 {
-            h.gpuTemperatureC = realGpuTemp
-        } else {
-            h.gpuTemperatureC = max(32.0, h.cpuTemperatureC - 2.0)
-        }
-
-        let isLaptop = MacHardwareInfo.shared.isLaptop
-        let defaultBaseRPM = isLaptop ? 1200 : 1000
-        let defaultMaxRPM = isLaptop ? 5500 : 3500
-        h.fanMinRPM = smcTelemetry.fanMinRPM ?? defaultBaseRPM
-        h.fanMaxRPM = smcTelemetry.fanMaxRPM ?? defaultMaxRPM
-
-        if MacHardwareInfo.shared.isPassiveCoolingModel {
-            h.isFanSupported = false
-            h.fanCount = 0
-            h.fanSpeedRPM = 0
-            h.fanMinRPM = 0
-            h.fanMaxRPM = 0
-        } else {
-            let fallbackCount = (isLaptop || MacHardwareInfo.shared.platformName.lowercased().contains("studio") || MacHardwareInfo.shared.platformName.lowercased().contains("pro")) ? 2 : 1
-            h.fanCount = smcTelemetry.fanCount ?? fallbackCount
-            if let hasFan = smcTelemetry.hasFan {
-                h.isFanSupported = hasFan
+            let thermState = ProcessInfo.processInfo.thermalState
+            let baseTemp: Double
+            switch thermState {
+            case .nominal: baseTemp = 38.0
+            case .fair: baseTemp = 52.0
+            case .serious: baseTemp = 68.0
+            case .critical: baseTemp = 86.0
+            @unknown default: baseTemp = 39.0
             }
-        }
+            let fallbackCpuTemp = min(105.0, max(36.0, baseTemp + (systemWatts / 90.0) * 8.0 + (cpuUsage / 100.0) * 4.0))
 
-        if !h.isFanSupported {
-            h.fanSpeedRPM = 0
-        } else if let realRPM = smcTelemetry.fanRPM {
-            h.fanSpeedRPM = max(0, realRPM)
-        } else {
-            let tempExcess = max(0.0, h.cpuTemperatureC - 40.0)
-            let thermalRPM = Int(tempExcess * 24.0)
-            let loadBonus = Int((cpuUsage / 100.0) * Double(defaultMaxRPM - defaultBaseRPM) * 0.12 + max(0.0, systemWatts - 22.0) * 4.5)
-            let tachHash = Int((tickCount &* 79) % 23) - 11
-            let calculatedRPM = defaultBaseRPM + thermalRPM + loadBonus + tachHash
-            h.fanSpeedRPM = max(defaultBaseRPM, min(defaultMaxRPM, calculatedRPM))
-        }
-
-        // 4. Battery Telemetry for MacBooks (accurate under 80% charge limits & battery health management)
-        var hwBatteryFound = false
-        if let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
-           let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] {
-            for ps in list {
-                if let desc = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any] {
-                    let type = desc[kIOPSTypeKey] as? String ?? ""
-                    if type == kIOPSInternalBatteryType || type == "InternalBattery" {
-                        let curCap = (desc[kIOPSCurrentCapacityKey] as? NSNumber)?.intValue ?? (desc[kIOPSCurrentCapacityKey] as? Int) ?? 0
-                        let maxCap = max(1, (desc[kIOPSMaxCapacityKey] as? NSNumber)?.intValue ?? (desc[kIOPSMaxCapacityKey] as? Int) ?? 100)
-                        h.batteryPercent = min(100, max(0, Int(round(Double(curCap) / Double(maxCap) * 100.0))))
-                        h.isBatteryCharging = (desc[kIOPSIsChargingKey] as? Bool) ?? false
-                        hwBatteryFound = true
-                        break
-                    }
-                }
-            }
-        }
-
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        if service != IO_OBJECT_NULL {
-            defer { IOObjectRelease(service) }
-            let isInstalled = (Self.intValue(IORegistryEntryCreateCFProperty(service, "BatteryInstalled" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0) != 0
-            if isInstalled || hwBatteryFound {
-                if let cycle = Self.intValue(IORegistryEntryCreateCFProperty(service, "CycleCount" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) {
-                    h.batteryCycleCount = cycle
-                }
-                if let isCharging = IORegistryEntryCreateCFProperty(service, "IsCharging" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool {
-                    h.isBatteryCharging = isCharging
-                }
-                if h.batteryPercent == 0 {
-                    let curCap = Self.intValue(IORegistryEntryCreateCFProperty(service, "AppleRawCurrentCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
-                        ?? Self.intValue(IORegistryEntryCreateCFProperty(service, "CurrentCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0
-                    let maxCap = Self.intValue(IORegistryEntryCreateCFProperty(service, "AppleRawMaxCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
-                        ?? Self.intValue(IORegistryEntryCreateCFProperty(service, "MaxCapacity" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) ?? 0
-                    if maxCap > 0 {
-                        h.batteryPercent = min(100, max(0, Int(round(Double(curCap) / Double(maxCap) * 100.0))))
-                    }
-                }
-                if let volt = Self.intValue(IORegistryEntryCreateCFProperty(service, "Voltage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()),
-                   let amp = Self.intValue(IORegistryEntryCreateCFProperty(service, "InstantAmperage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()) {
-                    let watts = abs(Double(volt) * Double(amp)) / 1_000_000.0
-                    h.batteryChargingWatts = watts
-                }
+            if let realCpuTemp = smcTelemetry.cpuTempC, realCpuTemp >= 22.0 && realCpuTemp <= 115.0 {
+                h.cpuTemperatureC = realCpuTemp
             } else {
-                h.batteryPercent = 0
-                h.isBatteryCharging = false
-                h.batteryChargingWatts = 0
-                h.batteryCycleCount = 0
+                h.cpuTemperatureC = fallbackCpuTemp
+            }
+
+            if let realGpuTemp = smcTelemetry.gpuTempC, realGpuTemp >= 22.0 && realGpuTemp <= 115.0 {
+                h.gpuTemperatureC = realGpuTemp
+            } else {
+                h.gpuTemperatureC = max(32.0, h.cpuTemperatureC - 2.0)
+            }
+
+            let isLaptop = MacHardwareInfo.shared.isLaptop
+            let defaultBaseRPM = isLaptop ? 1200 : 1000
+            let defaultMaxRPM = isLaptop ? 5500 : 3500
+            h.fanMinRPM = smcTelemetry.fanMinRPM ?? defaultBaseRPM
+            h.fanMaxRPM = smcTelemetry.fanMaxRPM ?? defaultMaxRPM
+
+            if MacHardwareInfo.shared.isPassiveCoolingModel {
+                h.isFanSupported = false
+                h.fanCount = 0
+                h.fanSpeedRPM = 0
+                h.fanMinRPM = 0
+                h.fanMaxRPM = 0
+            } else {
+                let fallbackCount = (isLaptop || MacHardwareInfo.shared.platformName.lowercased().contains("studio") || MacHardwareInfo.shared.platformName.lowercased().contains("pro")) ? 2 : 1
+                h.fanCount = smcTelemetry.fanCount ?? fallbackCount
+                if let hasFan = smcTelemetry.hasFan {
+                    h.isFanSupported = hasFan
+                }
+            }
+
+            if !h.isFanSupported {
+                h.fanSpeedRPM = 0
+            } else if let realRPM = smcTelemetry.fanRPM {
+                h.fanSpeedRPM = max(0, realRPM)
+            } else {
+                let tempExcess = max(0.0, h.cpuTemperatureC - 40.0)
+                let thermalRPM = Int(tempExcess * 24.0)
+                let loadBonus = Int((cpuUsage / 100.0) * Double(defaultMaxRPM - defaultBaseRPM) * 0.12 + max(0.0, systemWatts - 22.0) * 4.5)
+                let tachHash = Int((tickCount &* 79) % 23) - 11
+                let calculatedRPM = defaultBaseRPM + thermalRPM + loadBonus + tachHash
+                h.fanSpeedRPM = max(defaultBaseRPM, min(defaultMaxRPM, calculatedRPM))
+            }
+        }
+
+        // 4. Battery Telemetry for MacBooks (reuses single-cycle batteryProps, skipped when UI hidden)
+        if needBatteryExtended {
+            var hwBatteryFound = false
+            if let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] {
+                for ps in list {
+                    if let desc = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any] {
+                        let type = desc[kIOPSTypeKey] as? String ?? ""
+                        if type == kIOPSInternalBatteryType || type == "InternalBattery" {
+                            let curCap = (desc[kIOPSCurrentCapacityKey] as? NSNumber)?.intValue ?? (desc[kIOPSCurrentCapacityKey] as? Int) ?? 0
+                            let maxCap = max(1, (desc[kIOPSMaxCapacityKey] as? NSNumber)?.intValue ?? (desc[kIOPSMaxCapacityKey] as? Int) ?? 100)
+                            h.batteryPercent = min(100, max(0, Int(round(Double(curCap) / Double(maxCap) * 100.0))))
+                            h.isBatteryCharging = (desc[kIOPSIsChargingKey] as? Bool) ?? false
+                            hwBatteryFound = true
+                            break
+                        }
+                    }
+                }
+            }
+
+            if let batteryProps {
+                let isInstalled = (Self.intValue(batteryProps["BatteryInstalled"]) ?? 0) != 0
+                if isInstalled || hwBatteryFound {
+                    if let cycle = Self.intValue(batteryProps["CycleCount"]) {
+                        h.batteryCycleCount = cycle
+                    }
+                    if let isCharging = batteryProps["IsCharging"] as? Bool {
+                        h.isBatteryCharging = isCharging
+                    }
+                    if h.batteryPercent == 0 {
+                        let curCap = Self.intValue(batteryProps["AppleRawCurrentCapacity"])
+                            ?? Self.intValue(batteryProps["CurrentCapacity"]) ?? 0
+                        let maxCap = Self.intValue(batteryProps["AppleRawMaxCapacity"])
+                            ?? Self.intValue(batteryProps["MaxCapacity"]) ?? 0
+                        if maxCap > 0 {
+                            h.batteryPercent = min(100, max(0, Int(round(Double(curCap) / Double(maxCap) * 100.0))))
+                        }
+                    }
+                    if let volt = Self.intValue(batteryProps["Voltage"]),
+                       let amp = Self.intValue(batteryProps["InstantAmperage"]) {
+                        let watts = abs(Double(volt) * Double(amp)) / 1_000_000.0
+                        h.batteryChargingWatts = watts
+                    }
+                } else {
+                    h.batteryPercent = 0
+                    h.isBatteryCharging = false
+                    h.batteryChargingWatts = 0
+                    h.batteryCycleCount = 0
+                }
             }
         }
 
@@ -1473,6 +1664,17 @@ public final class AppleSMCReader: @unchecked Sendable {
     private let lock = NSLock()
     private var connection: io_connect_t = IO_OBJECT_NULL
 
+    // Discovered valid sensor key cache for this Mac model (avoids probing nonexistent registers every second)
+    private var hasDiscoveredKeys: Bool = false
+    private var keyInfoCache: [String: (type: UInt32, size: UInt32)] = [:]
+    private var activeCPUKeys: [String] = []
+    private var activeGPUKeys: [String] = []
+    private var activeFanTachKeys: [String] = []
+    private var cachedFanCount: Int?
+    private var cachedHasFan: Bool?
+    private var cachedFanMinRPM: Int?
+    private var cachedFanMaxRPM: Int?
+
     private init() {
         openConnectionIfNeeded()
     }
@@ -1494,6 +1696,55 @@ public final class AppleSMCReader: @unchecked Sendable {
         }
     }
 
+    private func discoverValidKeysIfNeeded() {
+        guard !hasDiscoveredKeys else { return }
+        hasDiscoveredKeys = true
+
+        let cpuCandidates = ["Tp00", "Tp04", "Tp08", "Tp0C", "Tp0G", "Tp0a", "Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "TC0P", "TC0E", "TC0F", "TC0D"]
+        for k in cpuCandidates {
+            if let t = probeAndReadTemperature(key: k), t >= 22.0 && t <= 115.0 {
+                activeCPUKeys.append(k)
+            }
+        }
+
+        let gpuCandidates = ["Tg08", "Tg0C", "Tg0O", "Tg0R", "Tg0a", "Tg05", "Tg0D", "Tg0P", "Tg0f", "TG0P", "TG0D"]
+        for k in gpuCandidates {
+            if let t = probeAndReadTemperature(key: k), t >= 22.0 && t <= 115.0 {
+                activeGPUKeys.append(k)
+            }
+        }
+
+        if MacHardwareInfo.shared.isPassiveCoolingModel {
+            cachedHasFan = false
+            cachedFanCount = 0
+        } else if let rawFanNum = probeKey(key: "FNum"), rawFanNum.size >= 1 {
+            let fanCount = Int(rawFanNum.bytes.0)
+            cachedFanCount = fanCount
+            cachedHasFan = (fanCount > 0)
+            if fanCount > 0 {
+                for idx in 0..<min(fanCount, 4) {
+                    let fk = "F\(idx)Ac"
+                    if let r = probeAndReadRPM(key: fk), r >= 0.0 && r <= 10000.0 {
+                        activeFanTachKeys.append(fk)
+                    }
+                }
+                if let mn = probeAndReadRPM(key: "F0mn") ?? probeAndReadRPM(key: "F0Mn"), mn >= 300.0 && mn <= 4000.0 {
+                    cachedFanMinRPM = Int(round(mn))
+                }
+                if let mx = probeAndReadRPM(key: "F0mx") ?? probeAndReadRPM(key: "F0Mx"), mx >= 1500.0 && mx <= 9000.0 {
+                    cachedFanMaxRPM = Int(round(mx))
+                }
+            }
+        } else if let f0 = probeAndReadRPM(key: "F0Ac"), f0 >= 0.0 && f0 <= 10000.0 {
+            activeFanTachKeys.append("F0Ac")
+            if let f1 = probeAndReadRPM(key: "F1Ac"), f1 >= 0.0 && f1 <= 10000.0 {
+                activeFanTachKeys.append("F1Ac")
+            }
+            cachedFanCount = activeFanTachKeys.count
+            cachedHasFan = true
+        }
+    }
+
     public func sampleThermalAndFan() -> SMCThermalFanSnapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -1503,76 +1754,57 @@ public final class AppleSMCReader: @unchecked Sendable {
             return SMCThermalFanSnapshot()
         }
 
+        discoverValidKeysIfNeeded()
+
         var snap = SMCThermalFanSnapshot()
 
-        // 1. CPU Temperature Keys (Apple Silicon M1-M5 & Intel)
-        let cpuKeys = ["Tp00", "Tp04", "Tp08", "Tp0C", "Tp0G", "Tp0a", "Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "TC0P", "TC0E", "TC0F", "TC0D"]
+        // 1. CPU Temperature (cached valid keys only, 1 kernel call per key)
         var cpuTemps: [Double] = []
-        for k in cpuKeys {
-            if let t = readTemperature(key: k), t >= 22.0 && t <= 115.0 {
+        for k in activeCPUKeys {
+            if let t = readCachedTemperature(key: k), t >= 22.0 && t <= 115.0 {
                 cpuTemps.append(t)
             }
         }
         if !cpuTemps.isEmpty {
-            let sum = cpuTemps.reduce(0.0, +)
-            snap.cpuTempC = sum / Double(cpuTemps.count)
+            snap.cpuTempC = cpuTemps.reduce(0.0, +) / Double(cpuTemps.count)
         }
 
-        // 2. GPU Temperature Keys (Apple Silicon M1-M5 & Intel)
-        let gpuKeys = ["Tg08", "Tg0C", "Tg0O", "Tg0R", "Tg0a", "Tg05", "Tg0D", "Tg0P", "Tg0f", "TG0P", "TG0D"]
+        // 2. GPU Temperature (cached valid keys only)
         var gpuTemps: [Double] = []
-        for k in gpuKeys {
-            if let t = readTemperature(key: k), t >= 22.0 && t <= 115.0 {
+        for k in activeGPUKeys {
+            if let t = readCachedTemperature(key: k), t >= 22.0 && t <= 115.0 {
                 gpuTemps.append(t)
             }
         }
         if !gpuTemps.isEmpty {
-            let sum = gpuTemps.reduce(0.0, +)
-            snap.gpuTempC = sum / Double(gpuTemps.count)
+            snap.gpuTempC = gpuTemps.reduce(0.0, +) / Double(gpuTemps.count)
         }
 
         // 3. Fan Count & Tachometer Speed
-        if MacHardwareInfo.shared.isPassiveCoolingModel {
-            snap.hasFan = false
-            snap.fanCount = 0
+        snap.hasFan = cachedHasFan
+        snap.fanCount = cachedFanCount
+        snap.fanMinRPM = cachedFanMinRPM
+        snap.fanMaxRPM = cachedFanMaxRPM
+
+        if cachedHasFan == false || cachedFanCount == 0 {
             snap.fanRPM = 0
-        } else if let rawFanNum = readKey(key: "FNum"), rawFanNum.size >= 1 {
-            let fanCount = Int(rawFanNum.bytes.0)
-            snap.fanCount = fanCount
-            snap.hasFan = (fanCount > 0)
-            if fanCount > 0 {
-                var rpms: [Double] = []
-                for idx in 0..<min(fanCount, 4) {
-                    if let r = readRPM(key: "F\(idx)Ac"), r >= 0.0 && r <= 10000.0 {
-                        rpms.append(r)
-                    }
+        } else if !activeFanTachKeys.isEmpty {
+            var rpms: [Double] = []
+            for fk in activeFanTachKeys {
+                if let r = readCachedRPM(key: fk), r >= 0.0 && r <= 10000.0 {
+                    rpms.append(r)
                 }
-                if !rpms.isEmpty {
-                    let activeRpms = rpms.filter { $0 > 0.0 }
-                    if !activeRpms.isEmpty {
-                        let avgRPM = activeRpms.reduce(0.0, +) / Double(activeRpms.count)
-                        snap.fanRPM = Int(round(avgRPM))
-                    } else {
-                        snap.fanRPM = 0
-                    }
-                }
-                if let mn = readRPM(key: "F0mn") ?? readRPM(key: "F0Mn"), mn >= 300.0 && mn <= 4000.0 {
-                    snap.fanMinRPM = Int(round(mn))
-                }
-                if let mx = readRPM(key: "F0mx") ?? readRPM(key: "F0Mx"), mx >= 1500.0 && mx <= 9000.0 {
-                    snap.fanMaxRPM = Int(round(mx))
-                }
-            } else {
-                snap.fanRPM = 0
             }
-        } else if let f0 = readRPM(key: "F0Ac"), f0 >= 0.0 && f0 <= 10000.0 {
-            let f1 = readRPM(key: "F1Ac")
-            snap.fanCount = (f1 != nil) ? 2 : 1
-            snap.hasFan = true
-            let rpms = [f0, f1].compactMap { $0 }.filter { $0 >= 0.0 && $0 <= 10000.0 }
             if !rpms.isEmpty {
-                snap.fanRPM = Int(round(rpms.reduce(0.0, +) / Double(rpms.count)))
+                let activeRpms = rpms.filter { $0 > 0.0 }
+                if !activeRpms.isEmpty {
+                    snap.fanRPM = Int(round(activeRpms.reduce(0.0, +) / Double(activeRpms.count)))
+                } else {
+                    snap.fanRPM = 0
+                }
             }
+        } else if cachedFanCount ?? 0 > 0 {
+            snap.fanRPM = 0
         }
 
         return snap
@@ -1600,7 +1832,7 @@ public final class AppleSMCReader: @unchecked Sendable {
             | (UInt32(buffer[offset + 3]) << 24)
     }
 
-    private func readKey(key: String) -> (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))? {
+    private func probeKey(key: String) -> (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))? {
         var inBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
         var outBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
         writeUInt32LE(fourCC(key), into: &inBuf, offset: SMCLayout.keyOffset)
@@ -1612,12 +1844,26 @@ public final class AppleSMCReader: @unchecked Sendable {
 
         let dataSize = readUInt32LE(from: outBuf, offset: SMCLayout.dataSizeOffset)
         let dataType = readUInt32LE(from: outBuf, offset: SMCLayout.dataTypeOffset)
+        keyInfoCache[key] = (type: dataType, size: dataSize)
 
+        return readKeyBytesOnly(key: key, dataType: dataType, dataSize: dataSize)
+    }
+
+    private func readCachedKey(key: String) -> (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))? {
+        if let meta = keyInfoCache[key] {
+            return readKeyBytesOnly(key: key, dataType: meta.type, dataSize: meta.size)
+        }
+        return probeKey(key: key)
+    }
+
+    private func readKeyBytesOnly(key: String, dataType: UInt32, dataSize: UInt32) -> (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))? {
+        var inBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
+        writeUInt32LE(fourCC(key), into: &inBuf, offset: SMCLayout.keyOffset)
         writeUInt32LE(dataSize, into: &inBuf, offset: SMCLayout.dataSizeOffset)
         inBuf[SMCLayout.commandOffset] = SMCLayout.cmdReadBytes
 
         var valBuf = [UInt8](repeating: 0, count: SMCLayout.totalSize)
-        outSize = SMCLayout.totalSize
+        var outSize = SMCLayout.totalSize
         let kr2 = IOConnectCallStructMethod(connection, 2, &inBuf, SMCLayout.totalSize, &valBuf, &outSize)
         guard kr2 == kIOReturnSuccess, valBuf[SMCLayout.resultOffset] == 0 else { return nil }
 
@@ -1625,8 +1871,17 @@ public final class AppleSMCReader: @unchecked Sendable {
         return (dataType, dataSize, (valBuf[b], valBuf[b + 1], valBuf[b + 2], valBuf[b + 3]))
     }
 
-    private func readTemperature(key: String) -> Double? {
-        guard let res = readKey(key: key) else { return nil }
+    private func probeAndReadTemperature(key: String) -> Double? {
+        guard let res = probeKey(key: key) else { return nil }
+        return decodeTemperature(res)
+    }
+
+    private func readCachedTemperature(key: String) -> Double? {
+        guard let res = readCachedKey(key: key) else { return nil }
+        return decodeTemperature(res)
+    }
+
+    private func decodeTemperature(_ res: (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))) -> Double? {
         let b = res.bytes
         if res.type == fourCC("flt ") && res.size == 4 {
             let bits = UInt32(b.0) | (UInt32(b.1) << 8) | (UInt32(b.2) << 16) | (UInt32(b.3) << 24)
@@ -1641,8 +1896,17 @@ public final class AppleSMCReader: @unchecked Sendable {
         return nil
     }
 
-    private func readRPM(key: String) -> Double? {
-        guard let res = readKey(key: key) else { return nil }
+    private func probeAndReadRPM(key: String) -> Double? {
+        guard let res = probeKey(key: key) else { return nil }
+        return decodeRPM(res)
+    }
+
+    private func readCachedRPM(key: String) -> Double? {
+        guard let res = readCachedKey(key: key) else { return nil }
+        return decodeRPM(res)
+    }
+
+    private func decodeRPM(_ res: (type: UInt32, size: UInt32, bytes: (UInt8, UInt8, UInt8, UInt8))) -> Double? {
         let b = res.bytes
         if res.type == fourCC("flt ") && res.size == 4 {
             let bits = UInt32(b.0) | (UInt32(b.1) << 8) | (UInt32(b.2) << 16) | (UInt32(b.3) << 24)

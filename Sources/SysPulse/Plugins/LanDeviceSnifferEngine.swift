@@ -58,7 +58,7 @@ public struct ActiveInterfaceInfo: Identifiable, Hashable, Sendable {
 
             if isUpAndRunning, let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
                 let name = String(cString: ifa.ifa_name)
-                if name.hasPrefix("en") && !name.contains("awdl") && !name.contains("llw") && !seenNames.contains(name) {
+                if NetworkDetailModel.isCountablePhysicalInterfaceName(name) && !seenNames.contains(name) {
                     let sin = UnsafeRawPointer(addr).assumingMemoryBound(to: sockaddr_in.self).pointee
                     var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                     var sinAddr = sin.sin_addr
@@ -73,8 +73,8 @@ public struct ActiveInterfaceInfo: Identifiable, Hashable, Sendable {
                             friendlyLabel = "无线局域网"
                         } else if scType == (kSCNetworkInterfaceTypeEthernet as String) {
                             friendlyLabel = "以太网"
-                        } else if name == "en0" {
-                            friendlyLabel = "无线局域网"
+                        } else if name.hasPrefix("bridge") {
+                            friendlyLabel = "雷雳网桥"
                         } else {
                             friendlyLabel = "以太网"
                         }
@@ -177,6 +177,25 @@ public struct LanDeviceItem: Identifiable, Sendable {
     }
 }
 
+/// 后台扫描取消令牌，避免旧任务覆盖新结果
+private final class ScanToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        let val = cancelled
+        lock.unlock()
+        return val
+    }
+}
+
 /// 独立的局域网 ARP 嗅探与设备诊断引擎 (完全独立解耦，不依赖任何第三方或 Portal 逻辑)
 @Observable
 @MainActor
@@ -192,6 +211,7 @@ public final class LanDeviceSnifferEngine {
         activeInterfaces.first(where: { $0.name == selectedInterface })
     }
     private var hasExplicitInterfaceSelection: Bool = false
+    private var activeScanToken: ScanToken? = nil
     public var searchQuery: String = ""
     public var copiedNotice: String? = nil
 
@@ -253,6 +273,8 @@ public final class LanDeviceSnifferEngine {
     }
 
     public func deactivate() {
+        activeScanToken?.cancel()
+        activeScanToken = nil
         isScanning = false
         editingMAC = nil
         editingNameInput = ""
@@ -287,148 +309,515 @@ public final class LanDeviceSnifferEngine {
         }
     }
 
-    /// 执行局域网全面嗅探与活动设备发现 (包含全网段极速轻量并发探活)
+    /// 执行局域网全面嗅探与活动设备发现 (绑物理网卡 + 分批多协议唤醒 + 渐进增量刷新)
     public func startScan() {
         guard !isScanning else { return }
         detectActiveInterfaces()
         self.isScanning = true
 
+        activeScanToken?.cancel()
+        let token = ScanToken()
+        activeScanToken = token
+
         let targetIface = self.selectedInterface
-        let localComputerName = Host.current().localizedName?.replacingOccurrences(of: ".local", with: "").trimmingCharacters(in: .whitespacesAndNewlines) ?? "Apple Mac"
+        let targetLocalIP = self.selectedInterfaceInfo?.ip ?? ""
+        let localIPSet = Set(self.activeInterfaces.map(\.ip).filter { !$0.isEmpty })
+        let localComputerName = Host.current().localizedName?
+            .replacingOccurrences(of: ".local", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Apple Mac"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 1. 获取网关 IP
             let (gatewayIP, _) = NetworkDetailModel.detectGatewayAndInterface()
+            let (targetHosts, ddpBroadcasts) = Self.resolveScanTargetHosts(
+                interfaceName: targetIface,
+                fallbackGatewayIP: gatewayIP
+            )
 
-            // 2. 毫秒级全网段极速轻量探活 (遍历 1..254 发送极轻量 UDP 握手包，逼出全网 50+ 台隐藏设备)
-            if gatewayIP.contains(".") {
-                let parts = gatewayIP.split(separator: ".")
-                if parts.count == 4 {
-                    let prefix = "\(parts[0]).\(parts[1]).\(parts[2])"
-                    Self.sweepSubnetFast(basePrefix: prefix)
-                    // 等待 280ms 局域网物理二层 ARP 缓存完成写入
-                    usleep(280_000)
+            var accumulatedByIP: [String: LanDeviceItem] = [:]
+
+            // 开场 mDNS / SSDP 组播唤醒
+            Self.sendMulticastDiscovery(interfaceName: targetIface, localIP: targetLocalIP)
+
+            // 第 1 轮：全网段分批 UDP 轻量探活，320ms 后先出首屏
+            Self.probeHostsViaUDP(
+                ips: targetHosts,
+                ports: [5353, 137],
+                interfaceName: targetIface,
+                batchSize: 32,
+                batchDelayUs: 8_000,
+                isCancelled: { token.isCancelled }
+            )
+            Self.sleepInterruptibly(microseconds: 320_000, isCancelled: { token.isCancelled })
+            if token.isCancelled { return }
+
+            let round1 = Self.collectCurrentArpDevices(
+                existing: accumulatedByIP,
+                targetIface: targetIface,
+                gatewayIP: gatewayIP,
+                localIPSet: localIPSet,
+                localComputerName: localComputerName,
+                ddpMap: [:]
+            )
+            accumulatedByIP = round1.byIP
+            let r1Items = round1.sortedItems
+            DispatchQueue.main.async {
+                self?.applyScanSnapshot(items: r1Items, markFinished: false, token: token)
+            }
+
+            // 第 2 轮：只对仍未发现的 IP 补发 ICMP Ping + SSDP/mDNS UDP
+            let missingRound2 = targetHosts.filter { accumulatedByIP[$0] == nil }
+            if !missingRound2.isEmpty && !token.isCancelled {
+                Self.probeHostsViaICMP(
+                    ips: missingRound2,
+                    interfaceName: targetIface,
+                    batchSize: 32,
+                    batchDelayUs: 10_000,
+                    isCancelled: { token.isCancelled }
+                )
+                Self.probeHostsViaUDP(
+                    ips: missingRound2,
+                    ports: [5353, 1900],
+                    interfaceName: targetIface,
+                    batchSize: 32,
+                    batchDelayUs: 8_000,
+                    isCancelled: { token.isCancelled }
+                )
+                Self.sleepInterruptibly(microseconds: 450_000, isCancelled: { token.isCancelled })
+                if token.isCancelled { return }
+
+                let round2 = Self.collectCurrentArpDevices(
+                    existing: accumulatedByIP,
+                    targetIface: targetIface,
+                    gatewayIP: gatewayIP,
+                    localIPSet: localIPSet,
+                    localComputerName: localComputerName,
+                    ddpMap: [:]
+                )
+                accumulatedByIP = round2.byIP
+                let r2Items = round2.sortedItems
+                DispatchQueue.main.async {
+                    self?.applyScanSnapshot(items: r2Items, markFinished: false, token: token)
                 }
             }
 
-            // 3. 原生直接从 macOS 内核通过 BSD 路由 Sysctl 读取 ARP 表 (零进程依赖，毫秒级)
-            var rawEntries = Self.readArpTableViaKernelSysctl()
-
-            // 4. 若 Sysctl 表为空，Fallback 至系统 /usr/sbin/arp 命令
-            if rawEntries.isEmpty {
-                rawEntries = Self.readArpTableViaCli()
+            // 第 3 轮：对深睡/无线省电长尾设备，用轻量非阻塞 TCP SYN + ICMP 补刀
+            let missingRound3 = targetHosts.filter { accumulatedByIP[$0] == nil }
+            if !missingRound3.isEmpty && !token.isCancelled {
+                Self.probeHostsViaTCP(
+                    ips: missingRound3,
+                    ports: [80, 443, 62078],
+                    interfaceName: targetIface,
+                    batchSize: 24,
+                    batchDelayUs: 15_000,
+                    isCancelled: { token.isCancelled }
+                )
+                Self.probeHostsViaICMP(
+                    ips: missingRound3,
+                    interfaceName: targetIface,
+                    batchSize: 32,
+                    batchDelayUs: 10_000,
+                    isCancelled: { token.isCancelled }
+                )
+                Self.sleepInterruptibly(microseconds: 650_000, isCancelled: { token.isCancelled })
+                if token.isCancelled { return }
             }
 
-            // 4.5 PlayStation DDP (UDP 9302) 主动探测以精准识别 PS5 主机与主机名
-            let candidateIPs = rawEntries.map { $0.ip }.filter { ip in
+            // 读取最终 ARP 表并做 PlayStation DDP (UDP 9302) 精准主机名探测
+            let preDDP = Self.collectCurrentArpDevices(
+                existing: accumulatedByIP,
+                targetIface: targetIface,
+                gatewayIP: gatewayIP,
+                localIPSet: localIPSet,
+                localComputerName: localComputerName,
+                ddpMap: [:]
+            )
+            let candidateIPs = preDDP.sortedItems.map(\.ip).filter { ip in
                 ip.contains(".") && ip != "127.0.0.1" && ip != gatewayIP && !ip.hasSuffix(".255") && !ip.hasPrefix("224.") && !ip.hasPrefix("239.")
             }
-            var ddpBroadcasts: [String] = ["255.255.255.255"]
-            if gatewayIP.contains(".") {
-                let gwParts = gatewayIP.split(separator: ".")
-                if gwParts.count == 4 {
-                    ddpBroadcasts.append("\(gwParts[0]).\(gwParts[1]).\(gwParts[2]).255")
-                }
-            }
-            let ddpMap = Self.probePlayStationDDP(targetIPs: candidateIPs, broadcastIPs: ddpBroadcasts, timeoutMs: 260)
-
-            // 5. 解析、去重与智能设备画像
-            var mapByIP: [String: LanDeviceItem] = [:]
-
-            for entry in rawEntries {
-                let ip = entry.ip
-                let mac = entry.mac.lowercased()
-                let ifName = entry.ifName.isEmpty ? targetIface : entry.ifName
-
-                guard !mac.contains("00:00:00:00:00:00") && !mac.contains("ff:ff:ff:ff:ff:ff") && mac.count == 17 else { continue }
-                guard !ip.hasPrefix("224.") && !ip.hasPrefix("239.") && ip != "255.255.255.255" else { continue }
-
-                // 遇到已存在 IP，优先保留当前选中网卡的记录
-                if let existing = mapByIP[ip] {
-                    if existing.interface != targetIface && ifName == targetIface {
-                        // 覆盖为当前活动网卡条目
-                    } else {
-                        continue
-                    }
-                }
-
-                let isGW = (ip == gatewayIP)
-                let isLocal = (ip == "192.168.50.54" || entry.isLocal)
-
-                // 智能识别设备标识名称、厂商与图标（优先使用 DDP 真实响应）
-                let (deviceName, vendor, icon) = Self.identifyDevice(
-                    ip: ip,
-                    mac: mac,
-                    isGateway: isGW,
-                    isLocal: isLocal,
-                    localName: localComputerName,
-                    ddp: ddpMap[ip]
-                )
-
-                mapByIP[ip] = LanDeviceItem(
-                    id: "\(ip)-\(mac)",
-                    ip: ip,
-                    mac: mac,
-                    defaultName: deviceName,
-                    vendor: vendor,
-                    interface: ifName,
-                    isGateway: isGW,
-                    isLocalHost: isLocal,
-                    defaultIcon: icon
-                )
-            }
-
-            var results = Array(mapByIP.values)
-
-            // 6. 排序：严格按照 IPv4 地址数字升序排列
-            results.sort { d1, d2 in
-                let ip1 = Self.ipToComparable(d1.ip)
-                let ip2 = Self.ipToComparable(d2.ip)
-                if ip1 != ip2 { return ip1 < ip2 }
-                return d1.mac < d2.mac
-            }
-
+            let ddpMap = Self.probePlayStationDDP(
+                targetIPs: candidateIPs,
+                broadcastIPs: ddpBroadcasts,
+                interfaceName: targetIface,
+                timeoutMs: 260
+            )
+            let finalSnapshot = Self.collectCurrentArpDevices(
+                existing: preDDP.byIP,
+                targetIface: targetIface,
+                gatewayIP: gatewayIP,
+                localIPSet: localIPSet,
+                localComputerName: localComputerName,
+                ddpMap: ddpMap
+            )
+            let finalItems = finalSnapshot.sortedItems
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.discoveredDevices = results
-                self.isScanning = false
-                self.lastScannedAt = Date()
+                self?.applyScanSnapshot(items: finalItems, markFinished: true, token: token)
             }
         }
     }
 
-    /// 全网段极速轻量探活 (向网段 1~254 发送轻量无阻塞 UDP 触发内核自动 ARP 解析)
-    nonisolated public static func sweepSubnetFast(basePrefix: String, interfaceName: String? = nil) {
-        let sock = socket(AF_INET, SOCK_DGRAM, 0)
-        guard sock >= 0 else { return }
-        defer { close(sock) }
+    private func applyScanSnapshot(items: [LanDeviceItem], markFinished: Bool, token: ScanToken) {
+        guard !token.isCancelled else { return }
+        self.discoveredDevices = items
+        if markFinished {
+            self.isScanning = false
+            self.lastScannedAt = Date()
+        }
+    }
 
+    /// 汇总当前内核 ARP 表（含 CLI 兜底），并与既有轮次结果合并去重排序
+    nonisolated private static func collectCurrentArpDevices(
+        existing: [String: LanDeviceItem],
+        targetIface: String,
+        gatewayIP: String,
+        localIPSet: Set<String>,
+        localComputerName: String,
+        ddpMap: [String: PlayStationDDPInfo]
+    ) -> (byIP: [String: LanDeviceItem], sortedItems: [LanDeviceItem]) {
+        var rawEntries = readArpTableViaKernelSysctl()
+        if rawEntries.isEmpty {
+            rawEntries = readArpTableViaCli()
+        }
+
+        var mapByIP = existing
+        var preferredIfaceMatched: Set<String> = []
+        for (ip, item) in existing where item.interface == targetIface {
+            preferredIfaceMatched.insert(ip)
+        }
+
+        for entry in rawEntries {
+            let ip = entry.ip
+            let mac = entry.mac.lowercased()
+            let ifName = entry.ifName.isEmpty ? targetIface : entry.ifName
+
+            guard !mac.contains("00:00:00:00:00:00") && !mac.contains("ff:ff:ff:ff:ff:ff") && mac.count == 17 else { continue }
+            guard !ip.hasPrefix("224.") && !ip.hasPrefix("239.") && ip != "255.255.255.255" else { continue }
+
+            // 优先保留目标物理网卡条目；当已有同网卡条目且没有新 DDP 信息时不重复覆盖
+            if mapByIP[ip] != nil {
+                if preferredIfaceMatched.contains(ip) && ddpMap[ip] == nil {
+                    continue
+                }
+                if !preferredIfaceMatched.contains(ip) && ifName != targetIface && ddpMap[ip] == nil {
+                    continue
+                }
+            }
+            if ifName == targetIface {
+                preferredIfaceMatched.insert(ip)
+            }
+
+            let isGW = (ip == gatewayIP)
+            let isLocal = (localIPSet.contains(ip) || entry.isLocal)
+            let (deviceName, vendor, icon) = identifyDevice(
+                ip: ip,
+                mac: mac,
+                isGateway: isGW,
+                isLocal: isLocal,
+                localName: localComputerName,
+                ddp: ddpMap[ip]
+            )
+
+            mapByIP[ip] = LanDeviceItem(
+                id: "\(ip)-\(mac)",
+                ip: ip,
+                mac: mac,
+                defaultName: deviceName,
+                vendor: vendor,
+                interface: ifName,
+                isGateway: isGW,
+                isLocalHost: isLocal,
+                defaultIcon: icon
+            )
+        }
+
+        let sorted = mapByIP.values.sorted { d1, d2 in
+            let ip1 = ipToComparable(d1.ip)
+            let ip2 = ipToComparable(d2.ip)
+            if ip1 != ip2 { return ip1 < ip2 }
+            return d1.mac < d2.mac
+        }
+        return (byIP: mapByIP, sortedItems: sorted)
+    }
+
+    /// 根据选中网卡的真实子网掩码推算待探测主机 IP 列表（超大子网自动收敛至所属 /24）
+    nonisolated public static func resolveScanTargetHosts(
+        interfaceName: String,
+        fallbackGatewayIP: String
+    ) -> (hosts: [String], broadcastIPs: [String]) {
+        if let info = ActiveInterfaceInfo.ipv4SubnetInfo(for: interfaceName) {
+            let network = info.ip & info.mask
+            let broadcast = network | ~info.mask
+            let totalRange = broadcast > network ? (broadcast - network) : 0
+            let rangeStart: UInt32
+            let rangeEnd: UInt32
+            if totalRange > 1 && totalRange <= 1024 {
+                rangeStart = network + 1
+                rangeEnd = broadcast - 1
+            } else {
+                let slash24Net = info.ip & 0xFFFFFF00
+                rangeStart = slash24Net + 1
+                rangeEnd = slash24Net + 254
+            }
+
+            var hosts: [String] = []
+            hosts.reserveCapacity(Int(rangeEnd - rangeStart + 1))
+            var cursor = rangeStart
+            while cursor <= rangeEnd {
+                if cursor != info.ip {
+                    hosts.append(ipv4String(fromHostOrder: cursor))
+                }
+                if cursor == UInt32.max { break }
+                cursor += 1
+            }
+            return (hosts, Array(Set(["255.255.255.255", info.broadcast])))
+        }
+
+        let parts = fallbackGatewayIP.split(separator: ".")
+        guard parts.count == 4 else { return ([], ["255.255.255.255"]) }
+        let prefix = "\(parts[0]).\(parts[1]).\(parts[2])"
+        let hosts = (1...254).map { "\(prefix).\($0)" }
+        return (hosts, ["255.255.255.255", "\(prefix).255"])
+    }
+
+    nonisolated private static func ipv4String(fromHostOrder ipHost: UInt32) -> String {
+        var netAddr = in_addr(s_addr: ipHost.bigEndian)
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        inet_ntop(AF_INET, &netAddr, &buf, socklen_t(INET_ADDRSTRLEN))
+        return String(decoding: buf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+    }
+
+    nonisolated private static func bindSocket(
+        _ sock: Int32,
+        toInterface interfaceName: String?,
+        multicastLocalIP: String? = nil
+    ) {
         if let interfaceName, !interfaceName.isEmpty {
             var ifIndex = if_nametoindex(interfaceName)
             if ifIndex != 0 {
                 setsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &ifIndex, socklen_t(MemoryLayout<UInt32>.size))
             }
         }
+        if let multicastLocalIP, !multicastLocalIP.isEmpty {
+            var localAddr = in_addr()
+            if inet_pton(AF_INET, multicastLocalIP, &localAddr) == 1 {
+                setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &localAddr, socklen_t(MemoryLayout<in_addr>.size))
+            }
+        }
+    }
 
+    nonisolated private static func sleepInterruptibly(microseconds: useconds_t, isCancelled: () -> Bool) {
+        let step: useconds_t = 40_000
+        var remaining = microseconds
+        while remaining > 0 {
+            if isCancelled() { return }
+            let slice = min(step, remaining)
+            usleep(slice)
+            remaining -= slice
+        }
+    }
+
+    /// 发送 mDNS + SSDP 组播探测，优先唤醒 Apple 设备与智能家居网关
+    nonisolated private static func sendMulticastDiscovery(interfaceName: String?, localIP: String?) {
+        let sock = socket(AF_INET, SOCK_DGRAM, 0)
+        guard sock >= 0 else { return }
+        defer { close(sock) }
+
+        bindSocket(sock, toInterface: interfaceName, multicastLocalIP: localIP)
+        _ = fcntl(sock, F_SETFL, O_NONBLOCK)
+
+        // mDNS PTR: _services._dns-sd._udp.local
+        var mdnsQuery: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        for label in ["_services", "_dns-sd", "_udp", "local"] {
+            let bytes = Array(label.utf8)
+            mdnsQuery.append(UInt8(bytes.count))
+            mdnsQuery.append(contentsOf: bytes)
+        }
+        mdnsQuery.append(contentsOf: [0x00, 0x00, 0x0c, 0x00, 0x01])
+
+        var mdnsAddr = sockaddr_in()
+        mdnsAddr.sin_family = sa_family_t(AF_INET)
+        mdnsAddr.sin_port = in_port_t(5353).bigEndian
+        inet_pton(AF_INET, "224.0.0.251", &mdnsAddr.sin_addr)
+        withUnsafePointer(to: &mdnsAddr) { saPtr in
+            saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                _ = sendto(sock, mdnsQuery, mdnsQuery.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        // SSDP M-SEARCH
+        let ssdpPayload = Array(
+            "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n".utf8
+        )
+        var ssdpAddr = sockaddr_in()
+        ssdpAddr.sin_family = sa_family_t(AF_INET)
+        ssdpAddr.sin_port = in_port_t(1900).bigEndian
+        inet_pton(AF_INET, "239.255.255.250", &ssdpAddr.sin_addr)
+        withUnsafePointer(to: &ssdpAddr) { saPtr in
+            saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                _ = sendto(sock, ssdpPayload, ssdpPayload.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+
+    /// 全网段极速轻量探活 (分批向网段 1~254 发送轻量无阻塞 UDP 触发内核自动 ARP 解析)
+    nonisolated public static func sweepSubnetFast(basePrefix: String, interfaceName: String? = nil) {
+        let targets = (1...254).map { "\(basePrefix).\($0)" }
+        probeHostsViaUDP(
+            ips: targets,
+            ports: [5353],
+            interfaceName: interfaceName,
+            batchSize: 32,
+            batchDelayUs: 6_000
+        )
+    }
+
+    /// 分批限流发送轻量 UDP 探包，避免内核待解析 ARP 队列及 AP 广播队列溢出丢包
+    nonisolated private static func probeHostsViaUDP(
+        ips: [String],
+        ports: [UInt16],
+        interfaceName: String?,
+        batchSize: Int = 32,
+        batchDelayUs: useconds_t = 8_000,
+        isCancelled: (() -> Bool)? = nil
+    ) {
+        guard !ips.isEmpty, !ports.isEmpty else { return }
+        let sock = socket(AF_INET, SOCK_DGRAM, 0)
+        guard sock >= 0 else { return }
+        defer { close(sock) }
+
+        bindSocket(sock, toInterface: interfaceName)
         _ = fcntl(sock, F_SETFL, O_NONBLOCK)
 
         let dummy: [UInt8] = [0]
-        for i in 1...254 {
-            let ip = "\(basePrefix).\(i)"
-            var addr = sockaddr_in()
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = in_port_t(5353).bigEndian
-            inet_pton(AF_INET, ip, &addr.sin_addr)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
 
-            withUnsafePointer(to: &addr) { saPtr in
-                saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
-                    _ = sendto(sock, dummy, 1, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+        for startIdx in stride(from: 0, to: ips.count, by: max(1, batchSize)) {
+            if isCancelled?() == true { return }
+            let endIdx = min(startIdx + max(1, batchSize), ips.count)
+            for idx in startIdx..<endIdx {
+                guard inet_pton(AF_INET, ips[idx], &addr.sin_addr) == 1 else { continue }
+                for port in ports {
+                    addr.sin_port = in_port_t(port).bigEndian
+                    withUnsafePointer(to: &addr) { saPtr in
+                        saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                            _ = sendto(sock, dummy, 1, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                }
+            }
+            if endIdx < ips.count && batchDelayUs > 0 {
+                usleep(batchDelayUs)
+            }
+        }
+    }
+
+    /// 非特权 ICMP Echo 分批探活，针对上一轮未入表主机触发 ARP 解析
+    nonisolated private static func probeHostsViaICMP(
+        ips: [String],
+        interfaceName: String?,
+        batchSize: Int = 32,
+        batchDelayUs: useconds_t = 10_000,
+        isCancelled: (() -> Bool)? = nil
+    ) {
+        guard !ips.isEmpty else { return }
+        let sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+        guard sock >= 0 else { return }
+        defer { close(sock) }
+
+        bindSocket(sock, toInterface: interfaceName)
+        _ = fcntl(sock, F_SETFL, O_NONBLOCK)
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        let pid = UInt16(getpid() & 0xFFFF)
+
+        for startIdx in stride(from: 0, to: ips.count, by: max(1, batchSize)) {
+            if isCancelled?() == true { return }
+            let endIdx = min(startIdx + max(1, batchSize), ips.count)
+            for idx in startIdx..<endIdx {
+                guard inet_pton(AF_INET, ips[idx], &addr.sin_addr) == 1 else { continue }
+                let seq = UInt16((idx + 1) & 0xFFFF)
+                let packet = buildICMPEchoRequest(identifier: pid, sequence: seq)
+                withUnsafePointer(to: &addr) { saPtr in
+                    saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                        _ = sendto(sock, packet, packet.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+            if endIdx < ips.count && batchDelayUs > 0 {
+                usleep(batchDelayUs)
+            }
+        }
+    }
+
+    nonisolated private static func buildICMPEchoRequest(identifier: UInt16, sequence: UInt16) -> [UInt8] {
+        var packet: [UInt8] = [
+            8, 0,       // Type 8 (Echo Request), Code 0
+            0, 0,       // Checksum placeholder
+            UInt8(identifier >> 8), UInt8(identifier & 0xFF),
+            UInt8(sequence >> 8), UInt8(sequence & 0xFF)
+        ]
+        var sum: UInt32 = 0
+        for i in stride(from: 0, to: packet.count, by: 2) {
+            sum += (UInt32(packet[i]) << 8) | UInt32(packet[i + 1])
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16)
+        }
+        let checksum = ~UInt16(sum & 0xFFFF)
+        packet[2] = UInt8(checksum >> 8)
+        packet[3] = UInt8(checksum & 0xFF)
+        return packet
+    }
+
+    /// 轻量非阻塞 TCP SYN 试探，分批唤醒休眠移动端/Web 设备并触发二层 ARP 解析
+    nonisolated private static func probeHostsViaTCP(
+        ips: [String],
+        ports: [UInt16],
+        interfaceName: String?,
+        batchSize: Int = 24,
+        batchDelayUs: useconds_t = 15_000,
+        isCancelled: (() -> Bool)? = nil
+    ) {
+        guard !ips.isEmpty, !ports.isEmpty else { return }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+
+        for port in ports {
+            if isCancelled?() == true { return }
+            addr.sin_port = in_port_t(port).bigEndian
+
+            for startIdx in stride(from: 0, to: ips.count, by: max(1, batchSize)) {
+                if isCancelled?() == true { return }
+                let endIdx = min(startIdx + max(1, batchSize), ips.count)
+                var openFds: [Int32] = []
+                openFds.reserveCapacity(endIdx - startIdx)
+
+                for idx in startIdx..<endIdx {
+                    guard inet_pton(AF_INET, ips[idx], &addr.sin_addr) == 1 else { continue }
+                    let sock = socket(AF_INET, SOCK_STREAM, 0)
+                    guard sock >= 0 else { continue }
+                    bindSocket(sock, toInterface: interfaceName)
+                    _ = fcntl(sock, F_SETFL, O_NONBLOCK)
+                    _ = withUnsafePointer(to: &addr) { saPtr in
+                        saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                            connect(sock, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                    openFds.append(sock)
+                }
+
+                if batchDelayUs > 0 {
+                    usleep(batchDelayUs)
+                }
+                for fd in openFds {
+                    close(fd)
                 }
             }
         }
     }
 
-    /// 直接从 macOS 物理内核通过 BSD 路由 Sysctl 读取 ARP 链路层路由缓存表 (零子进程依赖，100% 成功)
+    /// 直接从 macOS 物理内核通过 BSD 路由 Sysctl 读取 ARP 链路层路由缓存表
     nonisolated public static func readArpTableViaKernelSysctl() -> [(ip: String, mac: String, ifName: String, isLocal: Bool)] {
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_LLINFO]
         var len: size_t = 0
@@ -446,42 +835,54 @@ public final class LanDeviceSnifferEngine {
         var results: [(ip: String, mac: String, ifName: String, isLocal: Bool)] = []
         var ptr = buffer
         let end = buffer.advanced(by: len)
+        let rtmHeaderSize = MemoryLayout<rt_msghdr>.stride
+        let sdlDataOffset = MemoryLayout<sockaddr_dl>.offset(of: \sockaddr_dl.sdl_data) ?? 8
 
-        while ptr < end {
+        while ptr.advanced(by: rtmHeaderSize) <= end {
             let rtm = ptr.withMemoryRebound(to: rt_msghdr.self, capacity: 1) { $0.pointee }
             let rtmLen = Int(rtm.rtm_msglen)
-            guard rtmLen > 0 else { break }
+            guard rtmLen >= rtmHeaderSize else { break }
+            let msgEnd = ptr.advanced(by: rtmLen)
+            guard msgEnd <= end else { break }
 
-            var saPtr = ptr.advanced(by: MemoryLayout<rt_msghdr>.stride)
+            defer { ptr = msgEnd }
+
+            let addrsMask = rtm.rtm_addrs
+            guard (addrsMask & RTA_DST) != 0, (addrsMask & RTA_GATEWAY) != 0 else { continue }
+
+            var saPtr = ptr.advanced(by: rtmHeaderSize)
+            guard saPtr.advanced(by: MemoryLayout<sockaddr_in>.size) <= msgEnd else { continue }
+
             let rtaxDst = saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0.pointee }
+            guard rtaxDst.sa_family == UInt8(AF_INET) else { continue }
 
-            if rtaxDst.sa_family == UInt8(AF_INET) {
-                let sin = saPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-                var ipAddr = sin.sin_addr
-                var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                inet_ntop(AF_INET, &ipAddr, &ipStr, socklen_t(INET_ADDRSTRLEN))
-                let ip = String(decoding: ipStr.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+            let sin = saPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            var ipAddr = sin.sin_addr
+            var ipStr = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &ipAddr, &ipStr, socklen_t(INET_ADDRSTRLEN))
+            let ip = String(decoding: ipStr.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
 
-                let saLen = Int(rtaxDst.sa_len > 0 ? rtaxDst.sa_len : UInt8(MemoryLayout<sockaddr>.size))
-                let roundedLen = (saLen + 3) & ~3
-                saPtr = saPtr.advanced(by: roundedLen)
+            let rawLen = Int(rtaxDst.sa_len)
+            let roundedLen = rawLen > 0 ? ((rawLen + 3) & ~3) : MemoryLayout<UInt32>.size
+            saPtr = saPtr.advanced(by: roundedLen)
 
-                let sdl = saPtr.withMemoryRebound(to: sockaddr_dl.self, capacity: 1) { $0.pointee }
-                if sdl.sdl_family == UInt8(AF_LINK) && sdl.sdl_alen == 6 {
-                    let sdlData = saPtr.advanced(by: MemoryLayout<sockaddr_dl>.offset(of: \sockaddr_dl.sdl_data)!)
-                    let macBytes = sdlData.advanced(by: Int(sdl.sdl_nlen))
-                    let mac = (0..<6).map { String(format: "%02x", macBytes[$0]) }.joined(separator: ":")
+            guard saPtr.advanced(by: sdlDataOffset) <= msgEnd else { continue }
+            let sdl = saPtr.withMemoryRebound(to: sockaddr_dl.self, capacity: 1) { $0.pointee }
+            guard sdl.sdl_family == UInt8(AF_LINK) && sdl.sdl_alen == 6 else { continue }
 
-                    var ifNameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
-                    if_indextoname(UInt32(sdl.sdl_index), &ifNameBuf)
-                    let ifName = String(decoding: ifNameBuf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+            let sdlData = saPtr.advanced(by: sdlDataOffset)
+            let nlen = Int(sdl.sdl_nlen)
+            guard sdlData.advanced(by: nlen + 6) <= msgEnd else { continue }
 
-                    let isLocal = (rtm.rtm_flags & RTF_LOCAL) != 0
-                    results.append((ip: ip, mac: mac, ifName: ifName, isLocal: isLocal))
-                }
-            }
+            let macBytes = sdlData.advanced(by: nlen)
+            let mac = (0..<6).map { String(format: "%02x", macBytes[$0]) }.joined(separator: ":")
 
-            ptr = ptr.advanced(by: rtmLen)
+            var ifNameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+            if_indextoname(UInt32(sdl.sdl_index), &ifNameBuf)
+            let ifName = String(decoding: ifNameBuf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+
+            let isLocal = (rtm.rtm_flags & RTF_LOCAL) != 0
+            results.append((ip: ip, mac: mac, ifName: ifName, isLocal: isLocal))
         }
         return results
     }
@@ -673,7 +1074,17 @@ public final class LanDeviceSnifferEngine {
         ddp: PlayStationDDPInfo? = nil
     ) -> (name: String, vendor: String, icon: String) {
         if isGateway {
-            return ("华硕无线路由器", "ASUS", "network.badge.shield.half.filled")
+            let prefix = String(mac.prefix(8)).lowercased()
+            let asusOUIs: Set<String> = [
+                "a0:36:bc", "04:92:26", "04:d4:c4", "10:c3:7b", "1c:87:2c",
+                "2c:fd:a1", "38:d5:47", "40:b0:76", "50:46:5d", "60:45:cb",
+                "70:8b:cd", "74:d0:2b", "ac:22:0b", "ac:9e:17", "b0:6e:bf",
+                "bc:ee:7b", "d8:50:e6", "f0:79:59", "f8:32:e4"
+            ]
+            if asusOUIs.contains(prefix) {
+                return ("华硕无线路由器", "ASUS", "network.badge.shield.half.filled")
+            }
+            return ("默认网关路由器", "Router", "network.badge.shield.half.filled")
         }
         if isLocal {
             let trimmed = localName.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -159,7 +159,10 @@ public final class NetworkMonitorViewModel {
         guard !isMeasuringLatency else { return }
         isMeasuringLatency = true
 
-        let targetGW = gatewayIP ?? NetworkDetailModel.detectGatewayAndInterface().gateway
+        let requestedGW = gatewayIP?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let targetGW = (!requestedGW.isEmpty && requestedGW != "获取中…" && requestedGW != "暂无")
+            ? requestedGW
+            : NetworkDetailModel.detectGatewayAndInterface().gateway
         let dnsServers = NetworkDetailModel.detectDNSServers()
 
         Task.detached(priority: .userInitiated) {
@@ -309,23 +312,26 @@ public final class NetworkMonitorViewModel {
         return 8.5
     }
 
+    private nonisolated static let latencySession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 3.0
+        return URLSession(configuration: config)
+    }()
+
     nonisolated private static func measureHTTPLatency(urlString: String = "http://connectivitycheck.platform.hicloud.com/generate_204", timeoutSec: Double = 3.0) async -> Int {
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
         let sep = urlString.contains("?") ? "&" : "?"
         let uniqueUrlString = "\(urlString)\(sep)_t=\(timestamp)"
         guard let url = URL(string: uniqueUrlString) else { return 25 }
 
-        let config = URLSessionConfiguration.ephemeral
-        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        config.timeoutIntervalForRequest = timeoutSec
-        let session = URLSession(configuration: config)
-
         var request = URLRequest(url: url, timeoutInterval: timeoutSec)
         request.httpMethod = "GET"
         request.setValue("SysPulse/1.0", forHTTPHeaderField: "User-Agent")
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let start = CFAbsoluteTimeGetCurrent()
-        if let (_, resp) = try? await session.data(for: request),
+        if let (_, resp) = try? await latencySession.data(for: request),
            let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) {
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
             return max(1, Int(round(elapsed)))
@@ -408,26 +414,62 @@ public final class NetworkMonitorViewModel {
     }
 
     public nonisolated static func fetchInterfaceBytes(iface: String) -> (inBytes: UInt64, outBytes: UInt64) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/netstat")
-        task.arguments = ["-ib", "-I", iface]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        if (try? task.run()) != nil {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.components(separatedBy: .newlines)
-                for line in lines.dropFirst() {
-                    let parts = line.split(whereSeparator: { $0.isWhitespace })
-                    if parts.count >= 10 && parts[0] == iface {
-                        if let inB = UInt64(parts[6]), let outB = UInt64(parts[9]), inB > 0 || outB > 0 {
-                            return (inB, outB)
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else {
+            return (0, 0)
+        }
+        defer { freeifaddrs(first) }
+
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let current = ptr {
+            if let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK) {
+                let name = String(cString: current.pointee.ifa_name)
+                if name == iface, let data = current.pointee.ifa_data {
+                    let ifData = data.assumingMemoryBound(to: if_data.self).pointee
+                    return (UInt64(ifData.ifi_ibytes), UInt64(ifData.ifi_obytes))
+                }
+            }
+            ptr = current.pointee.ifa_next
+        }
+        return (0, 0)
+    }
+
+    public nonisolated static func countActiveInterfaces() -> Int {
+        var activeIfaces = Set<String>()
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&ifaddr) == 0, let first = ifaddr {
+            defer { freeifaddrs(ifaddr) }
+            var ptr: UnsafeMutablePointer<ifaddrs>? = first
+            while let current = ptr {
+                let flags = Int32(current.pointee.ifa_flags)
+                let name = String(cString: current.pointee.ifa_name)
+                if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 && (flags & IFF_RUNNING) != 0 {
+                    if let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
+                        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                        getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                        let ip = String(decoding: host.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
+                        if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") && ip != "0.0.0.0" {
+                            activeIfaces.insert(name)
                         }
                     }
                 }
+                ptr = current.pointee.ifa_next
             }
         }
-        return (0, 0)
+        let physicalIfaces = activeIfaces.filter { $0.hasPrefix("en") }
+        return max(1, physicalIfaces.isEmpty ? activeIfaces.count : physicalIfaces.count)
+    }
+
+    public func applySocketSummary(socketCount: Int, processCount: Int, interfaceCount: Int) {
+        if socketCount > 0 {
+            self.activeSocketCount = socketCount
+        }
+        if processCount > 0 {
+            self.activeProcessCount = processCount
+        }
+        if interfaceCount > 0 {
+            self.activeInterfaceCount = interfaceCount
+        }
     }
 
     private func applyTrafficSnapshot(_ snapshot: NetworkTrafficPersistenceManager.TrafficTotalsSnapshot) {
@@ -457,74 +499,6 @@ public final class NetworkMonitorViewModel {
     // MARK: - 3. Active Sockets & Interfaces (lsof 进程网络拓扑实时动态遥测)
 
     public func refreshSocketsAndInterfaces() {
-        Task.detached(priority: .utility) {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-            task.arguments = ["-iTCP", "-iUDP", "-n", "-P"]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = Pipe()
-
-            var tcpEstablished = 0
-            var udpCount = 0
-            var pids = Set<String>()
-
-            do {
-                try task.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                task.waitUntilExit()
-                if let str = String(data: data, encoding: .utf8) {
-                    str.enumerateLines { line, _ in
-                        let parts = line.split(whereSeparator: { $0.isWhitespace })
-                        guard parts.count >= 8 else { return }
-                        let pid = String(parts[1])
-                        pids.insert(pid)
-                        if line.contains("ESTABLISHED") {
-                            tcpEstablished += 1
-                        } else if line.contains("UDP") {
-                            udpCount += 1
-                        }
-                    }
-                }
-            } catch {}
-
-            // Real physical & UP non-loopback network interfaces with assigned IPs
-            var activeIfaces = Set<String>()
-            var ifaddr: UnsafeMutablePointer<ifaddrs>?
-            if getifaddrs(&ifaddr) == 0, let first = ifaddr {
-                defer { freeifaddrs(ifaddr) }
-                var ptr: UnsafeMutablePointer<ifaddrs>? = first
-                while let current = ptr {
-                    let flags = Int32(current.pointee.ifa_flags)
-                    let name = String(cString: current.pointee.ifa_name)
-                    if (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 && (flags & IFF_RUNNING) != 0 {
-                        if let addr = current.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                            getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-                            let ip = String(decoding: host.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:)), as: UTF8.self)
-                            if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") && ip != "0.0.0.0" {
-                                activeIfaces.insert(name)
-                            }
-                        }
-                    }
-                    ptr = current.pointee.ifa_next
-                }
-            }
-
-            let physicalIfaces = activeIfaces.filter { $0.hasPrefix("en") }
-            let ifCount = max(1, physicalIfaces.isEmpty ? activeIfaces.count : physicalIfaces.count)
-            let finalSockets = tcpEstablished + udpCount
-            let finalProcs = pids.count
-
-            await MainActor.run {
-                if finalSockets > 0 {
-                    self.activeSocketCount = finalSockets
-                }
-                if finalProcs > 0 {
-                    self.activeProcessCount = finalProcs
-                }
-                self.activeInterfaceCount = ifCount
-            }
-        }
+        NetworkDetailModel.shared.refreshActiveSockets(syncSummaryTo: self)
     }
 }

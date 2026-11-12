@@ -752,96 +752,104 @@ public final class PSPortalPluginManager {
         lastLogOffset = 0
         logLineBuffer.removeAll()
 
-        // 智能检测是否已具备 sudo 免密特权 (例如 /etc/sudoers.d/syspulse_portal)
-        let checkProcess = Process()
-        checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        checkProcess.arguments = ["-n", engine, "--check-privilege"]
-        let isPasswordless: Bool = (try? checkProcess.run()) != nil && {
-            checkProcess.waitUntilExit()
-            return checkProcess.terminationStatus == 0
-        }()
-
-        if isPasswordless {
-            appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在启动原生 BPF 注入引擎...")
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            var args = [
-                "-n",
-                engine,
-                "--interface", selectedInterface,
-                "--bitrate", targetBitrate.shortTag,
-                "--mode", relayMode.rawValue
-            ]
-            if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
-            if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
-            proc.arguments = args
-
-            FileManager.default.createFile(atPath: logFilePath, contents: nil)
-            if let logHandle = FileHandle(forWritingAtPath: logFilePath) {
-                proc.standardOutput = logHandle
-                proc.standardError = logHandle
-            }
-            self.relayProcess = proc
-
-            proc.terminationHandler = { [weak self] _ in
-                Task { @MainActor in
-                    guard let self = self, self.relaySessionID == sessionID else { return }
-                    self.pollLogFile(sessionID: sessionID)
-                    self.flushRemainingLogBuffer(sessionID: sessionID)
-                    self.resetWorkItem?.cancel()
-                    self.resetWorkItem = nil
-                    self.isRunning = false
-                    self.isListening = false
-                    self.isStreamActive = false
-                    self.stopListenCountdown()
-                    self.logWatchTimer?.invalidate()
-                    self.logWatchTimer = nil
-                    self.relayProcess = nil
-                }
-            }
-
-            do {
-                try proc.run()
-                let pid = proc.processIdentifier
-                appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (免密模式 · sudo PID: \(pid))。")
-                startTailingLogFile(sessionID: sessionID)
-                return
-            } catch {
-                appendLog("[提示] 免密进程启动受限，尝试常规特权引导...")
-            }
-        }
-
-        // 常规 AppleScript 提权（在提权同时由引擎自身校验并写入 sudoers.d 绝对路径免密规则，从下次起永久免密）
-        appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以执行原生 ARP 注入与数据包修改...")
-
-        var cmd = "\(Self.shellSingleQuoted(engine)) --install-sudoers >/dev/null 2>&1 || true; \(Self.shellSingleQuoted(engine)) --interface \(Self.shellSingleQuoted(selectedInterface)) --bitrate \(Self.shellSingleQuoted(targetBitrate.shortTag)) --mode \(Self.shellSingleQuoted(relayMode.rawValue))"
-        if !ps5IP.isEmpty { cmd += " --ps5 \(Self.shellSingleQuoted(ps5IP))" }
-        if !portalIP.isEmpty { cmd += " --portal \(Self.shellSingleQuoted(portalIP))" }
-        cmd += " > \(Self.shellSingleQuoted(logFilePath)) 2>&1 & echo $! > \(Self.shellSingleQuoted(pidFilePath))"
-
-        let appleScript = "do shell script \"\(Self.appleScriptEscaped(cmd))\" with administrator privileges"
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var errorDict: NSDictionary?
-            let scriptObj = NSAppleScript(source: appleScript)
-            scriptObj?.executeAndReturnError(&errorDict)
+        // 智能检测是否已具备 sudo 免密特权 (异步检测，不阻塞主线程)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, selectedInterface, targetBitrate, relayMode, ps5IP, portalIP, logFilePath, pidFilePath] in
+            let checkProcess = Process()
+            checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            checkProcess.arguments = ["-n", engine, "--check-privilege"]
+            checkProcess.standardOutput = FileHandle.nullDevice
+            checkProcess.standardError = FileHandle.nullDevice
+            let isPasswordless: Bool = (try? checkProcess.run()) != nil && {
+                checkProcess.waitUntilExit()
+                return checkProcess.terminationStatus == 0
+            }()
 
             DispatchQueue.main.async {
                 guard let self = self, self.relaySessionID == sessionID else { return }
-                if let err = errorDict {
-                    let errMsg = err[NSAppleScript.errorMessage] as? String ?? "用户取消授权"
-                    self.appendLog("[提示] 特权授权未完成: \(errMsg)")
-                    self.lastError = "需要管理员特权才能启用原生 BPF / ARP 注入（\(errMsg)）。"
-                    self.appendLog("[错误] \(self.lastError!)")
-                    self.resetWorkItem?.cancel()
-                    self.resetWorkItem = nil
-                    self.isRunning = false
-                    self.isListening = false
-                    self.isStreamActive = false
-                    self.stopListenCountdown()
-                } else {
-                    self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (已建立免密通道)。")
-                    self.startTailingLogFile(sessionID: sessionID)
+
+                if isPasswordless {
+                    self.appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在启动原生 BPF 注入引擎...")
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                    var args = [
+                        "-n",
+                        engine,
+                        "--interface", selectedInterface,
+                        "--bitrate", targetBitrate.shortTag,
+                        "--mode", relayMode.rawValue
+                    ]
+                    if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
+                    if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
+                    proc.arguments = args
+
+                    FileManager.default.createFile(atPath: logFilePath, contents: nil)
+                    if let logHandle = FileHandle(forWritingAtPath: logFilePath) {
+                        proc.standardOutput = logHandle
+                        proc.standardError = logHandle
+                    }
+                    self.relayProcess = proc
+
+                    proc.terminationHandler = { [weak self] _ in
+                        Task { @MainActor in
+                            guard let self = self, self.relaySessionID == sessionID else { return }
+                            self.pollLogFile(sessionID: sessionID)
+                            self.flushRemainingLogBuffer(sessionID: sessionID)
+                            self.resetWorkItem?.cancel()
+                            self.resetWorkItem = nil
+                            self.isRunning = false
+                            self.isListening = false
+                            self.isStreamActive = false
+                            self.stopListenCountdown()
+                            self.logWatchTimer?.invalidate()
+                            self.logWatchTimer = nil
+                            self.relayProcess = nil
+                        }
+                    }
+
+                    do {
+                        try proc.run()
+                        let pid = proc.processIdentifier
+                        self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (免密模式 · sudo PID: \(pid))。")
+                        self.startTailingLogFile(sessionID: sessionID)
+                        return
+                    } catch {
+                        self.appendLog("[提示] 免密进程启动受限，尝试常规特权引导...")
+                    }
+                }
+
+                // 常规 AppleScript 提权（在提权同时由引擎自身校验并写入 sudoers.d 绝对路径免密规则，从下次起永久免密）
+                self.appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以执行原生 ARP 注入与数据包修改...")
+
+                var cmd = "\(Self.shellSingleQuoted(engine)) --install-sudoers >/dev/null 2>&1 || true; \(Self.shellSingleQuoted(engine)) --interface \(Self.shellSingleQuoted(selectedInterface)) --bitrate \(Self.shellSingleQuoted(targetBitrate.shortTag)) --mode \(Self.shellSingleQuoted(relayMode.rawValue))"
+                if !ps5IP.isEmpty { cmd += " --ps5 \(Self.shellSingleQuoted(ps5IP))" }
+                if !portalIP.isEmpty { cmd += " --portal \(Self.shellSingleQuoted(portalIP))" }
+                cmd += " > \(Self.shellSingleQuoted(logFilePath)) 2>&1 & echo $! > \(Self.shellSingleQuoted(pidFilePath))"
+
+                let appleScript = "do shell script \"\(Self.appleScriptEscaped(cmd))\" with administrator privileges"
+
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    var errorDict: NSDictionary?
+                    let scriptObj = NSAppleScript(source: appleScript)
+                    scriptObj?.executeAndReturnError(&errorDict)
+
+                    DispatchQueue.main.async {
+                        guard let self = self, self.relaySessionID == sessionID else { return }
+                        if let err = errorDict {
+                            let errMsg = err[NSAppleScript.errorMessage] as? String ?? "用户取消授权"
+                            self.appendLog("[提示] 特权授权未完成: \(errMsg)")
+                            self.lastError = "需要管理员特权才能启用原生 BPF / ARP 注入（\(errMsg)）。"
+                            self.appendLog("[错误] \(self.lastError!)")
+                            self.resetWorkItem?.cancel()
+                            self.resetWorkItem = nil
+                            self.isRunning = false
+                            self.isListening = false
+                            self.isStreamActive = false
+                            self.stopListenCountdown()
+                        } else {
+                            self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (已建立免密通道)。")
+                            self.startTailingLogFile(sessionID: sessionID)
+                        }
+                    }
                 }
             }
         }
@@ -1012,6 +1020,46 @@ public final class PSPortalPluginManager {
                 }
             }
         }
+    }
+
+    /// Used during app termination to synchronously signal `portal_engine --stop` before the process exits.
+    public func stopRelaySynchronouslyForTermination() {
+        let hasPidFile = FileManager.default.fileExists(atPath: pidFilePath)
+        guard isRunning || isListening || hasPidFile else { return }
+
+        logWatchTimer?.invalidate()
+        logWatchTimer = nil
+        stopListenCountdown()
+        resetWorkItem?.cancel()
+        resetWorkItem = nil
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        outputPipe = nil
+
+        let engine = engineFileURL.path
+        var stoppedViaSudo = false
+        if FileManager.default.isExecutableFile(atPath: engine) {
+            let stopProc = Process()
+            stopProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            stopProc.arguments = ["-n", engine, "--stop"]
+            stopProc.standardOutput = FileHandle.nullDevice
+            stopProc.standardError = FileHandle.nullDevice
+            if (try? stopProc.run()) != nil {
+                stopProc.waitUntilExit()
+                stoppedViaSudo = (stopProc.terminationStatus == 0)
+            }
+        }
+
+        if !stoppedViaSudo, let activeProc = relayProcess, activeProc.isRunning {
+            activeProc.interrupt()
+            Thread.sleep(forTimeInterval: 0.3)
+            if activeProc.isRunning {
+                activeProc.terminate()
+            }
+        }
+        relayProcess = nil
+        isRunning = false
+        isListening = false
+        isStreamActive = false
     }
 
     public func restoreNetworkDirect() {

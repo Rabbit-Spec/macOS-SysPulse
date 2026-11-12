@@ -60,6 +60,26 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var hidManager: IOHIDManager?
 
+    private enum HIDTargetRole: Sendable {
+        case acPresent
+        case isCharging
+        case isDischarging
+        case batteryLevel
+        case runTimeToEmpty
+        case voltageVolts
+        case upsLoadPercent
+        case configApparentPowerVA
+    }
+
+    private var cachedDevice: IOHIDDevice?
+    private var cachedDeviceName: String?
+    private var cachedVendorID: Int?
+    private var cachedElements: [(role: HIDTargetRole, element: IOHIDElement)] = []
+
+    private var activeIntervalSeconds: Double = 30.0
+    private var isPausedForSleep: Bool = false
+    private var pendingResumeWorkItem: DispatchWorkItem?
+
     public var onSnapshotUpdated: (@MainActor @Sendable (RawHIDPowerState) -> Void)?
 
     private init() {}
@@ -80,27 +100,78 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
         }
     }
 
-    /// Start periodic hardware polling in background (every 2.0s).
-    public func start(intervalSeconds: Double = 2.0) {
+    private func scheduleTimerLocked(intervalSeconds: Double, fireImmediately: Bool) {
+        stopTimerOnly()
+        ensureManagerOpened()
+
+        let timer = DispatchSource.makeTimerSource(queue: self.queue)
+        let startDeadline: DispatchTime = fireImmediately ? .now() : .now() + intervalSeconds
+        timer.schedule(deadline: startDeadline, repeating: intervalSeconds, leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self] in
+            self?.pollHardware()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    /// Start periodic hardware polling in background.
+    public func start(intervalSeconds: Double = 30.0) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.stopTimerOnly()
-            self.ensureManagerOpened()
-
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now(), repeating: intervalSeconds)
-            timer.setEventHandler { [weak self] in
-                self?.pollHardware()
-            }
-            timer.resume()
-            self.timer = timer
+            self.activeIntervalSeconds = intervalSeconds
+            guard !self.isPausedForSleep else { return }
+            self.scheduleTimerLocked(intervalSeconds: intervalSeconds, fireImmediately: true)
             self.logger.info("Background HID hardware polling started (interval: \(intervalSeconds)s)")
+        }
+    }
+
+    /// Dynamically adjust polling interval without reopening IOHIDManager.
+    public func setPollingInterval(_ intervalSeconds: Double, triggerImmediate: Bool = false) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let changed = abs(self.activeIntervalSeconds - intervalSeconds) > 0.1
+            self.activeIntervalSeconds = intervalSeconds
+            guard !self.isPausedForSleep else { return }
+            if changed || self.timer == nil {
+                self.scheduleTimerLocked(intervalSeconds: intervalSeconds, fireImmediately: triggerImmediate)
+            } else if triggerImmediate {
+                self.pollHardware()
+            }
         }
     }
 
     public func stop() {
         queue.async { [weak self] in
-            self?.stopInternal()
+            guard let self else { return }
+            self.pendingResumeWorkItem?.cancel()
+            self.pendingResumeWorkItem = nil
+            self.stopInternal()
+        }
+    }
+
+    /// Pause HID timer and close IOHIDManager before macOS enters system sleep / DarkWake.
+    public func pauseForSleep() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingResumeWorkItem?.cancel()
+            self.pendingResumeWorkItem = nil
+            self.isPausedForSleep = true
+            self.stopInternal()
+        }
+    }
+
+    /// Reopen IOHIDManager and resume polling after USB bus stabilizes post-wake.
+    public func resumeFromWake(afterDelaySeconds delay: Double = 2.5) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.pendingResumeWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.isPausedForSleep = false
+                self.scheduleTimerLocked(intervalSeconds: self.activeIntervalSeconds, fireImmediately: true)
+            }
+            self.pendingResumeWorkItem = work
+            self.queue.asyncAfter(deadline: .now() + delay, execute: work)
         }
     }
 
@@ -109,8 +180,16 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
         timer = nil
     }
 
+    private func clearCachedDevice() {
+        cachedDevice = nil
+        cachedDeviceName = nil
+        cachedVendorID = nil
+        cachedElements.removeAll(keepingCapacity: false)
+    }
+
     private func stopInternal() {
         stopTimerOnly()
+        clearCachedDevice()
         if let manager = hidManager {
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
             hidManager = nil
@@ -121,58 +200,110 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
     /// Force an immediate background query right now (e.g. user clicks refresh).
     public func triggerManualPoll() {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isPausedForSleep else { return }
             self.ensureManagerOpened()
             self.pollHardware()
         }
     }
 
+    private static func targetRole(page: UInt32, usage: UInt32) -> HIDTargetRole? {
+        if page == 0x85 {
+            switch usage {
+            case 0xD0: return .acPresent
+            case 0x44: return .isCharging
+            case 0x45: return .isDischarging
+            case 0x66: return .batteryLevel
+            case 0x68: return .runTimeToEmpty
+            default: return nil
+            }
+        } else if page == 0x84 {
+            switch usage {
+            case 0x57: return .runTimeToEmpty
+            case 0x30: return .voltageVolts
+            case 0x35: return .upsLoadPercent
+            case 0x43: return .configApparentPowerVA
+            default: return nil
+            }
+        }
+        return nil
+    }
+
+    private func ensureCachedElements(for dev: IOHIDDevice) {
+        if let existing = cachedDevice, existing === dev, !cachedElements.isEmpty {
+            return
+        }
+        clearCachedDevice()
+        guard let elements = IOHIDDeviceCopyMatchingElements(dev, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement],
+              !elements.isEmpty else {
+            return
+        }
+        cachedDevice = dev
+        if let prod = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String {
+            cachedDeviceName = prod.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let vid = IOHIDDeviceGetProperty(dev, kIOHIDVendorIDKey as CFString) as? Int {
+            cachedVendorID = vid
+        }
+        for el in elements {
+            let page = IOHIDElementGetUsagePage(el)
+            let usage = IOHIDElementGetUsage(el)
+            if let role = Self.targetRole(page: page, usage: usage) {
+                cachedElements.append((role: role, element: el))
+            }
+        }
+    }
+
     private func pollHardware() {
+        guard !isPausedForSleep else { return }
         var snapshot = RawHIDPowerState()
-        snapshot.macSystemWatts = Self.readMacSystemPowerWatts()
 
         if let manager = hidManager,
            let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>,
-           let dev = devices.first,
-           let elements = IOHIDDeviceCopyMatchingElements(dev, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement],
-           !elements.isEmpty {
+           let dev = devices.first {
 
-            snapshot.hasHIDDevice = true
-            if let prod = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String {
-                snapshot.deviceName = prod.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            if let vid = IOHIDDeviceGetProperty(dev, kIOHIDVendorIDKey as CFString) as? Int {
-                snapshot.vendorID = vid
-            }
+            ensureCachedElements(for: dev)
+            if !cachedElements.isEmpty {
+                snapshot.hasHIDDevice = true
+                snapshot.deviceName = cachedDeviceName
+                snapshot.vendorID = cachedVendorID
 
-            var dummy: Unmanaged<IOHIDValue> = Unmanaged.passRetained(IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, elements[0], 0, 0))
+                let seedValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, cachedElements[0].element, 0, 0)
+                var valueRef = Unmanaged.passUnretained(seedValue)
 
-            for el in elements {
-                let page = IOHIDElementGetUsagePage(el)
-                let usage = IOHIDElementGetUsage(el)
-                if IOHIDDeviceGetValue(dev, el, &dummy) == kIOReturnSuccess {
-                    let val = IOHIDValueGetIntegerValue(dummy.takeUnretainedValue())
-                    if page == 0x85 && usage == 0xD0 {
-                        snapshot.acPresent = (val == 1)
-                    } else if page == 0x85 && usage == 0x44 {
-                        snapshot.isCharging = (val == 1)
-                    } else if page == 0x85 && usage == 0x45 {
-                        snapshot.isDischarging = (val == 1)
-                    } else if page == 0x85 && usage == 0x66 {
-                        snapshot.batteryLevel = val
-                    } else if (page == 0x85 && usage == 0x68) || (page == 0x84 && usage == 0x57) {
-                        if val > 0 && val < 65535 {
-                            snapshot.runTimeToEmptySeconds = val
+                for entry in cachedElements {
+                    if IOHIDDeviceGetValue(dev, entry.element, &valueRef) == kIOReturnSuccess {
+                        let val = IOHIDValueGetIntegerValue(valueRef.takeUnretainedValue())
+                        switch entry.role {
+                        case .acPresent:
+                            snapshot.acPresent = (val == 1)
+                        case .isCharging:
+                            snapshot.isCharging = (val == 1)
+                        case .isDischarging:
+                            snapshot.isDischarging = (val == 1)
+                        case .batteryLevel:
+                            snapshot.batteryLevel = val
+                        case .runTimeToEmpty:
+                            if val > 0 && val < 65535 {
+                                snapshot.runTimeToEmptySeconds = val
+                            }
+                        case .voltageVolts:
+                            if val > 0 {
+                                snapshot.voltageVolts = Double(val)
+                            }
+                        case .upsLoadPercent:
+                            if val >= 0 && val <= 100 {
+                                snapshot.upsLoadPercent = Double(val)
+                            }
+                        case .configApparentPowerVA:
+                            if val > 0 {
+                                snapshot.configApparentPowerVA = Double(val)
+                            }
                         }
-                    } else if page == 0x84 && usage == 0x30 && val > 0 {
-                        snapshot.voltageVolts = Double(val)
-                    } else if page == 0x84 && usage == 0x35 && val >= 0 && val <= 100 {
-                        snapshot.upsLoadPercent = Double(val)
-                    } else if page == 0x84 && usage == 0x43 && val > 0 {
-                        snapshot.configApparentPowerVA = Double(val)
                     }
                 }
             }
+        } else {
+            clearCachedDevice()
         }
 
         DispatchQueue.main.async { [weak self, snapshot] in
