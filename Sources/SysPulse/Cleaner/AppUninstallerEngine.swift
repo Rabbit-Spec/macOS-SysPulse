@@ -13,21 +13,54 @@ public final class AppUninstallerEngine {
     public var scanProgress: Double = 0.0
     public var currentScanningApp: String = ""
 
-    public var installedApps: [InstalledAppInfo] = []
-    public var orphanedResidues: [OrphanedResidueItem] = []
+    public var installedApps: [InstalledAppInfo] = [] {
+        didSet {
+            recomputeCategoryStats()
+            recomputeFilteredDisplayItems()
+        }
+    }
+    public var orphanedResidues: [OrphanedResidueItem] = [] {
+        didSet {
+            recomputeCategoryStats()
+            recomputeFilteredDisplayItems()
+        }
+    }
 
-    public var selectedCategory: AppCategoryFilter = .all
+    public var selectedCategory: AppCategoryFilter = .all {
+        didSet {
+            if oldValue != selectedCategory {
+                recomputeFilteredDisplayItems()
+            }
+        }
+    }
     public var selectedItemIDs: Set<UUID> = []
     public var expandedAppIDs: Set<UUID> = []
 
-    // Backward compatibility with previous properties
     public var selectedAppIDs: Set<UUID> = []
     public var selectedResidueIDs: Set<UUID> = []
     public var selectedTab: UninstallerSubTab = .installedApps
 
-    public var searchQuery: String = ""
-    public var sortOption: AppSortOption = .sizeDesc
-    public var sortOrder: ProcessSortOrder = .descending
+    public var searchQuery: String = "" {
+        didSet {
+            if oldValue != searchQuery {
+                recomputeFilteredDisplayItems()
+            }
+        }
+    }
+    public var sortOption: AppSortOption = .sizeDesc {
+        didSet {
+            if oldValue != sortOption {
+                recomputeFilteredDisplayItems()
+            }
+        }
+    }
+    public var sortOrder: ProcessSortOrder = .descending {
+        didSet {
+            if oldValue != sortOrder {
+                recomputeFilteredDisplayItems()
+            }
+        }
+    }
 
     public var deleteMode: UninstallerDeleteMode = .moveToTrash {
         didSet {
@@ -131,41 +164,54 @@ public final class AppUninstallerEngine {
         }
     }
 
-    // MARK: - Category Stats
+    // MARK: - Category Stats (Cached in Single Pass)
 
-    public func categoryCount(_ cat: AppCategoryFilter) -> Int {
-        switch cat {
-        case .all:
-            return installedApps.count + orphanedResidues.count
-        case .user:
-            return installedApps.filter { !$0.isSystemApp }.count
-        case .unused:
-            return installedApps.filter { $0.isUnused && !$0.isSystemApp }.count
-        case .orphaned:
-            return orphanedResidues.count
-        case .system:
-            return installedApps.filter { $0.isSystemApp }.count
+    private var cachedCategoryCounts: [AppCategoryFilter: Int] = [:]
+    private var cachedCategoryBytes: [AppCategoryFilter: Int64] = [:]
+    public private(set) var cachedFilteredDisplayItems: [UninstallerRowItem] = []
+
+    private func recomputeCategoryStats() {
+        var userCount = 0
+        var userBytes: Int64 = 0
+        var unusedCount = 0
+        var unusedBytes: Int64 = 0
+        var sysCount = 0
+        var sysBytes: Int64 = 0
+
+        for app in installedApps {
+            if app.isSystemApp {
+                sysCount += 1
+                sysBytes += app.totalSizeBytes
+            } else {
+                userCount += 1
+                userBytes += app.totalSizeBytes
+                if app.isUnused {
+                    unusedCount += 1
+                    unusedBytes += app.totalSizeBytes
+                }
+            }
         }
+
+        let resCount = orphanedResidues.count
+        let resBytes = orphanedResidues.reduce(0) { $0 + $1.sizeBytes }
+
+        cachedCategoryCounts = [
+            .all: installedApps.count + resCount,
+            .user: userCount,
+            .unused: unusedCount,
+            .orphaned: resCount,
+            .system: sysCount
+        ]
+        cachedCategoryBytes = [
+            .all: userBytes + sysBytes + resBytes,
+            .user: userBytes,
+            .unused: unusedBytes,
+            .orphaned: resBytes,
+            .system: sysBytes
+        ]
     }
 
-    public func categoryBytes(_ cat: AppCategoryFilter) -> Int64 {
-        switch cat {
-        case .all:
-            return installedApps.reduce(0) { $0 + $1.totalSizeBytes } + orphanedResidues.reduce(0) { $0 + $1.sizeBytes }
-        case .user:
-            return installedApps.filter { !$0.isSystemApp }.reduce(0) { $0 + $1.totalSizeBytes }
-        case .unused:
-            return installedApps.filter { $0.isUnused && !$0.isSystemApp }.reduce(0) { $0 + $1.totalSizeBytes }
-        case .orphaned:
-            return orphanedResidues.reduce(0) { $0 + $1.sizeBytes }
-        case .system:
-            return installedApps.filter { $0.isSystemApp }.reduce(0) { $0 + $1.totalSizeBytes }
-        }
-    }
-
-    // MARK: - Unified Row Items for Display
-
-    public var filteredDisplayItems: [UninstallerRowItem] {
+    private func recomputeFilteredDisplayItems() {
         var baseItems: [UninstallerRowItem] = []
         switch selectedCategory {
         case .all:
@@ -207,7 +253,21 @@ public final class AppUninstallerEngine {
             }
         }
 
-        return baseItems
+        cachedFilteredDisplayItems = baseItems
+    }
+
+    public func categoryCount(_ cat: AppCategoryFilter) -> Int {
+        cachedCategoryCounts[cat] ?? 0
+    }
+
+    public func categoryBytes(_ cat: AppCategoryFilter) -> Int64 {
+        cachedCategoryBytes[cat] ?? 0
+    }
+
+    // MARK: - Unified Row Items for Display
+
+    public var filteredDisplayItems: [UninstallerRowItem] {
+        cachedFilteredDisplayItems
     }
 
     private static func itemLastUsedDate(_ item: UninstallerRowItem) -> Date {
@@ -224,7 +284,6 @@ public final class AppUninstallerEngine {
         }
     }
 
-    // Backward compatibility for filteredApps
     public var filteredApps: [InstalledAppInfo] {
         var list = installedApps
         if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

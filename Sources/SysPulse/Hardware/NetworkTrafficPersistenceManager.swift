@@ -163,7 +163,7 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
             self.state.hourlyBytes = Array(repeating: 0, count: 24)
             self.state.appTrafficRecords = [:]
         } else {
-            // 同日同月：彻底清洗旧版本遗留的 timed 及微小系统噪音数据
+            // 同日同月：过滤 timed 及微小系统噪音数据
             if let records = self.state.appTrafficRecords {
                 self.state.appTrafficRecords = records.filter { key, val in
                     key != "timed" && val.name.lowercased() != "timed" && val.totalBytes >= 10240
@@ -312,6 +312,43 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
 
     // MARK: - App Traffic Persistence (应用流量记忆)
 
+    public func recordAppTrafficBatch(_ entries: [(name: String, bundleID: String?, bytes: UInt64)]) {
+        guard !entries.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var records = state.appTrafficRecords ?? [:]
+        var monthRecords = state.monthAppTrafficRecords ?? [:]
+        records.removeValue(forKey: "timed")
+        monthRecords.removeValue(forKey: "timed")
+        let now = Date()
+
+        for entry in entries {
+            guard entry.bytes >= 10240, entry.name != "timed" else { continue }
+            let key = entry.bundleID ?? entry.name
+
+            let prevDailyBytes = records[key]?.totalBytes ?? 0
+            let delta = entry.bytes > prevDailyBytes ? (entry.bytes - prevDailyBytes) : 0
+            if var existing = records[key] {
+                existing.totalBytes = max(existing.totalBytes, entry.bytes)
+                existing.lastUpdated = now
+                records[key] = existing
+            } else {
+                records[key] = AppTrafficRecord(name: entry.name, bundleIdentifier: entry.bundleID, totalBytes: entry.bytes, lastUpdated: now)
+            }
+
+            if var mExisting = monthRecords[key] {
+                mExisting.totalBytes += delta
+                mExisting.lastUpdated = now
+                monthRecords[key] = mExisting
+            } else {
+                let initialMonthBytes = max(entry.bytes, prevDailyBytes)
+                monthRecords[key] = AppTrafficRecord(name: entry.name, bundleIdentifier: entry.bundleID, totalBytes: initialMonthBytes, lastUpdated: now)
+            }
+        }
+        state.appTrafficRecords = records
+        state.monthAppTrafficRecords = monthRecords
+    }
+
     public func recordAppTraffic(name: String, bundleID: String?, bytes: UInt64) {
         // 过滤微小系统噪音（小于 10 KB）以及系统级时间同步守护进程 timed
         guard bytes >= 10240, name != "timed" else { return }
@@ -361,7 +398,7 @@ public final class NetworkTrafficPersistenceManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var monthRecords = state.monthAppTrafficRecords ?? [:]
-        // 兜底保障：融合今日实时记录，确保任何时刻切换至月排行都能展现完整准确的排序
+        // 合并今日实时记录至当月排行
         if let daily = state.appTrafficRecords {
             for (key, dRecord) in daily {
                 if var m = monthRecords[key] {

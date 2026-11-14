@@ -94,11 +94,11 @@ public struct StorageAnalysisSection: View {
         cardContainer {
             HStack(spacing: 0) {
                 AnimatedModuleArtworkBadgeView(
-                    size: 50,
+                    size: 58,
                     isActive: analysis.isScanning,
                     accentColor: Color(red: 0.35, green: 0.85, blue: 0.75)
                 ) {
-                    SpaceAnalysisArtworkIconView(size: 50, forcedColorScheme: colorScheme)
+                    SpaceAnalysisArtworkIconView(size: 58, forcedColorScheme: colorScheme)
                 }
                 .padding(.leading, 24)
                 .padding(.trailing, 20)
@@ -1085,11 +1085,11 @@ public struct StorageAnalysisSection: View {
         content()
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.04) : Color.white.opacity(0.65))
+                    .fill(theme.studioCardFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 0.8)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
             )
     }
 

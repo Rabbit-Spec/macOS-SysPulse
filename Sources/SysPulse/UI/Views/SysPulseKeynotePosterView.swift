@@ -128,7 +128,7 @@ public struct SysPulseKeynotePosterView: View {
                 ]
             )
 
-            // 巨型金属质感文字（Apple Keynote 标志性视觉）
+            // 标题文字
             VStack(spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     Text("SysPulse")

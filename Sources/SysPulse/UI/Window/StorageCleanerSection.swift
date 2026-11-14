@@ -86,11 +86,11 @@ public struct StorageCleanerSection: View {
         cardContainer {
             HStack(spacing: 0) {
                 AnimatedModuleArtworkBadgeView(
-                    size: 50,
+                    size: 58,
                     isActive: cleaner.isScanning || cleaner.isCleaning,
                     accentColor: .cyan
                 ) {
-                    CleanerArtworkIconView(size: 50, forcedColorScheme: colorScheme)
+                    CleanerArtworkIconView(size: 58, forcedColorScheme: colorScheme)
                 }
                 .padding(.leading, 24)
                 .padding(.trailing, 20)
@@ -451,7 +451,12 @@ public struct StorageCleanerSection: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 4) {
                         ForEach(filteredItems) { item in
-                            cleanReviewRow(item: item)
+                            CleanerReviewRowView(
+                                item: item,
+                                cleaner: cleaner,
+                                navState: navState,
+                                theme: theme
+                            )
                         }
                     }
                     .padding(.vertical, 4.5)
@@ -482,11 +487,106 @@ public struct StorageCleanerSection: View {
         .pointingHandOnHover()
     }
 
-    private func cleanReviewRow(item: CleanItem) -> some View {
+    // MARK: - 4. Options & Protection Whitelist Popover
+
+    private var cleanerSettingsPopover: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("清理设置与安全名单", systemImage: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+
+                Spacer()
+
+                Button {
+                    navState.isCleanerOptionsPresented = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+            }
+
+            Divider()
+
+            // 删除方式选择器
+            VStack(alignment: .leading, spacing: 6) {
+                Text("清理删除方式")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+
+                Picker("", selection: $cleaner.deleteMode) {
+                    ForEach(CleanDeleteMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .pointingHandOnHover()
+
+                Text(cleaner.deleteMode.subtitle)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(theme.secondaryText)
+            }
+
+            Divider()
+
+            // Whitelist Security Summary
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("安全白名单防护")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Text("已激活 58 条规则")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.green)
+                }
+
+                Text("系统核心、用户照片、邮件、钥匙串、未提交 Git 仓库及桌面个人文档受到永久防护，所有清理均会自动跳过。")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+
+    // MARK: - 通用卡片容器
+
+    private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+private struct CleanerReviewRowView: View {
+    let item: CleanItem
+    @Bindable var cleaner: SystemCleanerEngine
+    @Bindable var navState: StudioWindowNavigationState
+    let theme: LiquidGlassTheme
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
         let isSelected = cleaner.selectedItemIDs.contains(item.id)
         let isHovered = (navState.hoveredCleanerItemID == item.id)
 
-        return HStack(spacing: 14) {
+        HStack(spacing: 14) {
             Button {
                 cleaner.toggleSelection(for: item.id)
             } label: {
@@ -581,92 +681,5 @@ public struct StorageCleanerSection: View {
             navState.hoveredCleanerItemID = hovering ? item.id : nil
         }
         .contentShape(Rectangle())
-    }
-
-    // MARK: - 4. Options & Protection Whitelist Popover
-
-    private var cleanerSettingsPopover: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("清理设置与安全名单", systemImage: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
-
-                Spacer()
-
-                Button {
-                    navState.isCleanerOptionsPresented = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(theme.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .pointingHandOnHover()
-            }
-
-            Divider()
-
-            // 删除方式选择器
-            VStack(alignment: .leading, spacing: 6) {
-                Text("清理删除方式")
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
-
-                Picker("", selection: $cleaner.deleteMode) {
-                    ForEach(CleanDeleteMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .pointingHandOnHover()
-
-                Text(cleaner.deleteMode.subtitle)
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
-            }
-
-            Divider()
-
-            // Whitelist Security Summary
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("安全白名单防护")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Spacer()
-                    Text("已激活 58 条规则")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.green)
-                }
-
-                Text("系统核心、用户照片、邮件、钥匙串、未提交 Git 仓库及桌面个人文档受到永久防护，所有清理均会自动跳过。")
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(16)
-        .frame(width: 320)
-    }
-
-    // MARK: - 通用卡片容器
-
-    private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(theme.cardFill)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(theme.cardBorder, lineWidth: 0.8)
-                    )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }

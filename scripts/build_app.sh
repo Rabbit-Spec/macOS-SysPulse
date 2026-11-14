@@ -63,18 +63,13 @@ cp "$HERE/Resources/CleanerIcon-Light-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/CleanerIcon-Dark-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/MenuBarRabbit"*.png "$RESOURCES_DIR/" 2>/dev/null || true
 cp "$HERE/Resources/ieee_oui.tsv" "$RESOURCES_DIR/" 2>/dev/null || true
-if [ -f "$HERE/Resources/UninstallerIcon-Light-1024.png" ]; then
-    cp "$HERE/Resources/UninstallerIcon-Light-1024.png" "$RESOURCES_DIR/"
-fi
-if [ -f "$HERE/Resources/UninstallerIcon-Dark-1024.png" ]; then
-    cp "$HERE/Resources/UninstallerIcon-Dark-1024.png" "$RESOURCES_DIR/"
-fi
-if [ -f "$HERE/Resources/SpaceAnalysisIcon-Light-1024.png" ]; then
-    cp "$HERE/Resources/SpaceAnalysisIcon-Light-1024.png" "$RESOURCES_DIR/"
-fi
-if [ -f "$HERE/Resources/SpaceAnalysisIcon-Dark-1024.png" ]; then
-    cp "$HERE/Resources/SpaceAnalysisIcon-Dark-1024.png" "$RESOURCES_DIR/"
-fi
+for icon_base in UninstallerIcon SpaceAnalysisIcon PSPortalIcon WiFiLatencyIcon LanSnifferIcon UPSPowerIcon AntigravityContextIcon; do
+    for suffix in Light Dark; do
+        if [ -f "$HERE/Resources/${icon_base}-${suffix}-1024.png" ]; then
+            cp "$HERE/Resources/${icon_base}-${suffix}-1024.png" "$RESOURCES_DIR/"
+        fi
+    done
+done
 for t in 1 2 3 4; do
     if [ -f "$HERE/Resources/HealthRabbit-Tier${t}-1024.png" ]; then
         cp "$HERE/Resources/HealthRabbit-Tier${t}-1024.png" "$RESOURCES_DIR/"

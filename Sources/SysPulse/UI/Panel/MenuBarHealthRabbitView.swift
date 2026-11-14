@@ -1,6 +1,8 @@
+import AppKit
+import QuartzCore
 import SwiftUI
 
-// MARK: - 菜单栏健康度卡片 · 灵动白兔矢量骨骼动画视图 (Style 1 · Mod 4)
+// MARK: - 菜单栏健康度白兔动画视图
 
 public struct MenuBarHealthRabbitView: View {
     public let rating: HealthRating
@@ -14,318 +16,732 @@ public struct MenuBarHealthRabbitView: View {
     }
 
     public var body: some View {
-        let isDark = (colorScheme == .dark)
+        MenuBarHealthRabbitCAView(rating: rating, isDark: colorScheme == .dark)
+            .frame(width: size, height: size)
+            .accessibilityLabel("系统健康小兔：\(rating.rawValue)")
+    }
+}
 
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
-            let now = timeline.date.timeIntervalSinceReferenceDate
-            let bgCycle = RabbitMotionEngine.backgroundCycleSeconds(for: rating)
-            let p = now.truncatingRemainder(dividingBy: bgCycle) / bgCycle
-            let bg = RabbitMotionEngine.sampleBackground(rating: rating, phase: p)
-            let live = RabbitMotionEngine.sampleLiving(rating: rating, sec: now)
+private struct MenuBarHealthRabbitCAView: NSViewRepresentable, Equatable {
+    let rating: HealthRating
+    let isDark: Bool
 
-            Canvas(rendersAsynchronously: false) { context, canvasSize in
-                let scale = min(canvasSize.width / 464.0, canvasSize.height / 484.0)
-                var base = context
-                base.translateBy(x: (canvasSize.width - 464.0 * scale) * 0.5 - 24.0 * scale,
-                                 y: (canvasSize.height - 484.0 * scale) * 0.5 - 12.0 * scale)
-                base.scaleBy(x: scale, y: scale)
+    nonisolated static func == (lhs: MenuBarHealthRabbitCAView, rhs: MenuBarHealthRabbitCAView) -> Bool {
+        lhs.rating == rhs.rating && lhs.isDark == rhs.isDark
+    }
 
-                let accent = accentColor(isDark: isDark)
-                let strokeCol = isDark
-                    ? Color(red: 15.0 / 255.0, green: 23.0 / 255.0, blue: 42.0 / 255.0)
-                    : Color(red: 30.0 / 255.0, green: 41.0 / 255.0, blue: 59.0 / 255.0)
+    func makeNSView(context: Context) -> MenuBarHealthRabbitNSView {
+        let view = MenuBarHealthRabbitNSView()
+        view.configure(rating: rating, isDark: isDark)
+        return view
+    }
 
-                drawBackgroundEffects(in: &base, bg: bg, accent: accent, isDark: isDark)
-                drawWhiteRabbit(in: &base, live: live, strokeColor: strokeCol)
+    func updateNSView(_ nsView: MenuBarHealthRabbitNSView, context: Context) {
+        nsView.configure(rating: rating, isDark: isDark)
+    }
+}
+
+/// 基于 CoreAnimation 预渲染位图的健康度白兔动画视图（30fps 合成，无 SwiftUI Canvas 重绘）
+private final class MenuBarHealthRabbitNSView: NSView {
+    private static let designWidth: CGFloat = 464.0
+    private static let designHeight: CGFloat = 484.0
+    private static let bitmapScale: CGFloat = 0.5 // 232x242 px over ~72pt widget (>1.6x Retina supersampling)
+
+    private struct SpriteSet {
+        let aura: CGImage?
+        let ripple1: CGImage?
+        let ripple2: CGImage?
+        let orbit: CGImage?
+        let particles: [(cx: CGFloat, cy: CGFloat, rect: CGRect, image: CGImage?)]
+        let backEar: CGImage?
+        let torso: CGImage?
+        let tail: CGImage?
+        let eye: CGImage?
+        let frontEar: CGImage?
+        let paw: CGImage?
+    }
+
+    private static var spriteCache: [String: SpriteSet] = [:]
+
+    private let sceneLayer = CALayer()
+    private var currentRating: HealthRating?
+    private var currentIsDark: Bool?
+
+    // Animated Layer References (all bitmap-backed CALayers or zero-backing pivot containers)
+    private var auraLayer = CALayer()
+    private var ripple1Layer = CALayer()
+    private var ripple2Layer = CALayer()
+    private var orbitLayer = CALayer()
+    private var particleLayers: [CALayer] = []
+
+    private var rabbitRootLayer = CALayer()
+    private var backEarLayer = CALayer()
+    private var tailLayer = CALayer()
+    private var frontEarLayer = CALayer()
+    private var pawLayer = CALayer()
+    private var eyeLayer = CALayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupScene()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupScene()
+    }
+
+    private func setupScene() {
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        // Standard CoreAnimation bottom-up coordinates (y=0 bottom, y=designHeight top)
+        sceneLayer.bounds = CGRect(x: 0, y: 0, width: Self.designWidth, height: Self.designHeight)
+        sceneLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        layer?.addSublayer(sceneLayer)
+    }
+
+    override func layout() {
+        super.layout()
+        let scale = min(bounds.width / Self.designWidth, bounds.height / Self.designHeight)
+        guard scale > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sceneLayer.position = CGPoint(
+            x: bounds.width * 0.5 - 24.0 * scale,
+            y: bounds.height * 0.5 + 12.0 * scale
+        )
+        sceneLayer.transform = CATransform3DMakeScale(scale, scale, 1.0)
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            attachAnimations()
+        } else {
+            removeAnimationsRecursively(layer: sceneLayer)
+        }
+    }
+
+    func configure(rating: HealthRating, isDark: Bool) {
+        if currentRating == rating && currentIsDark == isDark {
+            return
+        }
+        currentRating = rating
+        currentIsDark = isDark
+        rebuildLayers(rating: rating, isDark: isDark)
+        if window != nil {
+            attachAnimations()
+        }
+    }
+
+    // MARK: - Layer Construction (Zero CAShapeLayers; Cached Sprite Textures Only)
+
+    private func rebuildLayers(rating: HealthRating, isDark: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        sceneLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        particleLayers.removeAll(keepingCapacity: true)
+
+        let sprites = Self.cachedSprites(for: rating, isDark: isDark)
+        let ringCenter = CGPoint(x: 256.0, y: Self.designHeight - 260.0)
+
+        // Layer 1: Pre-rendered Radial Aura
+        auraLayer = makeCenteredSpriteLayer(
+            size: CGSize(width: 470, height: 470),
+            position: ringCenter,
+            image: sprites.aura
+        )
+        sceneLayer.addSublayer(auraLayer)
+
+        // Layer 2: Staggered Dual Sonar Ripples (bitmap rings)
+        ripple1Layer = makeCenteredSpriteLayer(
+            size: CGSize(width: 360, height: 360),
+            position: ringCenter,
+            image: sprites.ripple1
+        )
+        ripple1Layer.opacity = 0.0
+        sceneLayer.addSublayer(ripple1Layer)
+
+        ripple2Layer = makeCenteredSpriteLayer(
+            size: CGSize(width: 360, height: 360),
+            position: ringCenter,
+            image: sprites.ripple2
+        )
+        ripple2Layer.opacity = 0.0
+        sceneLayer.addSublayer(ripple2Layer)
+
+        // Layer 3: Rotating 3-Fold Orbital Arc (bitmap ring)
+        orbitLayer = makeCenteredSpriteLayer(
+            size: CGSize(width: 436, height: 436),
+            position: ringCenter,
+            image: sprites.orbit
+        )
+        sceneLayer.addSublayer(orbitLayer)
+
+        // Layer 4: Tier-Specific Particles (tight bitmap sprites)
+        for p in sprites.particles {
+            let pLayer = makePivotSpriteLayer(srcRect: p.rect, cx: p.cx, cy: p.cy, image: p.image)
+            particleLayers.append(pLayer)
+            sceneLayer.addSublayer(pLayer)
+        }
+
+        // Layer 5: Articulated White Rabbit (zero-backing pivot + tight cropped sprite sublayers)
+        let rootPivotY: CGFloat = 472.0
+        rabbitRootLayer = CALayer()
+        rabbitRootLayer.bounds = CGRect(x: 0, y: 0, width: Self.designWidth, height: Self.designHeight)
+        rabbitRootLayer.anchorPoint = CGPoint(
+            x: 280.0 / Self.designWidth,
+            y: (Self.designHeight - rootPivotY) / Self.designHeight
+        )
+        rabbitRootLayer.position = CGPoint(x: 280.0, y: Self.designHeight - rootPivotY)
+
+        backEarLayer = makePivotSpriteLayer(
+            srcRect: Self.backEarRect, cx: 286, cy: 66, image: sprites.backEar
+        )
+        rabbitRootLayer.addSublayer(backEarLayer)
+
+        let torsoLayer = makeCenteredSpriteLayer(
+            size: Self.torsoRect.size,
+            position: CGPoint(x: Self.torsoRect.midX, y: Self.designHeight - Self.torsoRect.midY),
+            image: sprites.torso
+        )
+        rabbitRootLayer.addSublayer(torsoLayer)
+
+        tailLayer = makePivotSpriteLayer(
+            srcRect: Self.tailRect, cx: 162, cy: 377, image: sprites.tail
+        )
+        rabbitRootLayer.addSublayer(tailLayer)
+
+        eyeLayer = makePivotSpriteLayer(
+            srcRect: Self.eyeRect, cx: 332, cy: 81, image: sprites.eye
+        )
+        rabbitRootLayer.addSublayer(eyeLayer)
+
+        frontEarLayer = makePivotSpriteLayer(
+            srcRect: Self.frontEarRect, cx: 266, cy: 112, image: sprites.frontEar
+        )
+        rabbitRootLayer.addSublayer(frontEarLayer)
+
+        pawLayer = makePivotSpriteLayer(
+            srcRect: Self.pawRect, cx: 368, cy: 232, image: sprites.paw
+        )
+        rabbitRootLayer.addSublayer(pawLayer)
+
+        sceneLayer.addSublayer(rabbitRootLayer)
+        CATransaction.commit()
+    }
+
+    // MARK: - GPU CoreAnimation Schedules (Capped 30fps Ambient Cadence)
+
+    private func attachAnimations() {
+        guard let rating = currentRating else { return }
+        removeAnimationsRecursively(layer: sceneLayer)
+
+        let bgCycle = Self.backgroundCycleSeconds(for: rating)
+        let ambientRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+
+        // 1. Aura Breathe
+        let auraScale = CABasicAnimation(keyPath: "transform.scale")
+        auraScale.fromValue = 0.84
+        auraScale.toValue = 1.20
+        auraScale.duration = bgCycle * 0.5
+        auraScale.autoreverses = true
+        auraScale.repeatCount = .infinity
+        auraScale.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        auraScale.preferredFrameRateRange = ambientRange
+        auraLayer.add(auraScale, forKey: "auraBreathe")
+
+        // 2. Dual Sonar Ripples
+        ripple1Layer.add(makeRippleAnimation(duration: bgCycle, maxAlpha: 0.90, timeOffset: 0, rateRange: ambientRange), forKey: "sonar1")
+        ripple2Layer.add(makeRippleAnimation(duration: bgCycle, maxAlpha: 0.74, timeOffset: bgCycle * 0.5, rateRange: ambientRange), forKey: "sonar2")
+
+        // 3. Orbital Arc Rotation
+        let degPerCycle: Double = {
+            switch rating {
+            case .excellent, .fair: return 240.0
+            case .good: return 120.0
+            case .needsAttention: return 360.0
             }
+        }()
+        let orbitRot = CABasicAnimation(keyPath: "transform.rotation.z")
+        orbitRot.fromValue = 0.0
+        orbitRot.toValue = -CGFloat.pi * 2.0
+        orbitRot.duration = bgCycle * (360.0 / degPerCycle)
+        orbitRot.repeatCount = .infinity
+        orbitRot.preferredFrameRateRange = ambientRange
+        orbitLayer.add(orbitRot, forKey: "orbitSpin")
+
+        // 4. Particles Float & Pulse
+        for (idx, pLayer) in particleLayers.enumerated() {
+            let group = CAAnimationGroup()
+            group.duration = bgCycle * (0.9 + Double(idx) * 0.12)
+            group.autoreverses = true
+            group.repeatCount = .infinity
+            group.timeOffset = Double(idx) * 0.35
+            group.preferredFrameRateRange = ambientRange
+
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 0.72
+            scale.toValue = 1.18
+            scale.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+            let floatY = CABasicAnimation(keyPath: "transform.translation.y")
+            floatY.fromValue = -8.0
+            floatY.toValue = 14.0
+            floatY.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+            group.animations = [scale, floatY]
+            pLayer.add(group, forKey: "particlePulse")
         }
-        .frame(width: size, height: size)
-        .accessibilityLabel("系统健康小兔：\(rating.rawValue)")
+
+        // 5. Rabbit Breathing & Hop
+        let breathPeriod: Double = {
+            switch rating {
+            case .excellent: return 2.6
+            case .good: return 3.0
+            case .fair: return 2.3
+            case .needsAttention: return 1.8
+            }
+        }()
+
+        let breathe = CABasicAnimation(keyPath: "transform.scale.y")
+        breathe.fromValue = 1.0
+        breathe.toValue = 1.014
+        breathe.duration = breathPeriod * 0.5
+        breathe.autoreverses = true
+        breathe.repeatCount = .infinity
+        breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        breathe.preferredFrameRateRange = ambientRange
+        rabbitRootLayer.add(breathe, forKey: "rabbitBreathe")
+
+        let hopY = CAKeyframeAnimation(keyPath: "position.y")
+        let baseY: CGFloat = Self.designHeight - 472.0
+        let hopAmp: CGFloat = rating == .excellent ? 8.5 : (rating == .needsAttention ? 4.5 : 3.5)
+        hopY.values = [baseY, baseY, baseY - 1.5, baseY + hopAmp, baseY, baseY]
+        hopY.keyTimes = [0.0, 0.27, 0.31, 0.42, 0.56, 1.0]
+        hopY.duration = 5.6
+        hopY.repeatCount = .infinity
+        hopY.calculationMode = .cubic
+        hopY.preferredFrameRateRange = ambientRange
+        rabbitRootLayer.add(hopY, forKey: "rabbitHop")
+
+        // 6. Ear Flicks
+        let earRotF = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        earRotF.values = [0.0, 0.12, -0.03, 0.05, 0.0, 0.07, 0.0]
+        earRotF.keyTimes = [0.0, 0.09, 0.13, 0.17, 0.24, 0.42, 1.0]
+        earRotF.duration = 5.6
+        earRotF.repeatCount = .infinity
+        earRotF.preferredFrameRateRange = ambientRange
+        frontEarLayer.add(earRotF, forKey: "frontEarFlick")
+
+        let earRotB = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        earRotB.values = [0.0, 0.0, 0.08, -0.02, 0.0, -0.09, 0.0]
+        earRotB.keyTimes = [0.0, 0.10, 0.15, 0.21, 0.85, 0.90, 1.0]
+        earRotB.duration = 5.6
+        earRotB.repeatCount = .infinity
+        earRotB.preferredFrameRateRange = ambientRange
+        backEarLayer.add(earRotB, forKey: "backEarFlick")
+
+        // 7. Paw Wave
+        let pawRot = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        pawRot.values = [0.0, 0.0, -0.04, 0.20, 0.08, 0.20, 0.0, 0.0]
+        pawRot.keyTimes = [0.0, 0.26, 0.30, 0.37, 0.42, 0.47, 0.54, 1.0]
+        pawRot.duration = 5.6
+        pawRot.repeatCount = .infinity
+        pawRot.preferredFrameRateRange = ambientRange
+        pawLayer.add(pawRot, forKey: "pawWave")
+
+        // 8. Tail Wag
+        let tailRot = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        tailRot.values = [0.0, 0.0, -0.08, 0.08, -0.07, 0.0, 0.0]
+        tailRot.keyTimes = [0.0, 0.32, 0.37, 0.42, 0.47, 0.54, 1.0]
+        tailRot.duration = 5.6
+        tailRot.repeatCount = .infinity
+        tailRot.preferredFrameRateRange = ambientRange
+        tailLayer.add(tailRot, forKey: "tailWag")
+
+        // 9. Eye Blink
+        let blink = CAKeyframeAnimation(keyPath: "transform.scale.y")
+        blink.values = [1.0, 1.0, 0.12, 1.0, 1.0, 0.12, 1.0, 1.0]
+        blink.keyTimes = [0.0, 0.21, 0.23, 0.25, 0.77, 0.79, 0.81, 1.0]
+        blink.duration = 5.6
+        blink.repeatCount = .infinity
+        blink.preferredFrameRateRange = ambientRange
+        eyeLayer.add(blink, forKey: "eyeBlink")
     }
 
-    // MARK: - 配色映射
+    private func makeRippleAnimation(
+        duration: Double,
+        maxAlpha: Double,
+        timeOffset: Double,
+        rateRange: CAFrameRateRange
+    ) -> CAAnimationGroup {
+        let group = CAAnimationGroup()
+        group.duration = duration
+        group.repeatCount = .infinity
+        group.timeOffset = timeOffset
+        group.preferredFrameRateRange = rateRange
 
-    private func accentColor(isDark: Bool) -> Color {
-        switch (rating, isDark) {
-        case (.excellent, true):
-            return Color(red: 56.0 / 255.0, green: 229.0 / 255.0, blue: 148.0 / 255.0)
-        case (.excellent, false):
-            return Color(red: 16.0 / 255.0, green: 185.0 / 255.0, blue: 129.0 / 255.0)
-        case (.good, true):
-            return Color(red: 56.0 / 255.0, green: 189.0 / 255.0, blue: 248.0 / 255.0)
-        case (.good, false):
-            return Color(red: 2.0 / 255.0, green: 132.0 / 255.0, blue: 199.0 / 255.0)
-        case (.fair, true):
-            return Color(red: 251.0 / 255.0, green: 191.0 / 255.0, blue: 36.0 / 255.0)
-        case (.fair, false):
-            return Color(red: 217.0 / 255.0, green: 119.0 / 255.0, blue: 6.0 / 255.0)
-        case (.needsAttention, true):
-            return Color(red: 248.0 / 255.0, green: 113.0 / 255.0, blue: 113.0 / 255.0)
-        case (.needsAttention, false):
-            return Color(red: 220.0 / 255.0, green: 38.0 / 255.0, blue: 38.0 / 255.0)
-        }
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 0.72
+        scale.toValue = 1.42
+        scale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+
+        let alpha = CAKeyframeAnimation(keyPath: "opacity")
+        alpha.values = [0.0, maxAlpha, maxAlpha * 0.48, 0.0]
+        alpha.keyTimes = [0.0, 0.16, 0.56, 1.0]
+
+        group.animations = [scale, alpha]
+        return group
     }
 
-    // MARK: - Layer 1~4: 增强背景光晕 / 双涟漪 / 旋转轨道 / 档位粒子
+    // MARK: - Layer & Sprite Helpers
 
-    private func drawBackgroundEffects(
-        in base: inout GraphicsContext,
-        bg: RabbitBackgroundPose,
-        accent: Color,
-        isDark: Bool
-    ) {
-        // Enhanced 1.35x preset parameters
-        let haloAlpha = 1.0
-        let ringStroke: CGFloat = 18.0
-        let ringAlpha = 0.90
-        let orbitStroke: CGFloat = 15.0
-        let orbitAlpha = 0.78
-        let pMul = 1.12
+    private func makeCenteredSpriteLayer(size: CGSize, position: CGPoint, image: CGImage?) -> CALayer {
+        let l = CALayer()
+        l.bounds = CGRect(origin: .zero, size: size)
+        l.position = position
+        l.contents = image
+        l.contentsGravity = .resize
+        return l
+    }
 
-        // Layer 1: Breathing Radial Aura
-        let boost0 = min(0.95, 0.78 * haloAlpha * (isDark ? 1.0 : 0.85))
-        let boost1 = min(0.65, 0.42 * haloAlpha * (isDark ? 1.0 : 0.82))
-        var auraCtx = base
-        applyPivotTransform(&auraCtx, cx: 256, cy: 260, sx: bg.auraScale, sy: bg.auraScale)
-        let auraCircle = Path(ellipseIn: CGRect(x: 256 - 235, y: 260 - 235, width: 470, height: 470))
-        auraCtx.fill(
-            auraCircle,
-            with: .radialGradient(
-                Gradient(stops: [
-                    .init(color: accent.opacity(boost0), location: 0.0),
-                    .init(color: accent.opacity(boost1), location: 0.55),
-                    .init(color: accent.opacity(0.0), location: 1.0)
-                ]),
-                center: CGPoint(x: 256, y: 260),
-                startRadius: 0,
-                endRadius: 235
-            )
+    private func makePivotSpriteLayer(srcRect: CGRect, cx: CGFloat, cy: CGFloat, image: CGImage?) -> CALayer {
+        let l = CALayer()
+        l.bounds = CGRect(origin: .zero, size: srcRect.size)
+        l.anchorPoint = CGPoint(
+            x: (cx - srcRect.minX) / srcRect.width,
+            y: (srcRect.maxY - cy) / srcRect.height
         )
+        l.position = CGPoint(x: cx, y: Self.designHeight - cy)
+        l.contents = image
+        l.contentsGravity = .resize
+        return l
+    }
 
-        // Layer 2: Staggered Dual Sonar Ripples
-        let rippleCircle = Path(ellipseIn: CGRect(x: 256 - 165, y: 260 - 165, width: 330, height: 330))
-        let r1 = RabbitMotionEngine.rippleCurve(phase: bg.ringPhase, maxAlpha: ringAlpha)
-        var r1Ctx = base
-        applyPivotTransform(&r1Ctx, cx: 256, cy: 260, sx: r1.scale, sy: r1.scale)
-        r1Ctx.stroke(rippleCircle, with: .color(accent.opacity(r1.alpha)), lineWidth: ringStroke)
+    private func removeAnimationsRecursively(layer: CALayer) {
+        layer.removeAllAnimations()
+        layer.sublayers?.forEach { removeAnimationsRecursively(layer: $0) }
+    }
 
-        let r2Phase = (bg.ringPhase + 0.5).truncatingRemainder(dividingBy: 1.0)
-        let r2 = RabbitMotionEngine.rippleCurve(phase: r2Phase, maxAlpha: ringAlpha * 0.82)
-        var r2Ctx = base
-        applyPivotTransform(&r2Ctx, cx: 256, cy: 260, sx: r2.scale, sy: r2.scale)
-        r2Ctx.stroke(rippleCircle, with: .color(accent.opacity(r2.alpha)), lineWidth: max(8, (ringStroke * 0.78).rounded()))
+    // Tight crop rects in 464x484 design coordinates
+    private static let backEarRect = CGRect(x: 114, y: 38, width: 204, height: 94)
+    private static let torsoRect = CGRect(x: 114, y: 28, width: 328, height: 456)
+    private static let tailRect = CGRect(x: 70, y: 316, width: 122, height: 122)
+    private static let eyeRect = CGRect(x: 314, y: 63, width: 36, height: 36)
+    private static let frontEarRect = CGRect(x: 100, y: 50, width: 192, height: 162)
+    private static let pawRect = CGRect(x: 316, y: 212, width: 108, height: 190)
 
-        // Layer 3: Continuous Rotating 3-Fold Orbital Arc
-        var orbitCtx = base
-        applyPivotTransform(&orbitCtx, cx: 256, cy: 260, deg: bg.orbitDeg)
-        let orbitCircle = Path(ellipseIn: CGRect(x: 256 - 204, y: 260 - 204, width: 408, height: 408))
-        orbitCtx.stroke(
-            orbitCircle,
-            with: .color(accent.opacity(orbitAlpha)),
-            style: StrokeStyle(lineWidth: orbitStroke, lineCap: .round, dash: [172, 255.26])
+    // MARK: - Pre-Rendered Bitmap Sprite Cache
+
+    private static func cachedSprites(for rating: HealthRating, isDark: Bool) -> SpriteSet {
+        let key = "\(rating.rawValue)_\(isDark)"
+        if let existing = spriteCache[key] {
+            return existing
+        }
+
+        let accent = accentNSColor(for: rating, isDark: isDark)
+        let strokeColor = isDark
+            ? NSColor(red: 15.0 / 255.0, green: 23.0 / 255.0, blue: 42.0 / 255.0, alpha: 1.0).cgColor
+            : NSColor(red: 30.0 / 255.0, green: 41.0 / 255.0, blue: 59.0 / 255.0, alpha: 1.0).cgColor
+        let pinkEar = NSColor(red: 253.0 / 255.0, green: 164.0 / 255.0, blue: 175.0 / 255.0, alpha: 1.0)
+        let backEarFur = NSColor(red: 248.0 / 255.0, green: 250.0 / 255.0, blue: 252.0 / 255.0, alpha: 1.0).cgColor
+        let white = NSColor.white.cgColor
+
+        let aura = renderAuraImage(accent: accent, isDark: isDark)
+
+        let ripple1 = renderDesignBitmap(srcRect: CGRect(x: 0, y: 0, width: 360, height: 360)) { ctx in
+            ctx.setStrokeColor(accent.withAlphaComponent(0.90).cgColor)
+            ctx.setLineWidth(18.0)
+            ctx.strokeEllipse(in: CGRect(x: 15, y: 15, width: 330, height: 330))
+        }
+        let ripple2 = renderDesignBitmap(srcRect: CGRect(x: 0, y: 0, width: 360, height: 360)) { ctx in
+            ctx.setStrokeColor(accent.withAlphaComponent(0.74).cgColor)
+            ctx.setLineWidth(14.0)
+            ctx.strokeEllipse(in: CGRect(x: 15, y: 15, width: 330, height: 330))
+        }
+        let orbit = renderDesignBitmap(srcRect: CGRect(x: 0, y: 0, width: 436, height: 436)) { ctx in
+            ctx.setStrokeColor(accent.withAlphaComponent(0.78).cgColor)
+            ctx.setLineWidth(15.0)
+            ctx.setLineCap(.round)
+            ctx.setLineDash(phase: 0, lengths: [172, 255.26])
+            ctx.strokeEllipse(in: CGRect(x: 14, y: 14, width: 408, height: 408))
+        }
+
+        let particles = buildParticleSprites(for: rating, accent: accent)
+
+        let backEar = renderDesignBitmap(srcRect: backEarRect) { ctx in
+            ctx.setFillColor(strokeColor)
+            ctx.addPath(RabbitPaths.backEarSolid)
+            ctx.fillPath()
+            ctx.setFillColor(backEarFur)
+            ctx.addPath(RabbitPaths.backEarFill)
+            ctx.fillPath()
+        }
+
+        let torso = renderDesignBitmap(srcRect: torsoRect) { ctx in
+            ctx.setFillColor(strokeColor)
+            ctx.addPath(RabbitPaths.bodySolidTorso)
+            ctx.fillPath()
+            ctx.setFillColor(white)
+            ctx.addPath(RabbitPaths.bodyFillTorso)
+            ctx.fillPath()
+            ctx.setFillColor(strokeColor)
+            ctx.addPath(RabbitPaths.noseTip)
+            ctx.fillPath()
+
+            ctx.setStrokeColor(strokeColor)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.setLineWidth(6.5)
+            ctx.addPath(RabbitPaths.mouthMain)
+            ctx.strokePath()
+
+            ctx.setLineJoin(.miter)
+            ctx.setLineWidth(5.5)
+            ctx.addPath(RabbitPaths.mouthDimple)
+            ctx.strokePath()
+        }
+
+        let tail = renderDesignBitmap(srcRect: tailRect) { ctx in
+            ctx.setFillColor(strokeColor)
+            ctx.addPath(RabbitPaths.tailSolid)
+            ctx.fillPath()
+            ctx.setFillColor(white)
+            ctx.addPath(RabbitPaths.tailFill)
+            ctx.fillPath()
+        }
+
+        let eye = renderDesignBitmap(srcRect: eyeRect) { ctx in
+            ctx.setFillColor(strokeColor)
+            ctx.fillEllipse(in: CGRect(x: 332 - 12.5, y: 81 - 12.5, width: 25, height: 25))
+            ctx.setFillColor(white)
+            ctx.fillEllipse(in: CGRect(x: 336 - 4.0, y: 76 - 4.0, width: 8, height: 8))
+        }
+
+        let frontEar = renderDesignBitmap(srcRect: frontEarRect) { ctx in
+            ctx.setFillColor(white)
+            ctx.addPath(RabbitPaths.frontEarInnerBridge)
+            ctx.fillPath()
+            ctx.setFillColor(pinkEar.withAlphaComponent(0.45).cgColor)
+            ctx.addPath(RabbitPaths.frontEarPink)
+            ctx.fillPath()
+            ctx.setStrokeColor(strokeColor)
+            ctx.setLineWidth(17.5)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.addPath(RabbitPaths.frontEarOpenStroke)
+            ctx.strokePath()
+        }
+
+        let paw = renderDesignBitmap(srcRect: pawRect) { ctx in
+            ctx.setFillColor(white)
+            ctx.addPath(RabbitPaths.pawInnerBridge)
+            ctx.fillPath()
+
+            ctx.saveGState()
+            ctx.translateBy(x: 386, y: 356)
+            ctx.rotate(by: -12.0 * .pi / 180.0)
+            ctx.setFillColor(pinkEar.withAlphaComponent(0.46).cgColor)
+            ctx.fillEllipse(in: CGRect(x: -6.5, y: -10.5, width: 13, height: 21))
+            ctx.restoreGState()
+
+            ctx.setStrokeColor(strokeColor)
+            ctx.setLineWidth(17.5)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.addPath(RabbitPaths.pawOpenStroke)
+            ctx.strokePath()
+        }
+
+        let set = SpriteSet(
+            aura: aura,
+            ripple1: ripple1,
+            ripple2: ripple2,
+            orbit: orbit,
+            particles: particles,
+            backEar: backEar,
+            torso: torso,
+            tail: tail,
+            eye: eye,
+            frontEar: frontEar,
+            paw: paw
         )
+        spriteCache[key] = set
+        return set
+    }
 
-        // Layer 4: Tier-Specific Particles
+    private static func buildParticleSprites(
+        for rating: HealthRating,
+        accent: NSColor
+    ) -> [(cx: CGFloat, cy: CGFloat, rect: CGRect, image: CGImage?)] {
         switch rating {
         case .excellent:
-            var s1 = base
-            applyPivotTransform(&s1, cx: 438, cy: 78, ty: bg.pFloat, deg: bg.pRot, sx: bg.pPulse1 * pMul, sy: bg.pPulse1 * pMul)
-            s1.fill(RabbitPaths.star1Outer, with: .color(accent))
-            s1.fill(RabbitPaths.star1Inner, with: .color(.white.opacity(0.90)))
-
-            var s2 = base
-            applyPivotTransform(&s2, cx: 76, cy: 62, ty: -bg.pFloat * 0.7, deg: -bg.pRot, sx: bg.pPulse2 * pMul, sy: bg.pPulse2 * pMul)
-            s2.fill(RabbitPaths.star2Outer, with: .color(accent.opacity(0.92)))
-            s2.fill(RabbitPaths.star2Inner, with: .color(.white.opacity(0.88)))
-
-            var s3 = base
-            applyPivotTransform(&s3, cx: 454, cy: 250, ty: bg.pFloat * 0.8, deg: bg.pRot * 0.8, sx: bg.pPulse3 * pMul, sy: bg.pPulse3 * pMul)
-            s3.fill(RabbitPaths.star3Outer, with: .color(accent.opacity(0.88)))
-            s3.fill(RabbitPaths.star3Inner, with: .color(.white.opacity(0.85)))
+            let r1 = CGRect(x: 392, y: 32, width: 92, height: 92)
+            let i1 = renderDesignBitmap(srcRect: r1) { ctx in
+                ctx.setFillColor(accent.cgColor)
+                ctx.addPath(RabbitPaths.star1Outer)
+                ctx.fillPath()
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.90).cgColor)
+                ctx.addPath(RabbitPaths.star1Inner)
+                ctx.fillPath()
+            }
+            let r2 = CGRect(x: 38, y: 24, width: 76, height: 76)
+            let i2 = renderDesignBitmap(srcRect: r2) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.92).cgColor)
+                ctx.addPath(RabbitPaths.star2Outer)
+                ctx.fillPath()
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.88).cgColor)
+                ctx.addPath(RabbitPaths.star2Inner)
+                ctx.fillPath()
+            }
+            let r3 = CGRect(x: 420, y: 216, width: 68, height: 68)
+            let i3 = renderDesignBitmap(srcRect: r3) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.88).cgColor)
+                ctx.addPath(RabbitPaths.star3Outer)
+                ctx.fillPath()
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+                ctx.addPath(RabbitPaths.star3Inner)
+                ctx.fillPath()
+            }
+            return [(438, 78, r1, i1), (76, 62, r2, i2), (454, 250, r3, i3)]
 
         case .good:
-            var o1 = base
-            applyPivotTransform(&o1, cx: 436, cy: 95, ty: bg.pFloat, sx: bg.pPulse1 * pMul, sy: bg.pPulse1 * pMul)
-            o1.fill(Path(ellipseIn: CGRect(x: 436 - 24, y: 95 - 24, width: 48, height: 48)), with: .color(accent.opacity(0.86)))
-            o1.fill(Path(ellipseIn: CGRect(x: 429 - 8, y: 88 - 8, width: 16, height: 16)), with: .color(.white.opacity(0.88)))
-
-            var o2 = base
-            applyPivotTransform(&o2, cx: 78, cy: 175, ty: bg.pFloat * 0.85, sx: bg.pPulse2 * pMul, sy: bg.pPulse2 * pMul)
-            o2.fill(Path(ellipseIn: CGRect(x: 78 - 19, y: 175 - 19, width: 38, height: 38)), with: .color(accent.opacity(0.82)))
-            o2.fill(Path(ellipseIn: CGRect(x: 72 - 6.5, y: 169 - 6.5, width: 13, height: 13)), with: .color(.white.opacity(0.85)))
-
-            var o3 = base
-            applyPivotTransform(&o3, cx: 445, cy: 265, ty: bg.pFloat * 0.7, sx: bg.pPulse3 * pMul, sy: bg.pPulse3 * pMul)
-            o3.fill(Path(ellipseIn: CGRect(x: 445 - 16, y: 265 - 16, width: 32, height: 32)), with: .color(accent.opacity(0.78)))
-            o3.fill(Path(ellipseIn: CGRect(x: 440 - 5.5, y: 260 - 5.5, width: 11, height: 11)), with: .color(.white.opacity(0.82)))
+            let r1 = CGRect(x: 408, y: 67, width: 56, height: 56)
+            let i1 = renderDesignBitmap(srcRect: r1) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.86).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 436 - 24, y: 95 - 24, width: 48, height: 48))
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.88).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 429 - 8, y: 88 - 8, width: 16, height: 16))
+            }
+            let r2 = CGRect(x: 55, y: 152, width: 46, height: 46)
+            let i2 = renderDesignBitmap(srcRect: r2) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.82).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 78 - 19, y: 175 - 19, width: 38, height: 38))
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 72 - 6.5, y: 169 - 6.5, width: 13, height: 13))
+            }
+            let r3 = CGRect(x: 425, y: 245, width: 40, height: 40)
+            let i3 = renderDesignBitmap(srcRect: r3) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.78).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 445 - 16, y: 265 - 16, width: 32, height: 32))
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.82).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 440 - 5.5, y: 260 - 5.5, width: 11, height: 11))
+            }
+            return [(436, 95, r1, i1), (78, 175, r2, i2), (445, 265, r3, i3)]
 
         case .fair:
-            var d1 = base
-            applyPivotTransform(&d1, cx: 438, cy: 82, ty: bg.pFloat, sx: bg.pPulse1 * pMul, sy: bg.pPulse1 * pMul)
-            d1.fill(Path(ellipseIn: CGRect(x: 438 - 28, y: 82 - 28, width: 56, height: 56)), with: .color(accent.opacity(0.28)))
-            d1.fill(Path(ellipseIn: CGRect(x: 438 - 20, y: 82 - 20, width: 40, height: 40)), with: .color(accent.opacity(0.95)))
-            d1.fill(Path(ellipseIn: CGRect(x: 438 - 7, y: 82 - 7, width: 14, height: 14)), with: .color(.white.opacity(0.92)))
-
-            var d2 = base
-            applyPivotTransform(&d2, cx: 74, cy: 155, ty: bg.pFloat * 0.75, sx: bg.pPulse2 * pMul, sy: bg.pPulse2 * pMul)
-            d2.fill(Path(ellipseIn: CGRect(x: 74 - 22, y: 155 - 22, width: 44, height: 44)), with: .color(accent.opacity(0.28)))
-            d2.fill(Path(ellipseIn: CGRect(x: 74 - 15, y: 155 - 15, width: 30, height: 30)), with: .color(accent.opacity(0.92)))
-            d2.fill(Path(ellipseIn: CGRect(x: 74 - 5.5, y: 155 - 5.5, width: 11, height: 11)), with: .color(.white.opacity(0.90)))
+            let r1 = CGRect(x: 406, y: 50, width: 64, height: 64)
+            let i1 = renderDesignBitmap(srcRect: r1) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.28).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 438 - 28, y: 82 - 28, width: 56, height: 56))
+                ctx.setFillColor(accent.withAlphaComponent(0.95).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 438 - 20, y: 82 - 20, width: 40, height: 40))
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.92).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 438 - 7, y: 82 - 7, width: 14, height: 14))
+            }
+            let r2 = CGRect(x: 48, y: 129, width: 52, height: 52)
+            let i2 = renderDesignBitmap(srcRect: r2) { ctx in
+                ctx.setFillColor(accent.withAlphaComponent(0.28).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 74 - 22, y: 155 - 22, width: 44, height: 44))
+                ctx.setFillColor(accent.withAlphaComponent(0.92).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 74 - 15, y: 155 - 15, width: 30, height: 30))
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.90).cgColor)
+                ctx.fillEllipse(in: CGRect(x: 74 - 5.5, y: 155 - 5.5, width: 11, height: 11))
+            }
+            return [(438, 82, r1, i1), (74, 155, r2, i2)]
 
         case .needsAttention:
-            var b1 = base
-            applyPivotTransform(&b1, cx: 436, cy: 86, ty: bg.pFloat * 0.6, deg: bg.pRot, sx: bg.pPulse1 * pMul, sy: bg.pPulse1 * pMul)
-            b1.fill(RabbitPaths.boltOuter, with: .color(accent))
-            b1.fill(RabbitPaths.boltInner, with: .color(.white.opacity(0.58)))
-
-            var a2 = base
-            applyPivotTransform(&a2, cx: 76, cy: 150, ty: -bg.pFloat * 0.5, deg: -bg.pRot, sx: bg.pPulse2 * pMul, sy: bg.pPulse2 * pMul)
-            a2.fill(Path(ellipseIn: CGRect(x: 76 - 24, y: 150 - 24, width: 48, height: 48)), with: .color(accent))
-            a2.fill(Path(roundedRect: CGRect(x: 71.5, y: 135, width: 9, height: 16), cornerRadius: 4.5), with: .color(.white))
-            a2.fill(Path(ellipseIn: CGRect(x: 76 - 4.8, y: 160 - 4.8, width: 9.6, height: 9.6)), with: .color(.white))
+            let r1 = CGRect(x: 400, y: 22, width: 72, height: 130)
+            let i1 = renderDesignBitmap(srcRect: r1) { ctx in
+                ctx.setFillColor(accent.cgColor)
+                ctx.addPath(RabbitPaths.boltOuter)
+                ctx.fillPath()
+                ctx.setFillColor(NSColor.white.withAlphaComponent(0.58).cgColor)
+                ctx.addPath(RabbitPaths.boltInner)
+                ctx.fillPath()
+            }
+            let r2 = CGRect(x: 48, y: 122, width: 56, height: 56)
+            let i2 = renderDesignBitmap(srcRect: r2) { ctx in
+                ctx.setFillColor(accent.cgColor)
+                ctx.fillEllipse(in: CGRect(x: 76 - 24, y: 150 - 24, width: 48, height: 48))
+                ctx.setFillColor(NSColor.white.cgColor)
+                let barPath = CGPath(roundedRect: CGRect(x: 71.5, y: 135, width: 9, height: 16), cornerWidth: 4.5, cornerHeight: 4.5, transform: nil)
+                ctx.addPath(barPath)
+                ctx.fillPath()
+                ctx.fillEllipse(in: CGRect(x: 76 - 4.8, y: 160 - 4.8, width: 9.6, height: 9.6))
+            }
+            return [(436, 86, r1, i1), (76, 150, r2, i2)]
         }
     }
 
-    // MARK: - Style 1: 菜单栏白兔分体骨骼 (含鼻嘴微动、无脸颊腮红)
+    private static func renderDesignBitmap(srcRect: CGRect, draw: (CGContext) -> Void) -> CGImage? {
+        let pxW = max(2, Int(ceil(srcRect.width * bitmapScale)))
+        let pxH = max(2, Int(ceil(srcRect.height * bitmapScale)))
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: pxW,
+                  height: pxH,
+                  bitsPerComponent: 8,
+                  bytesPerRow: pxW * 4,
+                  space: cs,
+                  bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+              ) else {
+            return nil
+        }
 
-    private func drawWhiteRabbit(
-        in base: inout GraphicsContext,
-        live: RabbitLivingPose,
-        strokeColor: Color
-    ) {
-        let pinkEar = Color(red: 253.0 / 255.0, green: 164.0 / 255.0, blue: 175.0 / 255.0)
-        let backEarFur = Color(red: 248.0 / 255.0, green: 250.0 / 255.0, blue: 252.0 / 255.0)
+        // Flip Y from bottom-left CGContext coords into flipped top-left design coords
+        ctx.translateBy(x: 0, y: CGFloat(pxH))
+        ctx.scaleBy(x: bitmapScale, y: -bitmapScale)
+        ctx.translateBy(x: -srcRect.minX, y: -srcRect.minY)
+        ctx.setShouldAntialias(true)
+        ctx.setAllowsAntialiasing(true)
+        draw(ctx)
+        return ctx.makeImage()
+    }
 
-        var root = base
-        applyPivotTransform(&root, cx: 280, cy: 472, tx: live.x, ty: live.y, deg: live.tilt, sx: live.sx, sy: live.sy)
+    private static func renderAuraImage(accent: NSColor, isDark: Bool) -> CGImage? {
+        let dim = 96
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                  data: nil,
+                  width: dim,
+                  height: dim,
+                  bitsPerComponent: 8,
+                  bytesPerRow: dim * 4,
+                  space: cs,
+                  bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+              ) else {
+            return nil
+        }
 
-        // 1. Back Ear
-        var backEar = root
-        applyPivotTransform(&backEar, cx: 286, cy: 66, deg: live.earB)
-        backEar.fill(RabbitPaths.backEarSolid, with: .color(strokeColor))
-        backEar.fill(RabbitPaths.backEarFill, with: .color(backEarFur))
+        let boost0 = min(0.95, 0.78 * (isDark ? 1.0 : 0.85))
+        let boost1 = min(0.65, 0.42 * (isDark ? 1.0 : 0.82))
+        let c0 = accent.withAlphaComponent(boost0).cgColor
+        let c1 = accent.withAlphaComponent(boost1).cgColor
+        let c2 = accent.withAlphaComponent(0.0).cgColor
+        let locations: [CGFloat] = [0.0, 0.55, 1.0]
 
-        // 2. Torso
-        root.fill(RabbitPaths.bodySolidTorso, with: .color(strokeColor))
-        root.fill(RabbitPaths.bodyFillTorso, with: .color(.white))
-
-        // 3. Tail
-        var tail = root
-        applyPivotTransform(&tail, cx: 162, cy: 377, deg: live.tail)
-        tail.fill(RabbitPaths.tailSolid, with: .color(strokeColor))
-        tail.fill(RabbitPaths.tailFill, with: .color(.white))
-
-        // 4. Nose & 3/4 Profile Mouth (anchored around 398, 106 for sniff burst)
-        var snout = root
-        applyPivotTransform(&snout, cx: 398, cy: 106, tx: live.cheekX, ty: live.cheekY, sx: live.cheekScale, sy: live.cheekScale)
-        snout.fill(RabbitPaths.noseTip, with: .color(strokeColor))
-        snout.stroke(
-            RabbitPaths.mouthMain,
-            with: .color(strokeColor),
-            style: StrokeStyle(lineWidth: 6.5, lineCap: .round, lineJoin: .round)
-        )
-        snout.stroke(
-            RabbitPaths.mouthDimple,
-            with: .color(strokeColor),
-            style: StrokeStyle(lineWidth: 5.5, lineCap: .round)
-        )
-
-        // 5. Eyes (blink + pupil gaze or happy smile eye)
-        if live.smile {
-            root.stroke(
-                RabbitPaths.eyeSmile,
-                with: .color(strokeColor),
-                style: StrokeStyle(lineWidth: 10.5, lineCap: .round)
+        if let grad = CGGradient(colorsSpace: cs, colors: [c0, c1, c2] as CFArray, locations: locations) {
+            let center = CGPoint(x: CGFloat(dim) * 0.5, y: CGFloat(dim) * 0.5)
+            ctx.drawRadialGradient(
+                grad,
+                startCenter: center,
+                startRadius: 0,
+                endCenter: center,
+                endRadius: CGFloat(dim) * 0.5,
+                options: [.drawsAfterEndLocation]
             )
-        } else {
-            var eyeCtx = root
-            applyPivotTransform(&eyeCtx, cx: 332, cy: 81, sy: live.blink)
-            eyeCtx.fill(Path(ellipseIn: CGRect(x: 332 - 12.5, y: 81 - 12.5, width: 25, height: 25)), with: .color(strokeColor))
-            var pupilCtx = eyeCtx
-            pupilCtx.translateBy(x: live.pupilX, y: live.pupilY)
-            pupilCtx.fill(Path(ellipseIn: CGRect(x: 336 - 4, y: 76 - 4, width: 8, height: 8)), with: .color(.white))
         }
 
-        // 6. Front Ear
-        var frontEar = root
-        applyPivotTransform(&frontEar, cx: 266, cy: 112, deg: live.earF)
-        frontEar.fill(RabbitPaths.frontEarInnerBridge, with: .color(.white))
-        frontEar.fill(RabbitPaths.frontEarPink, with: .color(pinkEar.opacity(0.45)))
-        frontEar.stroke(
-            RabbitPaths.frontEarOpenStroke,
-            with: .color(strokeColor),
-            style: StrokeStyle(lineWidth: 17.5, lineCap: .round, lineJoin: .round)
-        )
-
-        // 7. Articulated Front Paw
-        var paw = root
-        applyPivotTransform(&paw, cx: 368, cy: 232, deg: live.paw)
-        paw.fill(RabbitPaths.pawInnerBridge, with: .color(.white))
-        var padCtx = paw
-        applyPivotTransform(&padCtx, cx: 386, cy: 356, deg: -12)
-        padCtx.fill(Path(ellipseIn: CGRect(x: 386 - 6.5, y: 356 - 10.5, width: 13, height: 21)), with: .color(pinkEar.opacity(0.46)))
-        paw.stroke(
-            RabbitPaths.pawOpenStroke,
-            with: .color(strokeColor),
-            style: StrokeStyle(lineWidth: 17.5, lineCap: .round, lineJoin: .round)
-        )
+        return ctx.makeImage()
     }
 
-    private func applyPivotTransform(
-        _ ctx: inout GraphicsContext,
-        cx: CGFloat,
-        cy: CGFloat,
-        tx: CGFloat = 0,
-        ty: CGFloat = 0,
-        deg: Double = 0,
-        sx: CGFloat = 1,
-        sy: CGFloat = 1
-    ) {
-        ctx.translateBy(x: cx + tx, y: cy + ty)
-        if deg != 0 {
-            ctx.rotate(by: .degrees(deg))
-        }
-        if sx != 1 || sy != 1 {
-            ctx.scaleBy(x: sx, y: sy)
-        }
-        ctx.translateBy(x: -cx, y: -cy)
-    }
-}
-
-// MARK: - 生物微动 + 增强背景动效引擎
-
-private struct RabbitBackgroundPose: Sendable {
-    var auraScale: Double
-    var ringPhase: Double
-    var orbitDeg: Double
-    var pPulse1: Double
-    var pPulse2: Double
-    var pPulse3: Double
-    var pFloat: Double
-    var pRot: Double
-}
-
-private struct RabbitLivingPose: Sendable {
-    var x: Double = 0
-    var y: Double = 0
-    var sx: Double = 1
-    var sy: Double = 1
-    var tilt: Double = 0
-    var earF: Double = 0
-    var earB: Double = 0
-    var tail: Double = 0
-    var paw: Double = 0
-    var blink: Double = 1.0
-    var smile: Bool = false
-    var pupilX: Double = 0
-    var pupilY: Double = 0
-    var cheekX: Double = 0
-    var cheekY: Double = 0
-    var cheekScale: Double = 1.0
-}
-
-private enum RabbitMotionEngine {
-    static func backgroundCycleSeconds(for rating: HealthRating) -> Double {
+    private static func backgroundCycleSeconds(for rating: HealthRating) -> Double {
         switch rating {
         case .excellent: return 1.80
         case .good: return 2.60
@@ -334,241 +750,29 @@ private enum RabbitMotionEngine {
         }
     }
 
-    static func smoothstep(_ e0: Double, _ e1: Double, _ x: Double) -> Double {
-        let k = max(0.0, min(1.0, (x - e0) / (e1 - e0)))
-        return k * k * (3.0 - 2.0 * k)
-    }
-
-    static func rippleCurve(phase ph: Double, maxAlpha: Double) -> (scale: Double, alpha: Double) {
-        (0.72 + 0.70 * ph, maxAlpha * smoothstep(0.0, 0.16, ph) * (1.0 - ph))
-    }
-
-    static func asymBreath(_ sec: Double, period: Double) -> Double {
-        let ph = (sec.truncatingRemainder(dividingBy: period) + period)
-            .truncatingRemainder(dividingBy: period) / period
-        if ph < 0.40 { return 0.5 - 0.5 * cos((ph / 0.40) * .pi) }
-        if ph < 0.82 { return 0.5 + 0.5 * cos(((ph - 0.40) / 0.42) * .pi) }
-        return 0.0
-    }
-
-    static func poseWindow(_ u: Double, _ start: Double, _ end: Double, _ rise: Double, _ fall: Double) -> Double {
-        smoothstep(start, start + rise, u) * (1.0 - smoothstep(end - fall, end, u))
-    }
-
-    static func earFlick(_ u: Double, _ start: Double, _ dur: Double, _ amp: Double) -> Double {
-        guard u > start && u < start + dur else { return 0.0 }
-        let k = (u - start) / dur
-        if k < 0.15 { return amp * smoothstep(0.0, 0.15, k) }
-        let k2 = (k - 0.15) / 0.85
-        return amp * exp(-3.2 * k2) * cos(k2 * .pi * 2.5) * (1.0 - smoothstep(0.85, 1.0, k))
-    }
-
-    static func sniffBurst(_ u: Double, _ start: Double, _ dur: Double, _ count: Double) -> Double {
-        guard u > start && u < start + dur else { return 0.0 }
-        let k = (u - start) / dur
-        return sin(k * .pi) * (0.5 - 0.5 * cos(k * .pi * 2.0 * count))
-    }
-
-    static func blinkScale(_ u: Double, _ times: [Double]) -> Double {
-        var s = 1.0
-        for t in times {
-            let d = abs(u - t)
-            if d < 0.07 {
-                s = min(s, 0.10 + 0.90 * smoothstep(0.0, 0.07, d))
-            }
+    private static func accentNSColor(for rating: HealthRating, isDark: Bool) -> NSColor {
+        switch (rating, isDark) {
+        case (.excellent, true):
+            return NSColor(red: 56.0 / 255.0, green: 229.0 / 255.0, blue: 148.0 / 255.0, alpha: 1.0)
+        case (.excellent, false):
+            return NSColor(red: 16.0 / 255.0, green: 185.0 / 255.0, blue: 129.0 / 255.0, alpha: 1.0)
+        case (.good, true):
+            return NSColor(red: 56.0 / 255.0, green: 189.0 / 255.0, blue: 248.0 / 255.0, alpha: 1.0)
+        case (.good, false):
+            return NSColor(red: 2.0 / 255.0, green: 132.0 / 255.0, blue: 199.0 / 255.0, alpha: 1.0)
+        case (.fair, true):
+            return NSColor(red: 251.0 / 255.0, green: 191.0 / 255.0, blue: 36.0 / 255.0, alpha: 1.0)
+        case (.fair, false):
+            return NSColor(red: 217.0 / 255.0, green: 119.0 / 255.0, blue: 6.0 / 255.0, alpha: 1.0)
+        case (.needsAttention, true):
+            return NSColor(red: 248.0 / 255.0, green: 113.0 / 255.0, blue: 113.0 / 255.0, alpha: 1.0)
+        case (.needsAttention, false):
+            return NSColor(red: 220.0 / 255.0, green: 38.0 / 255.0, blue: 38.0 / 255.0, alpha: 1.0)
         }
-        return s
-    }
-
-    static func sampleBackground(rating: HealthRating, phase p: Double) -> RabbitBackgroundPose {
-        let tau = Double.pi * 2.0
-        switch rating {
-        case .excellent:
-            let breath = 0.5 - 0.5 * cos(p * tau)
-            return RabbitBackgroundPose(
-                auraScale: 0.84 + 0.36 * breath,
-                ringPhase: p,
-                orbitDeg: 240.0 * p,
-                pPulse1: 0.50 + 0.82 * sin(p * tau) * sin(p * tau),
-                pPulse2: 0.50 + 0.78 * cos(p * tau) * cos(p * tau),
-                pPulse3: 0.52 + 0.74 * sin(p * tau + 1.1) * sin(p * tau + 1.1),
-                pFloat: -24.0 * sin(p * tau),
-                pRot: 18.0 * sin(p * tau)
-            )
-        case .good:
-            let rise = 0.5 - 0.5 * cos(p * tau)
-            return RabbitBackgroundPose(
-                auraScale: 0.84 + 0.32 * rise,
-                ringPhase: p,
-                orbitDeg: 120.0 * p,
-                pPulse1: 0.76 + 0.44 * rise,
-                pPulse2: 0.74 + 0.44 * (0.5 - 0.5 * cos(p * tau + 2.0)),
-                pPulse3: 0.72 + 0.44 * (0.5 - 0.5 * cos(p * tau + 4.0)),
-                pFloat: -32.0 * rise,
-                pRot: 0.0
-            )
-        case .fair:
-            let hop = max(0.0, sin(p * tau * 2.0))
-            return RabbitBackgroundPose(
-                auraScale: 0.86 + 0.36 * hop,
-                ringPhase: (p * 2.0).truncatingRemainder(dividingBy: 1.0),
-                orbitDeg: 240.0 * p,
-                pPulse1: 0.62 + 0.68 * hop,
-                pPulse2: 0.62 + 0.68 * (1.0 - hop),
-                pPulse3: 1.0,
-                pFloat: -22.0 * hop,
-                pRot: 0.0
-            )
-        case .needsAttention:
-            let shake = sin(p * tau * 3.0)
-            let pulse = 0.5 + 0.5 * sin(p * tau * 2.0)
-            return RabbitBackgroundPose(
-                auraScale: 0.88 + 0.38 * pulse,
-                ringPhase: p,
-                orbitDeg: 360.0 * p,
-                pPulse1: 0.68 + 0.68 * pulse,
-                pPulse2: 0.68 + 0.68 * (1.0 - pulse),
-                pPulse3: 1.0,
-                pFloat: -16.0 * pulse,
-                pRot: 9.0 * shake
-            )
-        }
-    }
-
-    static func sampleLiving(rating: HealthRating, sec: Double) -> RabbitLivingPose {
-        let tSec = max(0.0, sec)
-        var pose = RabbitLivingPose()
-
-        switch rating {
-        case .excellent:
-            let u = tSec.truncatingRemainder(dividingBy: 5.6)
-            let br = asymBreath(tSec, period: 2.6)
-            pose.sy += 0.012 * br
-            pose.sx -= 0.007 * br
-            pose.y -= 2.0 * br
-
-            let wListen = poseWindow(u, 0.35, 1.20, 0.18, 0.25)
-            pose.earF += earFlick(u, 0.35, 0.75, -7.5)
-            pose.earB += earFlick(u, 0.50, 0.65, -2.5) + earFlick(u, 4.85, 0.55, 5.5)
-            pose.pupilX += 1.2 * wListen
-            pose.pupilY -= 1.0 * wListen
-
-            let wAnt = poseWindow(u, 1.52, 1.82, 0.10, 0.10)
-            pose.y += 1.5 * wAnt
-            pose.sy -= 0.015 * wAnt
-            pose.sx += 0.010 * wAnt
-            pose.paw += 2.5 * wAnt
-
-            let wWave = poseWindow(u, 1.75, 2.95, 0.22, 0.32)
-            pose.y -= 9.5 * wWave
-            pose.tilt += 1.8 * wWave
-            pose.sy += 0.012 * wWave
-            pose.sx -= 0.007 * wWave
-            pose.smile = poseWindow(u, 1.82, 2.85, 0.12, 0.12) > 0.5
-            pose.paw += -10.5 * wWave - 3.8 * wWave * sin((u - 1.85) * .pi * 3.6)
-            pose.earF -= 4.5 * wWave
-            pose.earB -= 6.0 * wWave
-            pose.tail += 5.0 * wWave * sin((u - 1.8) * .pi * 4.0)
-
-            let sn = sniffBurst(u, 3.35, 0.65, 3.0)
-            pose.cheekX += 2.6 * sn
-            pose.cheekY -= 2.2 * sn
-            pose.cheekScale += 0.07 * sn
-            pose.tilt += 0.9 * sn
-            pose.earF -= 1.8 * sn
-
-            pose.blink = blinkScale(u, [1.25, 4.35, 4.58])
-
-        case .good:
-            let u = tSec.truncatingRemainder(dividingBy: 6.0)
-            let br = asymBreath(tSec, period: 3.0)
-            pose.sy += 0.011 * br
-            pose.sx -= 0.006 * br
-            pose.y -= 1.8 * br
-
-            let wTilt = poseWindow(u, 0.60, 1.45, 0.25, 0.30)
-            pose.tilt += 1.6 * wTilt
-            pose.earF -= 6.5 * wTilt
-            pose.earB += 1.5 * wTilt
-            pose.pupilX += 1.4 * wTilt
-            pose.pupilY -= 0.8 * wTilt
-
-            let wGroom = poseWindow(u, 2.00, 3.35, 0.28, 0.32)
-            pose.paw += -8.5 * wGroom - 2.8 * wGroom * (0.5 - 0.5 * cos((u - 2.2) * .pi * 3.2))
-            pose.tilt -= 1.1 * wGroom
-            pose.cheekY -= 1.5 * wGroom
-
-            let sn = sniffBurst(u, 4.10, 0.55, 2.0)
-            pose.cheekX += 2.2 * sn
-            pose.cheekY -= 1.8 * sn
-            pose.cheekScale += 0.06 * sn
-            pose.tilt += 0.6 * sn
-            pose.earB += earFlick(u, 5.00, 0.60, -5.0)
-
-            pose.blink = blinkScale(u, [1.10, 3.85, 5.30])
-
-        case .fair:
-            let u = tSec.truncatingRemainder(dividingBy: 5.2)
-            let br = asymBreath(tSec, period: 2.3)
-            pose.sy += 0.009 * br
-            pose.sx -= 0.005 * br
-            pose.y -= 1.5 * br
-
-            let wPeer = poseWindow(u, 0.40, 1.95, 0.26, 0.32)
-            pose.x += 2.2 * wPeer
-            pose.y -= 4.5 * wPeer
-            pose.tilt += 2.6 * wPeer
-            pose.earF -= 6.0 * wPeer
-            pose.earB -= 4.0 * wPeer
-            pose.pupilX += 1.8 * wPeer
-
-            let sn = sniffBurst(u, 0.85, 0.65, 3.0)
-            pose.cheekX += 2.4 * sn
-            pose.cheekY -= 2.0 * sn
-            pose.cheekScale += 0.06 * sn
-
-            let wTap = poseWindow(u, 2.15, 3.45, 0.22, 0.28)
-            pose.paw += -9.5 * wTap - 2.5 * wTap * sin((u - 2.3) * .pi * 3.0)
-            pose.earB += earFlick(u, 2.60, 0.55, 5.0)
-            pose.earF += earFlick(u, 4.55, 0.50, -5.5)
-
-            pose.blink = blinkScale(u, [2.05, 2.28, 4.40])
-
-        case .needsAttention:
-            let u = tSec.truncatingRemainder(dividingBy: 4.5)
-            let br = asymBreath(tSec, period: 1.8)
-            pose.sy += 0.009 * br
-            pose.sx -= 0.005 * br
-            pose.y -= 1.5 * br
-
-            let wAlert = poseWindow(u, 0.20, 1.35, 0.10, 0.25)
-            let trem = (u > 0.20 && u < 0.75) ? exp(-6.5 * (u - 0.20)) * sin((u - 0.20) * .pi * 14.0) : 0.0
-            pose.y -= 4.5 * wAlert
-            pose.tilt -= 1.6 * wAlert
-            pose.earF += -5.8 * wAlert + 3.4 * trem + earFlick(u, 3.75, 0.50, -6.5)
-            pose.earB += 5.2 * wAlert - 3.4 * trem
-            pose.paw += -5.0 * wAlert
-            pose.pupilX += 1.5 * wAlert
-            pose.pupilY -= 1.2 * wAlert
-
-            let wCall = poseWindow(u, 1.50, 2.85, 0.16, 0.24)
-            pose.paw += -10.5 * wCall - 3.5 * wCall * sin((u - 1.6) * .pi * 5.2)
-            pose.y -= 3.5 * wCall * abs(sin((u - 1.6) * .pi * 2.6))
-            pose.tail += 5.0 * wCall * sin((u - 1.6) * .pi * 5.2)
-
-            let sn = sniffBurst(u, 3.15, 0.45, 2.0)
-            pose.cheekX += 2.4 * sn
-            pose.cheekY -= 2.0 * sn
-            pose.cheekScale += 0.06 * sn
-
-            pose.blink = blinkScale(u, [1.42, 1.62, 4.10])
-        }
-
-        return pose
     }
 }
 
-// MARK: - 预解析纯矢量路径 + 轻量化 SVG Path Parser
+// MARK: - 预解析纯矢量 CGPath + 轻量化 SVG Path Parser
 
 @MainActor
 private enum RabbitPaths {
@@ -591,7 +795,6 @@ private enum RabbitPaths {
     static let noseTip = parseSVGPath("M 393 94 Q 402 89 410 94 Q 412 100 403 104 Q 394 101 393 94 Z")
     static let mouthMain = parseSVGPath("M 402 102 Q 400 115 389 118 Q 380 120 375 113")
     static let mouthDimple = parseSVGPath("M 398 112 Q 405 117 410 114")
-    static let eyeSmile = parseSVGPath("M 317 85 Q 332 69 347 85")
 
     static let star1Outer = parseSVGPath("M 438 36 L 450 66 L 480 78 L 450 90 L 438 120 L 426 90 L 396 78 L 426 66 Z")
     static let star1Inner = parseSVGPath("M 438 60 L 443 73 L 456 78 L 443 83 L 438 96 L 433 83 L 420 78 L 433 73 Z")
@@ -603,8 +806,8 @@ private enum RabbitPaths {
     static let boltOuter = parseSVGPath("M 442 26 L 404 92 H 434 L 418 148 L 468 76 H 436 Z")
     static let boltInner = parseSVGPath("M 440 44 L 417 86 H 438 L 429 122 L 455 82 H 434 Z")
 
-    private static func parseSVGPath(_ d: String) -> Path {
-        var path = Path()
+    private static func parseSVGPath(_ d: String) -> CGPath {
+        let path = CGMutablePath()
         let chars = Array(d.unicodeScalars)
         var i = 0
         let n = chars.count

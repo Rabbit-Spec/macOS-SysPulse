@@ -441,8 +441,6 @@ public struct ActiveConnectionsWindowView: View {
             }
         }()
 
-        let runningApp = NSRunningApplication(processIdentifier: socket.pid)
-
         return HStack(spacing: 12) {
             Text(socket.proto)
                 .font(.system(size: 9.5, weight: .bold, design: .monospaced))
@@ -455,7 +453,7 @@ public struct ActiveConnectionsWindowView: View {
                 .frame(width: 55, alignment: .leading)
 
             HStack(spacing: 7) {
-                if let icon = runningApp?.icon {
+                if let icon = socket.icon {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)

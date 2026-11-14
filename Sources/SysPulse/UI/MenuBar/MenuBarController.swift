@@ -2,12 +2,47 @@ import AppKit
 import SwiftUI
 
 @MainActor
-public final class MenuBarController: NSObject, NSPopoverDelegate {
+private final class MenuBarPopoverPanel: NSPanel {
+    var onEscape: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func cancelOperation(_ sender: Any?) {
+        onEscape?()
+    }
+}
+
+@MainActor
+private final class MenuBarPopoverHostingController: NSHostingController<LiquidGlassPanel> {
+    var onPreferredSizeChange: ((NSSize) -> Void)?
+    private var lastReportedSize: NSSize = .zero
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let fitting = view.fittingSize
+        guard fitting.width > 10, fitting.height > 10 else { return }
+        if abs(fitting.width - lastReportedSize.width) > 0.5 || abs(fitting.height - lastReportedSize.height) > 0.5 {
+            lastReportedSize = fitting
+            onPreferredSizeChange?(fitting)
+        }
+    }
+}
+
+@MainActor
+public final class MenuBarController: NSObject {
     public static weak var shared: MenuBarController?
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover?
-    public var isPopoverShown: Bool { popover?.isShown ?? false }
+    private var popoverPanel: MenuBarPopoverPanel?
+    private var hostingController: MenuBarPopoverHostingController?
+    private var globalMouseMonitor: Any?
+    private var localKeyMonitor: Any?
+    private var resignKeyObserver: NSObjectProtocol?
+    private var appResignObserver: NSObjectProtocol?
+    private var isClosingPopover = false
+    private var popoverShownAt: Date = .distantPast
+    public var isPopoverShown: Bool { popoverPanel?.isVisible ?? false }
     private var lastRenderedTitle: String = ""
     private var lastRenderedIconKey: String = ""
     private weak var previousActiveApp: NSRunningApplication?
@@ -31,19 +66,34 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func makePopover() -> NSPopover {
-        let newPopover = NSPopover()
-        newPopover.contentSize = NSSize(width: 334, height: 700)
-        newPopover.behavior = .transient
-        newPopover.animates = true
-        newPopover.appearance = nil
-        newPopover.delegate = self
+    private func makePopoverPanel(initialContentSize: NSSize = NSSize(width: 334, height: 700)) -> MenuBarPopoverPanel {
+        let panel = MenuBarPopoverPanel(
+            contentRect: NSRect(origin: .zero, size: initialContentSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        // Disabled so WindowServer doesn't recompute alpha-mask shadow blur on every 30fps sublayer frame.
+        panel.hasShadow = false
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
+        panel.isMovable = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.onEscape = { [weak self] in
+            self?.closePopover(deactivateApp: true)
+        }
 
-        let panelView = LiquidGlassPanel()
-        let hostingController = NSHostingController(rootView: panelView)
-        hostingController.sizingOptions = .preferredContentSize
-        newPopover.contentViewController = hostingController
-        return newPopover
+        let controller = MenuBarPopoverHostingController(rootView: LiquidGlassPanel())
+        controller.sizingOptions = .preferredContentSize
+        controller.onPreferredSizeChange = { [weak self] nextSize in
+            self?.repositionPopoverPanel(for: nextSize)
+        }
+        self.hostingController = controller
+        panel.contentViewController = controller
+        return panel
     }
 
     private func observeEngine() {
@@ -444,78 +494,30 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         if !deactivateApp {
             previousActiveApp = nil
         }
-        if let existing = popover, existing.isShown {
-            existing.performClose(nil)
-        }
-    }
+        guard !isClosingPopover, let panel = popoverPanel else { return }
+        isClosingPopover = true
+        defer { isClosingPopover = false }
 
-    public func openPopover() {
-        guard let button = statusItem.button else { return }
-        if popover == nil || !(popover?.isShown ?? false) {
-            PanelCoordinator.shared.activeScreen = .dashboard
-            PowerSourceEngine.shared.setPanelVisible(true)
-            if FeatureToggleManager.shared.enablePluginUPSManager {
-                DiskGuardian.shared.refreshDisks()
-            }
+        removeDismissMonitors()
+        panel.orderOut(nil)
+        panel.contentViewController = nil
+        panel.onEscape = nil
+        hostingController?.onPreferredSizeChange = nil
+        hostingController = nil
+        popoverPanel = nil
 
-            let newPopover = makePopover()
-            self.popover = newPopover
-            NSApp.activate(ignoringOtherApps: true)
-            newPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            SystemResourceMonitor.shared.refreshNow()
-        }
-    }
-
-    private func togglePopover(_ sender: AnyObject?) {
-        guard let button = statusItem.button else { return }
-
-        if let existing = popover, existing.isShown {
-            existing.performClose(sender)
-        } else {
-            // Remember the frontmost app (e.g., Full Screen app) so we can return focus cleanly on close
-            let frontApp = NSWorkspace.shared.frontmostApplication
-            if frontApp?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-                previousActiveApp = frontApp
-            }
-
-            // Always reset to Home Dashboard before showing popover
-            PanelCoordinator.shared.activeScreen = .dashboard
-            PanelCoordinator.shared.isEventsExpanded = false
-
-            // Mark panel visible and refresh latest hardware telemetry
-            PowerSourceEngine.shared.setPanelVisible(true)
-            if FeatureToggleManager.shared.enablePluginUPSManager {
-                DiskGuardian.shared.refreshDisks()
-            }
-
-            // Create popover on-demand and show
-            let newPopover = makePopover()
-            self.popover = newPopover
-            NSApp.activate(ignoringOtherApps: true)
-            newPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            SystemResourceMonitor.shared.refreshNow()
-        }
-    }
-
-    public func popoverDidClose(_ notification: Notification) {
         if !MainStudioWindowController.shared.isWindowVisible {
             PowerSourceEngine.shared.setPanelVisible(false)
         }
         PanelCoordinator.shared.activeScreen = .dashboard
         PanelCoordinator.shared.isEventsExpanded = false
         StudioWindowNavigationState.shared.isNetworkDetailPresented = false
-
-        // Completely detach _NSPopoverWindow from NSStatusBarWindow so Full Screen menu bar is never pinned
-        popover?.contentViewController = nil
-        popover?.delegate = nil
-        popover = nil
         SystemResourceMonitor.shared.refreshDemandFromMain()
 
         statusItem.button?.highlight(false)
         statusItem.button?.window?.resignKey()
 
-        // Only yield focus back if the user did not just open the standalone MainStudioWindow
-        if !MainStudioWindowController.shared.isWindowVisible {
+        if deactivateApp && !MainStudioWindowController.shared.isWindowVisible {
             if let prev = previousActiveApp, !prev.isTerminated {
                 prev.activate()
             } else {
@@ -523,5 +525,158 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             }
         }
         previousActiveApp = nil
+    }
+
+    public func openPopover() {
+        if popoverPanel == nil || !(popoverPanel?.isVisible ?? false) {
+            presentPopoverPanel(capturePreviousApp: false)
+        }
+    }
+
+    private func togglePopover(_ sender: AnyObject?) {
+        if let existing = popoverPanel, existing.isVisible {
+            closePopover(deactivateApp: true)
+        } else {
+            presentPopoverPanel(capturePreviousApp: true)
+        }
+    }
+
+    private func presentPopoverPanel(capturePreviousApp: Bool) {
+        guard statusItem.button != nil else { return }
+
+        if capturePreviousApp {
+            let frontApp = NSWorkspace.shared.frontmostApplication
+            if frontApp?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                previousActiveApp = frontApp
+            }
+        }
+
+        PanelCoordinator.shared.activeScreen = .dashboard
+        PanelCoordinator.shared.isEventsExpanded = false
+        PowerSourceEngine.shared.setPanelVisible(true)
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            DiskGuardian.shared.refreshDisks()
+        }
+
+        let panel = makePopoverPanel()
+        self.popoverPanel = panel
+
+        if let hc = hostingController {
+            hc.view.layoutSubtreeIfNeeded()
+            let initialSize = hc.view.fittingSize
+            let resolvedSize = (initialSize.width > 10 && initialSize.height > 10)
+                ? initialSize
+                : NSSize(width: 334, height: 700)
+            repositionPopoverPanel(for: resolvedSize)
+        } else {
+            repositionPopoverPanel(for: NSSize(width: 334, height: 700))
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        statusItem.button?.highlight(true)
+        popoverShownAt = Date()
+        installDismissMonitors(for: panel)
+        SystemResourceMonitor.shared.refreshNow()
+    }
+
+    private func statusButtonScreenRect() -> NSRect? {
+        guard let button = statusItem.button, let buttonWindow = button.window else { return nil }
+        let rectInWindow = button.convert(button.bounds, to: nil)
+        return buttonWindow.convertToScreen(rectInWindow)
+    }
+
+    private func repositionPopoverPanel(for contentSize: NSSize) {
+        guard let panel = popoverPanel, let buttonScreenRect = statusButtonScreenRect() else { return }
+        let targetScreen = statusItem.button?.window?.screen
+            ?? NSScreen.screens.first(where: { $0.frame.contains(buttonScreenRect.origin) })
+            ?? NSScreen.main
+        let visibleFrame = targetScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let width = max(300, contentSize.width)
+        let maxHeight = max(320, visibleFrame.height - 16)
+        let height = min(max(240, contentSize.height), maxHeight)
+
+        let rawX = round(buttonScreenRect.midX - width * 0.5)
+        let clampedX = min(max(rawX, visibleFrame.minX + 8), visibleFrame.maxX - width - 8)
+        let topAnchorY = buttonScreenRect.minY - 6
+        let originY = max(visibleFrame.minY + 8, round(topAnchorY - height))
+
+        let targetFrame = NSRect(x: clampedX, y: originY, width: width, height: height)
+        if panel.frame != targetFrame {
+            panel.setFrame(targetFrame, display: true)
+        }
+    }
+
+    private func installDismissMonitors(for panel: MenuBarPopoverPanel) {
+        removeDismissMonitors()
+
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPopoverShown else { return }
+                if let btnRect = self.statusButtonScreenRect(), btnRect.contains(NSEvent.mouseLocation) {
+                    return
+                }
+                self.closePopover(deactivateApp: true)
+            }
+        }
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {
+                self?.closePopover(deactivateApp: true)
+                return nil
+            }
+            return event
+        }
+
+        resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPopoverShown else { return }
+                guard Date().timeIntervalSince(self.popoverShownAt) >= 0.25 else { return }
+                if let btnRect = self.statusButtonScreenRect(), btnRect.contains(NSEvent.mouseLocation) {
+                    return
+                }
+                self.closePopover(deactivateApp: false)
+            }
+        }
+
+        appResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPopoverShown else { return }
+                if let btnRect = self.statusButtonScreenRect(), btnRect.contains(NSEvent.mouseLocation) {
+                    return
+                }
+                self.closePopover(deactivateApp: true)
+            }
+        }
+    }
+
+    private func removeDismissMonitors() {
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+            self.localKeyMonitor = nil
+        }
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+            self.resignKeyObserver = nil
+        }
+        if let appResignObserver {
+            NotificationCenter.default.removeObserver(appResignObserver)
+            self.appResignObserver = nil
+        }
     }
 }

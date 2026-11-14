@@ -83,11 +83,11 @@ public struct AppUninstallerSection: View {
         cardContainer {
             HStack(spacing: 0) {
                 AnimatedModuleArtworkBadgeView(
-                    size: 50,
+                    size: 58,
                     isActive: uninstaller.isScanning || uninstaller.isUninstalling,
                     accentColor: Color(red: 0.45, green: 0.65, blue: 0.98)
                 ) {
-                    UninstallerArtworkIconView(size: 50, forcedColorScheme: colorScheme)
+                    UninstallerArtworkIconView(size: 58, forcedColorScheme: colorScheme)
                 }
                 .padding(.leading, 24)
                 .padding(.trailing, 20)
@@ -834,14 +834,14 @@ public struct AppUninstallerSection: View {
     private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(theme.cardFill)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(theme.cardBorder, lineWidth: 0.8)
-                    )
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -850,9 +850,27 @@ public struct AppUninstallerSection: View {
 private struct NativeAppIconThumbnail: View {
     let bundleURL: URL
 
+    @MainActor
+    private static let iconCache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 256
+        return c
+    }()
+
+    @MainActor
+    private static func cachedIcon(for path: String) -> NSImage {
+        let key = path as NSString
+        if let hit = iconCache.object(forKey: key) {
+            return hit
+        }
+        let raw = NSWorkspace.shared.icon(forFile: path)
+        let scaled = AppIconManager.downsampledUIImage(from: raw, maxPixelSize: 64)
+        iconCache.setObject(scaled, forKey: key)
+        return scaled
+    }
+
     var body: some View {
-        let image = NSWorkspace.shared.icon(forFile: bundleURL.path)
-        Image(nsImage: image)
+        Image(nsImage: Self.cachedIcon(for: bundleURL.path))
             .resizable()
             .aspectRatio(contentMode: .fit)
     }

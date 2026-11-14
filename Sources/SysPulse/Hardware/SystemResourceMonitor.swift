@@ -198,9 +198,30 @@ public struct EnergyAppItem: Identifiable, Equatable, Sendable {
     public let name: String
     public let bundleIdentifier: String?
     public let cpuPercent: Double
+    public let gpuPercent: Double
     public let energyImpact: Double
     public let estimatedWatts: Double
     public let memoryBytes: UInt64
+
+    public init(
+        pid: Int32,
+        name: String,
+        bundleIdentifier: String?,
+        cpuPercent: Double,
+        gpuPercent: Double = 0.0,
+        energyImpact: Double,
+        estimatedWatts: Double,
+        memoryBytes: UInt64
+    ) {
+        self.pid = pid
+        self.name = name
+        self.bundleIdentifier = bundleIdentifier
+        self.cpuPercent = cpuPercent
+        self.gpuPercent = gpuPercent
+        self.energyImpact = energyImpact
+        self.estimatedWatts = estimatedWatts
+        self.memoryBytes = memoryBytes
+    }
 
     public var memoryMB: Double { Double(memoryBytes) / 1048576.0 }
     public var energyImpactScore: Double { energyImpact }
@@ -280,6 +301,8 @@ public final class SystemResourceMonitor {
     private struct SamplingDemand: Sendable {
         var isAnyUIVisible: Bool = false
         var needPower: Bool = true
+        var needPerCoreCPU: Bool = true
+        var needWaveformHistory: Bool = true
         var needMem: Bool = true
         var needDisk: Bool = false
         var needApps: Bool = false
@@ -291,11 +314,14 @@ public final class SystemResourceMonitor {
         var upsTelemetry: UPSTelemetry = UPSTelemetry()
     }
 
+    public typealias CachedRunningAppMeta = (name: String, bundleID: String?, isRegular: Bool)
+
     private final class DemandBox: @unchecked Sendable {
         private let lock = NSLock()
         private var demand = SamplingDemand()
         private var pausedForSleep = false
         private var cachedSystemWatts: Double = 0.0
+        private var runningAppsMeta: [Int32: CachedRunningAppMeta] = [:]
 
         func setDemand(_ newDemand: SamplingDemand) {
             lock.lock()
@@ -335,6 +361,31 @@ public final class SystemResourceMonitor {
             lock.unlock()
             return w
         }
+
+        func replaceRunningAppsMeta(_ map: [Int32: CachedRunningAppMeta]) {
+            lock.lock()
+            runningAppsMeta = map
+            lock.unlock()
+        }
+
+        func upsertRunningApp(pid: Int32, meta: CachedRunningAppMeta) {
+            lock.lock()
+            runningAppsMeta[pid] = meta
+            lock.unlock()
+        }
+
+        func removeRunningApp(pid: Int32) {
+            lock.lock()
+            runningAppsMeta.removeValue(forKey: pid)
+            lock.unlock()
+        }
+
+        func snapshotRunningAppsMeta() -> [Int32: CachedRunningAppMeta] {
+            lock.lock()
+            let copy = runningAppsMeta
+            lock.unlock()
+            return copy
+        }
     }
 
     private nonisolated static let sharedDemandBox = DemandBox()
@@ -350,40 +401,80 @@ public final class SystemResourceMonitor {
     private init() {
         DispatchQueue.main.async { [weak self] in
             self?.refreshDemandFromMain()
+            self?.installRunningAppsObservers()
         }
-        start(intervalSeconds: 1.0)
+        start(intervalSeconds: 1.5)
+    }
+
+    @MainActor
+    private func installRunningAppsObservers() {
+        var initial: [Int32: CachedRunningAppMeta] = [:]
+        for app in NSWorkspace.shared.runningApplications {
+            let pid = app.processIdentifier
+            guard pid > 0 else { continue }
+            let name = app.localizedName ?? app.bundleIdentifier ?? "App"
+            initial[pid] = (name, app.bundleIdentifier, app.activationPolicy == .regular)
+        }
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        if initial[myPid] == nil {
+            initial[myPid] = ("SysPulse", Bundle.main.bundleIdentifier, true)
+        }
+        demandBox.replaceRunningAppsMeta(initial)
+
+        let nc = NSWorkspace.shared.notificationCenter
+        let box = demandBox
+        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let pid = app.processIdentifier
+            guard pid > 0 else { return }
+            let name = app.localizedName ?? app.bundleIdentifier ?? "App"
+            box.upsertRunningApp(pid: pid, meta: (name, app.bundleIdentifier, app.activationPolicy == .regular))
+        }
+        nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let pid = app.processIdentifier
+            guard pid > 0 else { return }
+            box.removeRunningApp(pid: pid)
+        }
     }
 
     public func refreshDemandFromMain() {
         let toggles = FeatureToggleManager.shared
-        let isUIVisible = MainStudioWindowController.shared.isWindowVisible
-            || PowerSourceEngine.shared.isPanelVisible
+        let nav = StudioWindowNavigationState.shared
+        let isMainVisible = MainStudioWindowController.shared.isWindowVisible || nav.isMainWindowVisible
+        let isPopoverOrPanelVisible = PowerSourceEngine.shared.isPanelVisible
             || (MenuBarController.shared?.isPopoverShown ?? false)
+        let isOverviewTabActive = isMainVisible && !nav.isModalPresented && nav.selectedTab == .status
+        let isNetworkTabActive = isMainVisible && !nav.isModalPresented && nav.selectedTab == .network
+        let isOverviewOrPopoverVisible = isOverviewTabActive || isPopoverOrPanelVisible
+        let isAnyUIVisible = isMainVisible || isPopoverOrPanelVisible
         let fanManual = FanController.shared.activeMode != .auto
         let ups = toggles.enablePluginUPSManager ? PowerSourceEngine.shared.telemetry : UPSTelemetry()
 
         let demand = SamplingDemand(
-            isAnyUIVisible: isUIVisible,
-            needPower: (toggles.enableSystemPowerMonitor && isUIVisible)
+            isAnyUIVisible: isAnyUIVisible,
+            needPower: (toggles.enableSystemPowerMonitor && isOverviewOrPopoverVisible)
                 || toggles.menuBarShowSystemWatts
                 || toggles.menuBarShowCpuGpu
-                || (toggles.enableLoadRuntimeMonitor && isUIVisible)
-                || (toggles.enableTopEnergyAppsMonitor && isUIVisible),
-            needMem: (toggles.enableMemoryMonitor && isUIVisible) || toggles.menuBarShowMemTemp,
-            needDisk: toggles.enableDiskIOMonitor && isUIVisible,
-            needApps: toggles.enableTopEnergyAppsMonitor && isUIVisible,
-            needRuntime: toggles.enableLoadRuntimeMonitor && isUIVisible,
-            needNetworkSpeed: toggles.menuBarShowNetworkSpeed || isUIVisible,
-            needGPU: isUIVisible || toggles.menuBarShowCpuGpu,
-            needSMC: isUIVisible || toggles.menuBarShowMemTemp || fanManual,
-            needBatteryExtended: isUIVisible,
+                || (toggles.enableLoadRuntimeMonitor && isOverviewOrPopoverVisible)
+                || (toggles.enableTopEnergyAppsMonitor && isOverviewOrPopoverVisible),
+            needPerCoreCPU: isOverviewOrPopoverVisible,
+            needWaveformHistory: isOverviewOrPopoverVisible || isNetworkTabActive,
+            needMem: (toggles.enableMemoryMonitor && isOverviewOrPopoverVisible) || toggles.menuBarShowMemTemp,
+            needDisk: toggles.enableDiskIOMonitor && isOverviewOrPopoverVisible,
+            needApps: toggles.enableTopEnergyAppsMonitor && isOverviewOrPopoverVisible,
+            needRuntime: toggles.enableLoadRuntimeMonitor && isOverviewOrPopoverVisible,
+            needNetworkSpeed: toggles.menuBarShowNetworkSpeed || isOverviewOrPopoverVisible || isNetworkTabActive,
+            needGPU: isOverviewOrPopoverVisible || toggles.menuBarShowCpuGpu,
+            needSMC: isOverviewOrPopoverVisible || toggles.menuBarShowMemTemp || fanManual,
+            needBatteryExtended: isOverviewOrPopoverVisible,
             upsTelemetry: ups
         )
 
         demandBox.setDemand(demand)
     }
 
-    public func start(intervalSeconds: Double = 1.0) {
+    public func start(intervalSeconds: Double = 1.5) {
         let state = sampler
         let box = demandBox
         workerQueue.async { [weak self] in
@@ -394,7 +485,7 @@ public final class SystemResourceMonitor {
             guard !box.isPaused() else { return }
 
             let newTimer = DispatchSource.makeTimerSource(queue: self.workerQueue)
-            newTimer.schedule(deadline: .now(), repeating: intervalSeconds, leeway: .milliseconds(100))
+            newTimer.schedule(deadline: .now(), repeating: intervalSeconds, leeway: .milliseconds(35))
             newTimer.setEventHandler { [weak self] in
                 self?.pollOnBackgroundQueue(state: state)
             }
@@ -421,7 +512,7 @@ public final class SystemResourceMonitor {
         workerQueue.async {
             state.resetDeltasOnWake()
         }
-        start(intervalSeconds: 1.0)
+        start(intervalSeconds: 1.5)
         triggerImmediateRefresh(force: true)
     }
 
@@ -440,9 +531,13 @@ public final class SystemResourceMonitor {
     private nonisolated func pollOnBackgroundQueue(state: BackgroundSamplerState, force: Bool = false) {
         let (sleeping, demand) = demandBox.readState()
         guard !sleeping else { return }
+        let appsMeta = demand.needApps ? demandBox.snapshotRunningAppsMeta() : [:]
 
         let snapshot = state.collectSnapshot(
+            isAnyUIVisible: demand.isAnyUIVisible,
             needPower: demand.needPower,
+            needPerCoreCPU: demand.needPerCoreCPU,
+            needWaveformHistory: demand.needWaveformHistory,
             needMem: demand.needMem,
             needDisk: demand.needDisk,
             needApps: demand.needApps,
@@ -452,8 +547,10 @@ public final class SystemResourceMonitor {
             needSMC: demand.needSMC,
             needBatteryExtended: demand.needBatteryExtended,
             upsTelemetry: demand.upsTelemetry,
+            runningAppsMeta: appsMeta,
             force: force
         )
+        guard snapshot.didSampleAnything else { return }
 
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
@@ -468,7 +565,9 @@ public final class SystemResourceMonitor {
                 if let r = snapshot.runtime { self.loadRuntime = r }
                 if let h = snapshot.hardware {
                     self.hardware = h
-                    FanController.shared.refreshFanStats()
+                    if demand.needSMC {
+                        FanController.shared.refreshFanStats()
+                    }
                 }
                 self.onMetricsUpdated?()
             }
@@ -484,6 +583,9 @@ private final class BackgroundSamplerState: @unchecked Sendable {
     private var prevPerCoreTicks: [(user: UInt32, sys: UInt32, idle: UInt32, nice: UInt32)] = []
     private var prevDiskSample: (time: TimeInterval, readBytes: UInt64, writeBytes: UInt64, readOps: UInt64, writeOps: UInt64)?
     private var prevProcSamples: [Int32: (cpuNs: UInt64, wakeups: UInt64)] = [:]
+    private var prevProcGpuSamples: [Int32: UInt64] = [:]
+    private var cachedProcMeta: [Int32: (ppid: Int32, comm: String)] = [:]
+    private var cachedCoalitionHostPid: [Int32: Int32] = [:]
     private var prevProcSampleTime: TimeInterval?
     private var powerHistory: [Double] = []
     private var cpuHistory: [Double] = Array(repeating: 5.0, count: 24)
@@ -526,6 +628,9 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         prevPerCoreTicks.removeAll(keepingCapacity: true)
         prevDiskSample = nil
         prevProcSamples.removeAll(keepingCapacity: true)
+        prevProcGpuSamples.removeAll(keepingCapacity: true)
+        cachedProcMeta.removeAll(keepingCapacity: true)
+        cachedCoalitionHostPid.removeAll(keepingCapacity: true)
         prevProcSampleTime = nil
         prevNetworkSample = nil
         lastBaseSampleTime = 0
@@ -535,6 +640,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
     }
 
     struct SnapshotResult: Sendable {
+        var didSampleAnything: Bool = false
         var power: SystemPowerMetrics?
         var memory: MemoryMetrics?
         var diskIO: DiskIOMetrics?
@@ -563,7 +669,10 @@ private final class BackgroundSamplerState: @unchecked Sendable {
     }
 
     func collectSnapshot(
+        isAnyUIVisible: Bool,
         needPower: Bool,
+        needPerCoreCPU: Bool,
+        needWaveformHistory: Bool,
         needMem: Bool,
         needDisk: Bool,
         needApps: Bool,
@@ -573,33 +682,39 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         needSMC: Bool,
         needBatteryExtended: Bool,
         upsTelemetry: UPSTelemetry,
+        runningAppsMeta: [Int32: SystemResourceMonitor.CachedRunningAppMeta] = [:],
         force: Bool = false
     ) -> SnapshotResult {
         var result = SnapshotResult()
         let now = ProcessInfo.processInfo.systemUptime
         tickCount &+= 1
 
-        let shouldSampleBase = isFirstSample || force || (now - lastBaseSampleTime >= 1.0)
-        let shouldSampleProc = isFirstSample || (now - lastProcSampleTime >= 2.0)
-        let shouldSampleStorage = needDisk && (isFirstSample || (now - lastDiskStorageSampleTime >= 5.0))
-        let shouldSampleInterface = isFirstSample || (now - lastInterfaceKindSampleTime >= 10.0)
+        let baseInterval: TimeInterval = isAnyUIVisible ? 1.5 : 2.5
+        let shouldSampleBase = isFirstSample || force || (now - lastBaseSampleTime >= baseInterval)
+        let shouldSampleProc = isFirstSample || (now - lastProcSampleTime >= 2.5)
+        let shouldSampleStorage = needDisk && (isFirstSample || (now - lastDiskStorageSampleTime >= 15.0))
+        let shouldSampleInterface = isFirstSample || (now - lastInterfaceKindSampleTime >= 15.0)
 
-        // 1. Primary Network Interface Kind & Traffic Counter (10.0s interval, native zero-subprocess)
+        // 1. Primary Network Interface Kind & Traffic Counter (10.0s interval, single-pass SCDynamicStore + getifaddrs)
         if shouldSampleInterface {
             lastInterfaceKindSampleTime = now
-            cachedInterfaceKind = detectPrimaryInterfaceKind()
+            let netCtx = NetworkDetailModel.resolvePhysicalInterface()
+            if netCtx.interfaceType == (kSCNetworkInterfaceTypeEthernet as String) {
+                cachedInterfaceKind = "Ethernet"
+            } else if netCtx.interfaceType == (kSCNetworkInterfaceTypeIEEE80211 as String) {
+                cachedInterfaceKind = "Wi-Fi"
+            } else {
+                cachedInterfaceKind = detectPrimaryInterfaceKind()
+            }
 
-            // 全局后台网卡累计流量打点（零子进程 SCDynamicStore + getifaddrs，维持本月流量准确性）
-            Task.detached(priority: .utility) {
-                let iface = NetworkDetailModel.detectGatewayAndInterface().iface
-                let (inBytes, outBytes) = NetworkMonitorViewModel.fetchInterfaceBytes(iface: iface)
-                if inBytes > 0 || outBytes > 0 {
-                    NetworkTrafficPersistenceManager.shared.recordTraffic(
-                        iface: iface,
-                        hardwareIn: inBytes,
-                        hardwareOut: outBytes
-                    )
-                }
+            let iface = netCtx.interfaceName
+            let (inBytes, outBytes) = NetworkMonitorViewModel.fetchInterfaceBytes(iface: iface)
+            if inBytes > 0 || outBytes > 0 {
+                NetworkTrafficPersistenceManager.shared.recordTraffic(
+                    iface: iface,
+                    hardwareIn: inBytes,
+                    hardwareOut: outBytes
+                )
             }
         }
 
@@ -630,7 +745,11 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             let batteryProps = (needPower || needRuntime || needBatteryExtended) ? readAppleSmartBatteryProps() : nil
 
             if needPower {
-                cachedPower = sampleSystemPower(batteryProps: batteryProps)
+                cachedPower = sampleSystemPower(
+                    batteryProps: batteryProps,
+                    needPerCoreCPU: needPerCoreCPU || force,
+                    needHistory: needWaveformHistory || force
+                )
             }
             if needMem {
                 cachedMemory = sampleMemory()
@@ -656,6 +775,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
                     needGPU: needGPU,
                     needSMC: needSMC,
                     needBatteryExtended: needBatteryExtended,
+                    needWaveformHistory: needWaveformHistory || force,
                     batteryProps: batteryProps
                 )
             }
@@ -664,14 +784,16 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             if needMem { result.memory = cachedMemory }
             if needDisk { result.diskIO = cachedDiskIO }
             if needRuntime { result.runtime = cachedRuntime }
+            result.didSampleAnything = true
         }
 
         // 4. Top Energy Processes & Ranking (only when UI visible & enabled)
         if shouldSampleProc && needApps {
             lastProcSampleTime = now
             let activeWatts = cachedPower?.totalWatts ?? 28.0
-            cachedTopApps = sampleTopEnergyApps(systemWatts: activeWatts)
+            cachedTopApps = sampleTopEnergyApps(systemWatts: activeWatts, appMetaByPid: runningAppsMeta)
             result.topApps = cachedTopApps
+            result.didSampleAnything = true
         }
 
         // Assemble hardware when updated
@@ -687,6 +809,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             h.primaryInterfaceKind = cachedInterfaceKind
             h.totalProcessCount = cachedTotalProcCount
             result.hardware = h
+            result.didSampleAnything = true
         }
 
         isFirstSample = false
@@ -773,7 +896,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
 
     // MARK: 1. System Power & CPU Load
 
-    private func sampleSystemPower(batteryProps: [String: Any]?) -> SystemPowerMetrics {
+    private func sampleSystemPower(batteryProps: [String: Any]?, needPerCoreCPU: Bool, needHistory: Bool) -> SystemPowerMetrics {
         var metrics = SystemPowerMetrics()
 
         // Reuse single-cycle AppleSmartBattery properties for SMC PowerTelemetryData
@@ -818,6 +941,9 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             var totalIdle: UInt64 = 0
             var totalNice: UInt64 = 0
             var currentPerCoreTicks: [(user: UInt32, sys: UInt32, idle: UInt32, nice: UInt32)] = []
+            if needPerCoreCPU {
+                currentPerCoreTicks.reserveCapacity(Int(numCPUs))
+            }
 
             for i in 0..<Int(numCPUs) {
                 let base = i * Int(CPU_STATE_MAX)
@@ -829,7 +955,9 @@ private final class BackgroundSamplerState: @unchecked Sendable {
                 totalSys  += UInt64(s)
                 totalIdle += UInt64(idl)
                 totalNice += UInt64(n)
-                currentPerCoreTicks.append((u, s, idl, n))
+                if needPerCoreCPU {
+                    currentPerCoreTicks.append((u, s, idl, n))
+                }
             }
 
             let deallocSize = vm_size_t(numCpuInfo) * vm_size_t(MemoryLayout<integer_t>.stride)
@@ -848,34 +976,41 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             }
             prevCPUTicks = (totalUser, totalSys, totalIdle, totalNice)
 
-            // 逐核心负载率计算
-            if !prevPerCoreTicks.isEmpty && prevPerCoreTicks.count == currentPerCoreTicks.count {
-                var coreLoads: [Double] = []
-                for i in 0..<currentPerCoreTicks.count {
-                    let cur = currentPerCoreTicks[i]
-                    let old = prevPerCoreTicks[i]
-                    let dU = cur.user >= old.user ? (cur.user - old.user) : 0
-                    let dS = cur.sys >= old.sys ? (cur.sys - old.sys) : 0
-                    let dI = cur.idle >= old.idle ? (cur.idle - old.idle) : 0
-                    let dN = cur.nice >= old.nice ? (cur.nice - old.nice) : 0
-                    let t = max(1, dU + dS + dI + dN)
-                    let pct = Double(dU + dS + dN) / Double(t) * 100.0
-                    coreLoads.append(max(0.0, min(100.0, pct)))
+            if needPerCoreCPU {
+                // 逐核心负载率计算（仅当状态总览或悬浮窗可见时运行）
+                if !prevPerCoreTicks.isEmpty && prevPerCoreTicks.count == currentPerCoreTicks.count {
+                    var coreLoads: [Double] = []
+                    coreLoads.reserveCapacity(currentPerCoreTicks.count)
+                    for i in 0..<currentPerCoreTicks.count {
+                        let cur = currentPerCoreTicks[i]
+                        let old = prevPerCoreTicks[i]
+                        let dU = cur.user >= old.user ? (cur.user - old.user) : 0
+                        let dS = cur.sys >= old.sys ? (cur.sys - old.sys) : 0
+                        let dI = cur.idle >= old.idle ? (cur.idle - old.idle) : 0
+                        let dN = cur.nice >= old.nice ? (cur.nice - old.nice) : 0
+                        let t = max(1, dU + dS + dI + dN)
+                        let pct = Double(dU + dS + dN) / Double(t) * 100.0
+                        coreLoads.append(max(0.0, min(100.0, pct)))
+                    }
+                    cachedPerCoreLoads = coreLoads
+                } else if cachedPerCoreLoads.count != currentPerCoreTicks.count {
+                    cachedPerCoreLoads = Array(repeating: metrics.cpuUsagePercent, count: max(1, currentPerCoreTicks.count))
                 }
-                cachedPerCoreLoads = coreLoads
-            } else if cachedPerCoreLoads.count != currentPerCoreTicks.count {
-                cachedPerCoreLoads = Array(repeating: metrics.cpuUsagePercent, count: max(1, currentPerCoreTicks.count))
-            }
-            prevPerCoreTicks = currentPerCoreTicks
+                prevPerCoreTicks = currentPerCoreTicks
 
-            // 系统平均负载 (getloadavg)
-            var loadavg = [Double](repeating: 0.0, count: 3)
-            if getloadavg(&loadavg, 3) > 0 {
-                cachedLoadAvg1Min = loadavg[0]
+                // 系统平均负载 (getloadavg)
+                var loadavg = [Double](repeating: 0.0, count: 3)
+                if getloadavg(&loadavg, 3) > 0 {
+                    cachedLoadAvg1Min = loadavg[0]
+                }
+            } else if !prevPerCoreTicks.isEmpty {
+                prevPerCoreTicks.removeAll(keepingCapacity: true)
             }
 
-            cpuHistory.append(metrics.cpuUsagePercent)
-            if cpuHistory.count > 24 { cpuHistory.removeFirst() }
+            if needHistory {
+                cpuHistory.append(metrics.cpuUsagePercent)
+                if cpuHistory.count > 24 { cpuHistory.removeFirst() }
+            }
         }
 
         return metrics
@@ -1022,19 +1157,61 @@ private final class BackgroundSamplerState: @unchecked Sendable {
 
     // MARK: 4. Top Energy / CPU Intensive Apps
 
-    private func sampleTopEnergyApps(systemWatts: Double) -> [EnergyAppItem] {
+    private func samplePerProcessGpuNanoseconds() -> [Int32: UInt64] {
+        var result: [Int32: UInt64] = [:]
+        var iter: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &iter) == KERN_SUCCESS else {
+            return result
+        }
+        defer { IOObjectRelease(iter) }
+
+        var accel = IOIteratorNext(iter)
+        while accel != 0 {
+            var childIter: io_iterator_t = 0
+            if IORegistryEntryGetChildIterator(accel, kIOServicePlane, &childIter) == KERN_SUCCESS {
+                var child = IOIteratorNext(childIter)
+                while child != 0 {
+                    if let creatorRef = IORegistryEntryCreateCFProperty(child, "IOUserClientCreator" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String,
+                       let usageRef = IORegistryEntryCreateCFProperty(child, "AppUsage" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [[String: Any]],
+                       !usageRef.isEmpty,
+                       creatorRef.hasPrefix("pid "),
+                       let commaIdx = creatorRef.firstIndex(of: ","),
+                       let pid = Int32(creatorRef[creatorRef.index(creatorRef.startIndex, offsetBy: 4)..<commaIdx]) {
+                        var sum: UInt64 = 0
+                        for usage in usageRef {
+                            if let ns = (usage["accumulatedGPUTime"] as? NSNumber)?.uint64Value {
+                                sum &+= ns
+                            }
+                        }
+                        if sum > 0 {
+                            result[pid, default: 0] &+= sum
+                        }
+                    }
+                    IOObjectRelease(child)
+                    child = IOIteratorNext(childIter)
+                }
+                IOObjectRelease(childIter)
+            }
+            IOObjectRelease(accel)
+            accel = IOIteratorNext(iter)
+        }
+        return result
+    }
+
+    private func sampleTopEnergyApps(
+        systemWatts: Double,
+        appMetaByPid passedAppMeta: [Int32: SystemResourceMonitor.CachedRunningAppMeta]
+    ) -> [EnergyAppItem] {
         let now = ProcessInfo.processInfo.systemUptime
-        let dt = max(0.5, now - (prevProcSampleTime ?? (now - 2.0)))
+        let dt = max(0.5, now - (prevProcSampleTime ?? (now - 2.5)))
         prevProcSampleTime = now
 
-        // Map running GUI/Accessory apps from NSWorkspace
-        let runningApps = NSWorkspace.shared.runningApplications
-        var appMetaByPid: [Int32: (name: String, bundleID: String?, isRegular: Bool)] = [:]
-        for app in runningApps {
-            let pid = app.processIdentifier
-            guard pid > 0 else { continue }
-            let name = app.localizedName ?? app.bundleIdentifier ?? "App"
-            appMetaByPid[pid] = (name, app.bundleIdentifier, app.activationPolicy == .regular)
+        let currentGpuByPid = samplePerProcessGpuNanoseconds()
+
+        var appMetaByPid = passedAppMeta
+        let myPid = getpid()
+        if appMetaByPid[myPid] == nil {
+            appMetaByPid[myPid] = ("SysPulse", Bundle.main.bundleIdentifier, true)
         }
 
         // Enumerate all active PIDs via libproc
@@ -1050,21 +1227,21 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             var ppid: Int32
             var commName: String
             var cpuDeltaNs: UInt64
+            var gpuDeltaNs: UInt64
             var wakeupsDelta: UInt64
             var footprintBytes: UInt64
         }
 
         var nodes: [Int32: RawProcNode] = [:]
+        nodes.reserveCapacity(count)
         var newProcSamples: [Int32: (cpuNs: UInt64, wakeups: UInt64)] = [:]
-        let myPid = getpid()
+        newProcSamples.reserveCapacity(count)
+        var nextProcMeta: [Int32: (ppid: Int32, comm: String)] = [:]
+        nextProcMeta.reserveCapacity(count)
 
         for i in 0..<count {
             let pid = pids[i]
-            guard pid > 0 && pid != myPid else { continue }
-
-            var bsdInfo = proc_bsdinfo()
-            let bsdSize = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, Int32(MemoryLayout<proc_bsdinfo>.stride))
-            guard bsdSize == Int32(MemoryLayout<proc_bsdinfo>.stride) else { continue }
+            guard pid > 0 else { continue }
 
             var rusage = rusage_info_v2()
             let ruRet = withUnsafeMutablePointer(to: &rusage) { ptr in
@@ -1082,31 +1259,53 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             newProcSamples[pid] = (cpuNs, wakeups)
 
             var dCpuNs: UInt64 = 0
+            var dGpuNs: UInt64 = 0
             var dWakeups: UInt64 = 0
+            var isPIDRecycled = false
             if let prev = prevProcSamples[pid] {
-                dCpuNs = cpuNs >= prev.cpuNs ? (cpuNs - prev.cpuNs) : 0
-                dWakeups = wakeups >= prev.wakeups ? (wakeups - prev.wakeups) : 0
-            }
-
-            let comm = withUnsafePointer(to: &bsdInfo.pbi_name) { ptr -> String in
-                ptr.withMemoryRebound(to: UInt8.self, capacity: Int(MAXCOMLEN)) { u8Ptr in
-                    let buf = UnsafeBufferPointer(start: u8Ptr, count: Int(MAXCOMLEN))
-                    let prefix = buf.prefix { $0 != 0 }
-                    return String(decoding: prefix, as: UTF8.self)
+                if cpuNs >= prev.cpuNs {
+                    dCpuNs = cpuNs - prev.cpuNs
+                    dWakeups = wakeups >= prev.wakeups ? (wakeups - prev.wakeups) : 0
+                } else {
+                    isPIDRecycled = true
                 }
             }
+            if !isPIDRecycled, let prevGpu = prevProcGpuSamples[pid], let curGpu = currentGpuByPid[pid], curGpu >= prevGpu {
+                dGpuNs = curGpu - prevGpu
+            }
+
+            let meta: (ppid: Int32, comm: String)
+            if !isPIDRecycled, let cached = cachedProcMeta[pid] {
+                meta = cached
+            } else {
+                var bsdInfo = proc_bsdinfo()
+                let bsdSize = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, Int32(MemoryLayout<proc_bsdinfo>.stride))
+                guard bsdSize == Int32(MemoryLayout<proc_bsdinfo>.stride) else { continue }
+                let comm = withUnsafePointer(to: &bsdInfo.pbi_name) { ptr -> String in
+                    ptr.withMemoryRebound(to: UInt8.self, capacity: Int(MAXCOMLEN)) { u8Ptr in
+                        let buf = UnsafeBufferPointer(start: u8Ptr, count: Int(MAXCOMLEN))
+                        let prefix = buf.prefix { $0 != 0 }
+                        return String(decoding: prefix, as: UTF8.self)
+                    }
+                }
+                meta = (Int32(bsdInfo.pbi_ppid), comm.isEmpty ? "Process \(pid)" : comm)
+            }
+            nextProcMeta[pid] = meta
 
             nodes[pid] = RawProcNode(
                 pid: pid,
-                ppid: Int32(bsdInfo.pbi_ppid),
-                commName: comm.isEmpty ? "Process \(pid)" : comm,
+                ppid: meta.ppid,
+                commName: meta.comm,
                 cpuDeltaNs: dCpuNs,
+                gpuDeltaNs: dGpuNs,
                 wakeupsDelta: dWakeups,
                 footprintBytes: footprint
             )
         }
 
         prevProcSamples = newProcSamples
+        prevProcGpuSamples = currentGpuByPid
+        cachedProcMeta = nextProcMeta
 
         // Group child/helper processes into their top-level parent App where applicable
         struct AggregatedApp {
@@ -1114,6 +1313,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             var name: String
             var bundleID: String?
             var cpuDeltaNs: UInt64 = 0
+            var gpuDeltaNs: UInt64 = 0
             var wakeupsDelta: UInt64 = 0
             var memoryBytes: UInt64 = 0
         }
@@ -1124,30 +1324,39 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             guard meta.isRegular, meta.name.count >= 2 else { return nil }
             return (pid, meta.name, meta.bundleID)
         }
+        var nextCoalitionHosts: [Int32: Int32] = [:]
+        nextCoalitionHosts.reserveCapacity(cachedCoalitionHostPid.count)
 
         for (pid, node) in nodes {
             // Walk up parent chain to find if this process belongs to a regular GUI app
             var targetPid = pid
-            var cursor = pid
-            var depth = 0
-            while depth < 6 {
-                if let meta = appMetaByPid[cursor], meta.isRegular {
-                    targetPid = cursor
-                    break
+            if let cachedHost = cachedCoalitionHostPid[pid], (appMetaByPid[cachedHost]?.isRegular == true || cachedHost == myPid) {
+                targetPid = cachedHost
+            } else {
+                var cursor = pid
+                var depth = 0
+                while depth < 6 {
+                    if let meta = appMetaByPid[cursor], (meta.isRegular || cursor == myPid) {
+                        targetPid = cursor
+                        break
+                    }
+                    guard let parent = nodes[cursor]?.ppid, parent > 1, parent != cursor else {
+                        break
+                    }
+                    cursor = parent
+                    depth += 1
                 }
-                guard let parent = nodes[cursor]?.ppid, parent > 1, parent != cursor else {
-                    break
-                }
-                cursor = parent
-                depth += 1
-            }
 
-            // Also match launchd-spawned XPC helpers (e.g. "“Safari浏览器”网页内容", "Gemini网页内容") to their host .regular app
-            if targetPid == pid, appMetaByPid[pid]?.isRegular != true {
-                let candidateName = appMetaByPid[pid]?.name ?? node.commName
-                if let host = regularApps.first(where: { candidateName.contains($0.name) }) {
-                    targetPid = host.pid
+                // Also match launchd-spawned XPC helpers (e.g. "“Safari浏览器”网页内容", "Gemini网页内容") to their host .regular app
+                if targetPid == pid, appMetaByPid[pid]?.isRegular != true {
+                    let candidateName = appMetaByPid[pid]?.name ?? node.commName
+                    if let host = regularApps.first(where: { candidateName.contains($0.name) }) {
+                        targetPid = host.pid
+                    }
                 }
+            }
+            if targetPid != pid {
+                nextCoalitionHosts[pid] = targetPid
             }
 
             let meta = appMetaByPid[targetPid]
@@ -1160,27 +1369,30 @@ private final class BackgroundSamplerState: @unchecked Sendable {
                 bundleID: bundleID
             )
             entry.cpuDeltaNs &+= node.cpuDeltaNs
+            entry.gpuDeltaNs &+= node.gpuDeltaNs
             entry.wakeupsDelta &+= node.wakeupsDelta
             entry.memoryBytes &+= node.footprintBytes
             groups[targetPid] = entry
         }
+        cachedCoalitionHostPid = nextCoalitionHosts
 
         let elapsedNs = dt * 1_000_000_000.0
         var items: [EnergyAppItem] = []
         var totalImpactSum: Double = 0.0
 
-        var tempList: [(agg: AggregatedApp, cpuPct: Double, impact: Double)] = []
+        var tempList: [(agg: AggregatedApp, cpuPct: Double, gpuPct: Double, impact: Double)] = []
         for (_, agg) in groups {
             let cpuPct = (Double(agg.cpuDeltaNs) / elapsedNs) * 100.0
+            let gpuPct = (Double(agg.gpuDeltaNs) / elapsedNs) * 100.0
             let wakeupsPerSec = Double(agg.wakeupsDelta) / dt
-            let rawImpact = cpuPct + (wakeupsPerSec * 0.04)
-            if rawImpact >= 0.01 || agg.memoryBytes > 50 * 1048576 || appMetaByPid[agg.rootPid]?.isRegular == true {
+            let rawImpact = cpuPct + (gpuPct * 0.5) + (wakeupsPerSec * 0.04)
+            if agg.rootPid == myPid || rawImpact >= 0.01 || agg.gpuDeltaNs > 0 || agg.memoryBytes > 50 * 1048576 || appMetaByPid[agg.rootPid]?.isRegular == true {
                 // Anti-shake Layer 1: Exponential Moving Average (EMA) to filter out single-tick spikes
                 let prevImpact = prevAppImpacts[agg.rootPid] ?? rawImpact
                 let smoothedImpact = prevImpact * 0.35 + rawImpact * 0.65
                 prevAppImpacts[agg.rootPid] = smoothedImpact
 
-                tempList.append((agg, cpuPct, smoothedImpact))
+                tempList.append((agg, cpuPct, gpuPct, smoothedImpact))
                 totalImpactSum += max(0.05, smoothedImpact)
             }
         }
@@ -1215,6 +1427,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
                     name: entry.agg.name,
                     bundleIdentifier: entry.agg.bundleID,
                     cpuPercent: entry.cpuPct,
+                    gpuPercent: entry.gpuPct,
                     energyImpact: entry.impact,
                     estimatedWatts: estWatts,
                     memoryBytes: entry.agg.memoryBytes
@@ -1394,6 +1607,7 @@ private final class BackgroundSamplerState: @unchecked Sendable {
         needGPU: Bool,
         needSMC: Bool,
         needBatteryExtended: Bool,
+        needWaveformHistory: Bool,
         batteryProps: [String: Any]?
     ) -> SystemHardwareExtendedMetrics {
         var h = cachedHardware
@@ -1433,13 +1647,15 @@ private final class BackgroundSamplerState: @unchecked Sendable {
             }
             prevNetworkSample = (now, currentInBytes, currentOutBytes)
 
-            netUploadHistory.append(h.networkUploadBytesPerSec)
-            if netUploadHistory.count > 24 { netUploadHistory.removeFirst() }
-            netDownloadHistory.append(h.networkDownloadBytesPerSec)
-            if netDownloadHistory.count > 24 { netDownloadHistory.removeFirst() }
+            if needWaveformHistory {
+                netUploadHistory.append(h.networkUploadBytesPerSec)
+                if netUploadHistory.count > 24 { netUploadHistory.removeFirst() }
+                netDownloadHistory.append(h.networkDownloadBytesPerSec)
+                if netDownloadHistory.count > 24 { netDownloadHistory.removeFirst() }
 
-            h.networkHistoryUpload = netUploadHistory
-            h.networkHistoryDownload = netDownloadHistory
+                h.networkHistoryUpload = netUploadHistory
+                h.networkHistoryDownload = netDownloadHistory
+            }
         } else {
             prevNetworkSample = nil
         }
@@ -1471,9 +1687,11 @@ private final class BackgroundSamplerState: @unchecked Sendable {
                 }
             }
             h.gpuUsagePercent = sampledGpuPct
-            gpuHistory.append(sampledGpuPct)
-            if gpuHistory.count > 24 { gpuHistory.removeFirst() }
-            h.gpuHistory = gpuHistory
+            if needWaveformHistory {
+                gpuHistory.append(sampledGpuPct)
+                if gpuHistory.count > 24 { gpuHistory.removeFirst() }
+                h.gpuHistory = gpuHistory
+            }
             let baseGpuWatts = (sampledGpuPct / 100.0) * max(2.5, systemWatts * 0.40)
             h.gpuWatts = max(0.0, round(baseGpuWatts * 10.0) / 10.0)
         }

@@ -1,6 +1,6 @@
 import AppKit
 
-// MARK: - SysPulse Mascot Menu Bar Icon (v0.0.90 Restored)
+// MARK: - SysPulse 菜单栏图标
 
 public enum MenuBarRabbitIcon {
     private static let rabbitBase64 = """

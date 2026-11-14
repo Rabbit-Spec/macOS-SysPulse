@@ -63,15 +63,21 @@ public struct NetworkMonitorSection: View {
             model.refreshActiveSockets(syncSummaryTo: vm)
         }
         .task {
-            // 每 3.0 秒合并刷新活跃连接与进程流量，共享单次 lsof 避免重复子进程；每 9.0 秒刷新链路延迟
+            // 每 3.0 秒仅按当前子标签页按需拉起 nettop 或 lsof；活跃连接数徽标在非连接页降频为 12.0 秒刷新一次；每 9.0 秒刷新链路延迟
             var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else { break }
                 tick += 1
                 vm.refreshRealTraffic(iface: model.activeInterfaceName)
-                model.refreshAppNetworkUsage()
-                model.refreshActiveSockets(syncSummaryTo: vm)
+                if vm.selectedRankingTab == .apps {
+                    model.refreshAppNetworkUsage()
+                    if tick % 4 == 0 {
+                        model.refreshActiveSockets(syncSummaryTo: vm)
+                    }
+                } else {
+                    model.refreshActiveSockets(syncSummaryTo: vm)
+                }
                 if tick % 3 == 0 {
                     vm.measureRealLatencies(gatewayIP: model.gatewayIP)
                 }
@@ -706,13 +712,13 @@ public struct NetworkMonitorSection: View {
         .frame(maxWidth: .infinity)
     }
 
-    // Upper Card 2: 实时上传
+    // Upper Card 2: 上传
     private var realtimeUploadCard: some View {
         let parts = monitor.hardware.uploadSpeedParts
         return cardContainer(height: rightUpperH) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("实时上传")
+                    Text("上传")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.primaryText)
                     Spacer()
@@ -732,22 +738,27 @@ public struct NetworkMonitorSection: View {
 
                 Spacer(minLength: 4)
 
-                SingleSparklineWave(
-                    history: monitor.hardware.networkHistoryUpload,
-                    color: Color(red: 0.55, green: 0.55, blue: 0.95)
+                SurgeConveyorWaveformView(
+                    primaryHistory: monitor.hardware.networkHistoryUpload,
+                    secondaryHistory: nil,
+                    minScaleCeiling: 1024.0 * 20.0,
+                    activeThreshold: 512.0,
+                    accentColor: Color(red: 0.55, green: 0.55, blue: 0.95),
+                    isDark: colorScheme == .dark
                 )
+                .equatable()
                 .frame(height: max(56, 56 + (rightUpperH - 160)))
             }
         }
     }
 
-    // Upper Card 3: 实时下载
+    // Upper Card 3: 下载
     private var realtimeDownloadCard: some View {
         let parts = monitor.hardware.downloadSpeedParts
         return cardContainer(height: rightUpperH) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("实时下载")
+                    Text("下载")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.primaryText)
                     Spacer()
@@ -767,10 +778,15 @@ public struct NetworkMonitorSection: View {
 
                 Spacer(minLength: 4)
 
-                SingleSparklineWave(
-                    history: monitor.hardware.networkHistoryDownload,
-                    color: Color.cyan
+                SurgeConveyorWaveformView(
+                    primaryHistory: monitor.hardware.networkHistoryDownload,
+                    secondaryHistory: nil,
+                    minScaleCeiling: 1024.0 * 20.0,
+                    activeThreshold: 512.0,
+                    accentColor: Color.cyan,
+                    isDark: colorScheme == .dark
                 )
+                .equatable()
                 .frame(height: max(56, 56 + (rightUpperH - 160)))
             }
         }
@@ -843,6 +859,11 @@ public struct NetworkMonitorSection: View {
                                 let isSel = (vm.selectedRankingTab == tab)
                                 Button {
                                     vm.selectedRankingTab = tab
+                                    if tab == .apps {
+                                        model.refreshAppNetworkUsage()
+                                    } else {
+                                        model.refreshActiveSockets(syncSummaryTo: vm)
+                                    }
                                 } label: {
                                     Text(tab.rawValue)
                                         .font(.system(size: 11, weight: isSel ? .bold : .medium))
@@ -1073,7 +1094,7 @@ public struct NetworkMonitorSection: View {
             telemetryPill(label: "硬件网卡", value: "\(model.activeInterfaceName) (\(model.link))")
             telemetryPill(label: "无线协议", value: model.wifiProtocol)
             telemetryPill(label: "频段与信道", value: "\(model.frequencyBand) · 信道 \(model.channel)")
-            telemetryPill(label: "物理协商速率", value: String(format: "%.0f Mbps", model.txRate))
+            telemetryPill(label: "协商速率", value: String(format: "%.0f Mbps", model.txRate))
             signalPill
 
             Spacer()
@@ -1090,11 +1111,11 @@ public struct NetworkMonitorSection: View {
         .padding(.horizontal, 16)
         .frame(width: contentW, height: 44)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(theme.cardFill)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(theme.studioCardFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                 )
         )
     }
@@ -1192,68 +1213,13 @@ public struct NetworkMonitorSection: View {
             .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(theme.cardFill)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                     )
             )
-    }
-}
-
-// MARK: - Waveform View
-
-public struct SingleSparklineWave: View {
-    let history: [Double]
-    let color: Color
-
-    public var body: some View {
-        GeometryReader { geo in
-            let points = normalizedPoints(width: geo.size.width, height: geo.size.height)
-            ZStack {
-                Path { path in
-                    guard points.count > 1 else { return }
-                    path.move(to: CGPoint(x: 0, y: geo.size.height))
-                    path.addLine(to: points[0])
-                    for i in 1..<points.count {
-                        path.addLine(to: points[i])
-                    }
-                    path.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
-                    path.closeSubpath()
-                }
-                .fill(
-                    LinearGradient(
-                        colors: [color.opacity(0.35), color.opacity(0.0)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-
-                Path { path in
-                    guard points.count > 1 else { return }
-                    path.move(to: points[0])
-                    for i in 1..<points.count {
-                        path.addLine(to: points[i])
-                    }
-                }
-                .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-            }
-        }
-    }
-
-    private func normalizedPoints(width: CGFloat, height: CGFloat) -> [CGPoint] {
-        guard !history.isEmpty else {
-            return [CGPoint(x: 0, y: height * 0.7), CGPoint(x: width, y: height * 0.7)]
-        }
-        let maxVal = max(1024.0, history.max() ?? 1024.0)
-        let step = width / CGFloat(max(1, history.count - 1))
-
-        return history.enumerated().map { idx, val in
-            let ratio = CGFloat(val / maxVal)
-            let y = height * (1.0 - max(0.08, min(0.92, ratio)))
-            return CGPoint(x: CGFloat(idx) * step, y: y)
-        }
     }
 }
 

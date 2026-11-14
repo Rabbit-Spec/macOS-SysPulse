@@ -94,14 +94,31 @@ public enum ProcessSortOrder: Sendable {
 @MainActor
 public final class StudioWindowNavigationState {
     public static let shared = StudioWindowNavigationState()
-    public var selectedTab: StudioTopTab = .status
+    public var selectedTab: StudioTopTab = .status {
+        didSet {
+            if oldValue != selectedTab {
+                SystemResourceMonitor.shared.refreshDemandFromMain()
+            }
+        }
+    }
     public var isMainWindowVisible: Bool = false
-    public var isModalPresented: Bool = false
+    public var isModalPresented: Bool = false {
+        didSet {
+            if oldValue != isModalPresented {
+                SystemResourceMonitor.shared.refreshDemandFromMain()
+            }
+        }
+    }
     public var activeModalTab: StudioModalTab = .settings
     public var isIconMenuPresented: Bool = false
     public var fanMode: String = "自动"
     public var isProcessTableHovered: Bool = false
-    public var displayedProcesses: [EnergyAppItem] = []
+    public var displayedProcesses: [EnergyAppItem] = [] {
+        didSet {
+            recomputeSortedProcesses()
+        }
+    }
+    public private(set) var sortedProcesses: [EnergyAppItem] = []
     public var processSortField: ProcessSortField = .energy
     public var processSortOrder: ProcessSortOrder = .descending
     public var cleanerSortField: CleanerSortField = .size
@@ -113,9 +130,12 @@ public final class StudioWindowNavigationState {
     public var isDiagnosticsModalPresented: Bool = false
     public var isUpdateModalPresented: Bool = false
     public var hoveredOverviewCardID: String? = nil
+    public var hoveredPluginCard: PluginModuleType? = nil
+    public var draggingPluginCard: PluginModuleType? = nil
+    public var dragPluginBaseOrigin: CGPoint = .zero
+    public var dragPluginTranslation: CGSize = .zero
     public var hoveredPopoverCardID: String? = nil
     public var hoveredTopTab: StudioTopTab? = nil
-    public var isScrubbingTab: Bool = false
 
     public func toggleSort(field: ProcessSortField) {
         if processSortField == field {
@@ -123,6 +143,28 @@ public final class StudioWindowNavigationState {
         } else {
             processSortField = field
             processSortOrder = (field == .name) ? .ascending : .descending
+        }
+        recomputeSortedProcesses()
+    }
+
+    private func recomputeSortedProcesses() {
+        let list = displayedProcesses
+        let field = processSortField
+        let order = processSortOrder
+        sortedProcesses = list.sorted { a, b in
+            switch field {
+            case .name:
+                let comp = a.name.localizedStandardCompare(b.name)
+                return order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
+            case .memory:
+                return order == .ascending ? (a.memoryBytes < b.memoryBytes) : (a.memoryBytes > b.memoryBytes)
+            case .cpu:
+                return order == .ascending ? (a.cpuPercent < b.cpuPercent) : (a.cpuPercent > b.cpuPercent)
+            case .energy:
+                return order == .ascending ? (a.energyImpactScore < b.energyImpactScore) : (a.energyImpactScore > b.energyImpactScore)
+            case .pid:
+                return order == .ascending ? (a.pid < b.pid) : (a.pid > b.pid)
+            }
         }
     }
 
@@ -266,6 +308,12 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
             let containerView = NSView(frame: NSRect(x: 0, y: 0, width: defaultWidth, height: defaultHeight))
             containerView.autoresizesSubviews = true
 
+            // 单层窗口后背景模糊（失焦时暂停桌面采样）
+            let backdropView = MainBackdropVisualEffectView(frame: containerView.bounds)
+            backdropView.translatesAutoresizingMaskIntoConstraints = true
+            backdropView.autoresizingMask = [.width, .height]
+            containerView.addSubview(backdropView)
+
             let hostingView = NSHostingView(rootView: MainStudioWindowView())
             hostingView.sizingOptions = []
             hostingView.translatesAutoresizingMaskIntoConstraints = true
@@ -284,6 +332,8 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
             newWindow.titleVisibility = .hidden
             newWindow.titlebarSeparatorStyle = .none
             newWindow.isMovableByWindowBackground = true
+            newWindow.isOpaque = false
+            newWindow.backgroundColor = .clear
             newWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary, .moveToActiveSpace]
             newWindow.isReleasedWhenClosed = false
             newWindow.delegate = self
@@ -334,5 +384,30 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         // Return to lightweight menu bar agent mode so Full Screen menu bar auto-hide is never blocked
         NSApp.setActivationPolicy(.accessory)
         NSApp.deactivate()
+    }
+}
+
+/// 单层 `.headerView` 窗口后背景模糊宿主视图（失焦时暂停桌面采样）
+private final class MainBackdropVisualEffectView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureBlur()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureBlur()
+    }
+
+    private func configureBlur() {
+        wantsLayer = true
+        blendingMode = .behindWindow
+        state = .followsWindowActiveState
+        material = .headerView
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        material = .headerView
     }
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 
 // MARK: - Native macOS App Icon View & Components
 
@@ -186,7 +187,8 @@ public final class AppIconManager {
 
         for path in fallbackPaths.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = downsampledUIImage(from: rawImg, maxPixelSize: 128)
                 if isDark { cachedDarkImage = img } else { cachedLightImage = img }
                 return img
             }
@@ -195,11 +197,52 @@ public final class AppIconManager {
         // Also check if .icns is in Bundle
         let icnsName = isDark ? "AppIcon-Dark" : "AppIcon-Light"
         if let icnsURL = Bundle.main.url(forResource: icnsName, withExtension: "icns"),
-           let img = NSImage(contentsOf: icnsURL) {
+           let rawImg = NSImage(contentsOf: icnsURL) {
+            let img = downsampledUIImage(from: rawImg, maxPixelSize: 128)
+            if isDark { cachedDarkImage = img } else { cachedLightImage = img }
             return img
         }
 
         return nil
+    }
+
+    /// Downsample and pre-decode large artwork or multi-rep icons into an sRGB host-endian
+    /// premultiplied BGRA bitmap so CoreGraphics/Metal blit without runtime ColorSync conversion.
+    public nonisolated static func downsampledUIImage(
+        from source: NSImage,
+        maxPixelSize: CGFloat = 256,
+        exactPixelTarget: Bool = false
+    ) -> NSImage {
+        var proposed = NSRect(x: 0, y: 0, width: maxPixelSize, height: maxPixelSize)
+        let resolvedCG: CGImage? = exactPixelTarget
+            ? source.cgImage(forProposedRect: &proposed, context: nil, hints: nil)
+            : source.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        guard let cgImage = resolvedCG else {
+            return source
+        }
+        let w = CGFloat(cgImage.width)
+        let h = CGFloat(cgImage.height)
+        let scale = max(w, h) > maxPixelSize ? (maxPixelSize / max(w, h)) : 1.0
+        let targetW = max(1, Int(round(w * scale)))
+        let targetH = max(1, Int(round(h * scale)))
+
+        let srgbSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: targetW,
+            height: targetH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: srgbSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return source
+        }
+        ctx.interpolationQuality = .high
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        guard let scaledCG = ctx.makeImage() else { return source }
+        return NSImage(cgImage: scaledCG, size: NSSize(width: targetW, height: targetH))
     }
 
     public func startObservingSystemAppearance() {
@@ -309,17 +352,60 @@ public final class AppIconManager {
     }
 }
 
-// MARK: - Dedicated Cleaner Artwork Icon View (Matches Storybook Watercolor Aesthetic)
+// MARK: - 图标裁切与缩放辅助配置
+
+private struct StorybookArtworkFraming {
+    let scale: CGFloat
+    let offsetYFraction: CGFloat
+
+    static func preset(resourceBase: String, isDark: Bool) -> StorybookArtworkFraming {
+        switch resourceBase {
+        case "CleanerIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: -0.005) : .init(scale: 1.42, offsetYFraction: -0.008)
+        case "UninstallerIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: -0.020) : .init(scale: 1.44, offsetYFraction: -0.025)
+        case "SpaceAnalysisIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: -0.022) : .init(scale: 1.44, offsetYFraction: -0.028)
+        case "PSPortalIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: -0.022) : .init(scale: 1.44, offsetYFraction: -0.028)
+        case "WiFiLatencyIcon":
+            return isDark ? .init(scale: 1.38, offsetYFraction: 0.0) : .init(scale: 1.40, offsetYFraction: 0.0)
+        case "LanSnifferIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: -0.022) : .init(scale: 1.44, offsetYFraction: -0.028)
+        case "UPSPowerIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: 0.0) : .init(scale: 1.42, offsetYFraction: 0.0)
+        case "AntigravityContextIcon":
+            return isDark ? .init(scale: 1.50, offsetYFraction: 0.0) : .init(scale: 1.78, offsetYFraction: 0.020)
+        default:
+            return .init(scale: 1.40, offsetYFraction: 0.0)
+        }
+    }
+}
+
+private extension Image {
+    func storybookFramed(resourceBase: String, isDark: Bool, size: CGFloat, squircle: RoundedRectangle) -> some View {
+        let framing = StorybookArtworkFraming.preset(resourceBase: resourceBase, isDark: isDark)
+        return self
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .scaleEffect(framing.scale)
+            .offset(y: size * framing.offsetYFraction)
+            .frame(width: size, height: size)
+            .clipShape(squircle)
+    }
+}
+
+// MARK: - 清理模块图标视图
 
 public struct CleanerArtworkIconView: View {
     @Environment(\.colorScheme) private var envColorScheme
-    public var size: CGFloat = 42
+    public var size: CGFloat = 58
     public var forcedColorScheme: ColorScheme? = nil
 
     private static var cachedLightCleaner: NSImage?
     private static var cachedDarkCleaner: NSImage?
 
-    public init(size: CGFloat = 42, forcedColorScheme: ColorScheme? = nil) {
+    public init(size: CGFloat = 58, forcedColorScheme: ColorScheme? = nil) {
         self.size = size
         self.forcedColorScheme = forcedColorScheme
     }
@@ -336,10 +422,7 @@ public struct CleanerArtworkIconView: View {
         ZStack {
             if let image = Self.loadCleanerImage(isDark: isDark) {
                 Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipShape(squircle)
+                    .storybookFramed(resourceBase: "CleanerIcon", isDark: isDark, size: size, squircle: squircle)
             } else {
                 ZStack {
                     squircle.fill(isDark ? Color.purple.opacity(0.3) : Color.cyan.opacity(0.2))
@@ -364,7 +447,8 @@ public struct CleanerArtworkIconView: View {
 
         for path in fallbackPaths.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = AppIconManager.downsampledUIImage(from: rawImg, maxPixelSize: 256)
                 if isDark { cachedDarkCleaner = img } else { cachedLightCleaner = img }
                 return img
             }
@@ -373,17 +457,17 @@ public struct CleanerArtworkIconView: View {
     }
 }
 
-// MARK: - Dedicated Uninstaller Artwork Icon View (Matches Storybook Watercolor Aesthetic)
+// MARK: - 卸载模块图标视图
 
 public struct UninstallerArtworkIconView: View {
     @Environment(\.colorScheme) private var envColorScheme
-    public var size: CGFloat = 50
+    public var size: CGFloat = 58
     public var forcedColorScheme: ColorScheme? = nil
 
     private static var cachedLightUninstaller: NSImage?
     private static var cachedDarkUninstaller: NSImage?
 
-    public init(size: CGFloat = 50, forcedColorScheme: ColorScheme? = nil) {
+    public init(size: CGFloat = 58, forcedColorScheme: ColorScheme? = nil) {
         self.size = size
         self.forcedColorScheme = forcedColorScheme
     }
@@ -400,10 +484,7 @@ public struct UninstallerArtworkIconView: View {
         ZStack {
             if let image = Self.loadUninstallerImage(isDark: isDark) {
                 Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipShape(squircle)
+                    .storybookFramed(resourceBase: "UninstallerIcon", isDark: isDark, size: size, squircle: squircle)
             } else {
                 ZStack {
                     squircle.fill(isDark ? Color.indigo.opacity(0.3) : Color.blue.opacity(0.15))
@@ -428,7 +509,8 @@ public struct UninstallerArtworkIconView: View {
 
         for path in fallbackPaths.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = AppIconManager.downsampledUIImage(from: rawImg, maxPixelSize: 256)
                 if isDark { cachedDarkUninstaller = img } else { cachedLightUninstaller = img }
                 return img
             }
@@ -437,17 +519,17 @@ public struct UninstallerArtworkIconView: View {
     }
 }
 
-// MARK: - Dedicated Space Analysis Artwork Icon View (Matches Storybook Watercolor Aesthetic)
+// MARK: - 空间分析模块图标视图
 
 public struct SpaceAnalysisArtworkIconView: View {
     @Environment(\.colorScheme) private var envColorScheme
-    public var size: CGFloat = 50
+    public var size: CGFloat = 58
     public var forcedColorScheme: ColorScheme? = nil
 
     private static var cachedLightSpace: NSImage?
     private static var cachedDarkSpace: NSImage?
 
-    public init(size: CGFloat = 50, forcedColorScheme: ColorScheme? = nil) {
+    public init(size: CGFloat = 58, forcedColorScheme: ColorScheme? = nil) {
         self.size = size
         self.forcedColorScheme = forcedColorScheme
     }
@@ -464,10 +546,7 @@ public struct SpaceAnalysisArtworkIconView: View {
         ZStack {
             if let image = Self.loadSpaceImage(isDark: isDark) {
                 Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipShape(squircle)
+                    .storybookFramed(resourceBase: "SpaceAnalysisIcon", isDark: isDark, size: size, squircle: squircle)
             } else {
                 ZStack {
                     squircle.fill(isDark ? Color.purple.opacity(0.3) : Color.teal.opacity(0.15))
@@ -492,7 +571,8 @@ public struct SpaceAnalysisArtworkIconView: View {
 
         for path in fallbackPaths.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = AppIconManager.downsampledUIImage(from: rawImg, maxPixelSize: 256)
                 if isDark { cachedDarkSpace = img } else { cachedLightSpace = img }
                 return img
             }
@@ -501,9 +581,225 @@ public struct SpaceAnalysisArtworkIconView: View {
     }
 }
 
-// MARK: - 实时微动效组件 (Micro-Motion Components)
+/// 模块中心插件图标类型
+public enum PluginArtworkKind: String, Sendable {
+    case psPortal
+    case wifiLatency
+    case arpSniffer
+    case upsManager
+    case antigravityContext
 
-/// 根据真实风扇 RPM 转速无级旋转的风扇图标视图 (RPM <= 0 时完全静止零重绘)
+    public var resourceBaseName: String {
+        switch self {
+        case .psPortal: return "PSPortalIcon"
+        case .wifiLatency: return "WiFiLatencyIcon"
+        case .arpSniffer: return "LanSnifferIcon"
+        case .upsManager: return "UPSPowerIcon"
+        case .antigravityContext: return "AntigravityContextIcon"
+        }
+    }
+
+    public var fallbackSymbol: String {
+        switch self {
+        case .psPortal: return "gamecontroller.fill"
+        case .wifiLatency: return "antenna.radiowaves.left.and.right"
+        case .arpSniffer: return "network"
+        case .upsManager: return "battery.100.bolt"
+        case .antigravityContext: return "sparkles"
+        }
+    }
+
+    public var fallbackAccent: Color {
+        switch self {
+        case .psPortal: return .blue
+        case .wifiLatency: return .teal
+        case .arpSniffer: return .purple
+        case .upsManager: return .orange
+        case .antigravityContext: return .indigo
+        }
+    }
+}
+
+/// 模块中心插件图标视图（适配浅色 / 深色与启停状态）
+public struct PluginArtworkIconView: View {
+    @Environment(\.colorScheme) private var envColorScheme
+    public let kind: PluginArtworkKind
+    public var size: CGFloat = 58
+    public var isEnabled: Bool = true
+    public var forcedColorScheme: ColorScheme? = nil
+
+    private static var cachedImages: [String: NSImage] = [:]
+
+    public init(
+        kind: PluginArtworkKind,
+        size: CGFloat = 58,
+        isEnabled: Bool = true,
+        forcedColorScheme: ColorScheme? = nil
+    ) {
+        self.kind = kind
+        self.size = size
+        self.isEnabled = isEnabled
+        self.forcedColorScheme = forcedColorScheme
+    }
+
+    private var activeScheme: ColorScheme {
+        forcedColorScheme ?? envColorScheme
+    }
+
+    public var body: some View {
+        let isDark = (activeScheme == .dark)
+        let cornerRadius = size * 0.225
+        let squircle = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        ZStack {
+            if let image = Self.loadImage(kind: kind, isDark: isDark) {
+                Image(nsImage: image)
+                    .storybookFramed(resourceBase: kind.resourceBaseName, isDark: isDark, size: size, squircle: squircle)
+                    .overlay(
+                        squircle
+                            .strokeBorder(
+                                isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.06),
+                                lineWidth: 0.8
+                            )
+                    )
+            } else {
+                ZStack {
+                    squircle.fill(kind.fallbackAccent.opacity(isDark ? 0.28 : 0.16))
+                    Image(systemName: kind.fallbackSymbol)
+                        .font(.system(size: size * 0.44, weight: .bold))
+                        .foregroundStyle(kind.fallbackAccent)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .saturation(isEnabled ? 1.0 : 0.22)
+        .opacity(isEnabled ? 1.0 : 0.72)
+    }
+
+    public static func loadImage(kind: PluginArtworkKind, isDark: Bool) -> NSImage? {
+        let resourceName = "\(kind.resourceBaseName)-\(isDark ? "Dark" : "Light")-1024"
+        if let cached = cachedImages[resourceName] {
+            return cached
+        }
+
+        let fallbackPaths: [String?] = [
+            Bundle.main.url(forResource: resourceName, withExtension: "png")?.path,
+            Bundle.main.resourceURL?.appendingPathComponent("\(resourceName).png").path
+        ]
+
+        for path in fallbackPaths.compactMap({ $0 }) {
+            if FileManager.default.fileExists(atPath: path),
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = AppIconManager.downsampledUIImage(from: rawImg, maxPixelSize: 256)
+                cachedImages[resourceName] = img
+                return img
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - 实时动画组件
+
+private final class CARotatingSymbolContainerNSView: NSView {
+    private let spriteLayer = CALayer()
+    private var currentKey: String = ""
+    private var currentDuration: TimeInterval = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        spriteLayer.contentsGravity = .resizeAspect
+        spriteLayer.masksToBounds = false
+        layer?.addSublayer(spriteLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        spriteLayer.bounds = bounds
+        spriteLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            spriteLayer.removeAnimation(forKey: "syspulse.spin")
+        } else if currentDuration > 0.05 && spriteLayer.animation(forKey: "syspulse.spin") == nil {
+            addSpinAnimation(duration: currentDuration)
+        }
+    }
+
+    private func addSpinAnimation(duration: TimeInterval) {
+        let anim = CABasicAnimation(keyPath: "transform.rotation.z")
+        anim.fromValue = 0.0
+        anim.toValue = -Double.pi * 2.0
+        anim.duration = duration
+        anim.repeatCount = .infinity
+        anim.isRemovedOnCompletion = false
+        if #available(macOS 12.0, *) {
+            anim.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+        }
+        spriteLayer.add(anim, forKey: "syspulse.spin")
+    }
+
+    func configure(systemName: String, pointSize: CGFloat, nsColor: NSColor, duration: TimeInterval) {
+        let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        spriteLayer.contentsScale = backingScale
+
+        let rgba = nsColor.usingColorSpace(.sRGB) ?? nsColor
+        let r = Int(round(rgba.redComponent * 255))
+        let g = Int(round(rgba.greenComponent * 255))
+        let b = Int(round(rgba.blueComponent * 255))
+        let a = Int(round(rgba.alphaComponent * 255))
+        let nextKey = "\(systemName)-\(Int(round(pointSize * 10)))-\(r)-\(g)-\(b)-\(a)-\(Int(round(backingScale * 10)))"
+
+        if nextKey != currentKey {
+            currentKey = nextKey
+            let symConfig = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .bold)
+                .applying(.init(paletteColors: [rgba]))
+            if let sym = NSImage(systemSymbolName: systemName, accessibilityDescription: nil)?
+                .withSymbolConfiguration(symConfig) {
+                var proposed = NSRect(origin: .zero, size: sym.size)
+                spriteLayer.contents = sym.cgImage(forProposedRect: &proposed, context: nil, hints: nil)
+            }
+        }
+
+        if abs(currentDuration - duration) > 0.001 || (window != nil && spriteLayer.animation(forKey: "syspulse.spin") == nil) {
+            currentDuration = duration
+            spriteLayer.removeAnimation(forKey: "syspulse.spin")
+            if duration > 0.05 && window != nil {
+                addSpinAnimation(duration: duration)
+            }
+        }
+    }
+}
+
+private struct CoreAnimationRotatingSymbolView: NSViewRepresentable {
+    let systemName: String
+    let size: CGFloat
+    let color: Color
+    let duration: TimeInterval
+
+    func makeNSView(context: Context) -> CARotatingSymbolContainerNSView {
+        CARotatingSymbolContainerNSView()
+    }
+
+    func updateNSView(_ nsView: CARotatingSymbolContainerNSView, context: Context) {
+        nsView.configure(
+            systemName: systemName,
+            pointSize: size,
+            nsColor: NSColor(color),
+            duration: duration
+        )
+    }
+}
+
+/// 根据风扇 RPM 转速旋转的风扇图标视图（RPM <= 0 时静止）
 public struct SpinningFanIconView: View {
     public var rpm: Int
     public var size: CGFloat = 14
@@ -515,27 +811,41 @@ public struct SpinningFanIconView: View {
         self.color = color
     }
 
+    private var speedTier: Int {
+        guard rpm > 0 else { return 0 }
+        if rpm < 1400 { return 1 }
+        if rpm < 2400 { return 2 }
+        if rpm < 3800 { return 3 }
+        return 4
+    }
+
+    private var revolutionDuration: TimeInterval {
+        switch speedTier {
+        case 1: return 2.1
+        case 2: return 1.4
+        case 3: return 0.9
+        default: return 0.55
+        }
+    }
+
     public var body: some View {
         if rpm <= 0 {
             Image(systemName: "fan.fill")
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(color)
         } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: false)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                let degPerSec = max(110.0, min(720.0, Double(rpm) / 1000.0 * 145.0))
-                let angle = (t * degPerSec).truncatingRemainder(dividingBy: 360.0)
-
-                Image(systemName: "fan.fill")
-                    .font(.system(size: size, weight: .bold))
-                    .foregroundStyle(color)
-                    .rotationEffect(.degrees(angle))
-            }
+            CoreAnimationRotatingSymbolView(
+                systemName: "fan.fill",
+                size: size,
+                color: color,
+                duration: revolutionDuration
+            )
+            .frame(width: size + 4, height: size + 4)
         }
     }
 }
 
-/// 带有可选慢速旋转的卡片头部符号视图 (非旋转模式完全静止零重绘)
+/// 支持慢速旋转的卡片头部符号视图
 public struct PulsingHeaderSymbolView: View {
     public var systemName: String
     public var size: CGFloat = 13
@@ -554,23 +864,19 @@ public struct PulsingHeaderSymbolView: View {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(color)
-                .shadow(color: color.opacity(0.32), radius: 3.5)
         } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: false)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                let angle = (t * 24.0).truncatingRemainder(dividingBy: 360.0)
-
-                Image(systemName: systemName)
-                    .font(.system(size: size, weight: .bold))
-                    .foregroundStyle(color)
-                    .rotationEffect(.degrees(angle))
-                    .shadow(color: color.opacity(0.35), radius: 3.5)
-            }
+            CoreAnimationRotatingSymbolView(
+                systemName: systemName,
+                size: size,
+                color: color,
+                duration: 15.0
+            )
+            .frame(width: size + 4, height: size + 4)
         }
     }
 }
 
-/// 3D 模块图标悬浮呼吸与扫描声呐波纹容器视图 (!isActive 时完全静止零重绘)
+/// 模块图标呼吸与波纹动画容器（未激活时静止）
 public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
     public var size: CGFloat = 50
     public var isActive: Bool = false
@@ -596,7 +902,6 @@ public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
             content
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                .shadow(color: accentColor.opacity(0.16), radius: 4, y: 2)
                 .frame(width: size, height: size)
         } else {
             ZStack {
@@ -614,7 +919,10 @@ public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
                 content
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .shadow(color: accentColor.opacity(0.38), radius: 7, y: 2)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(accentColor.opacity(0.32), lineWidth: 1.0)
+                    )
                     .phaseAnimator([false, true]) { badge, phase in
                         badge
                             .offset(y: phase ? -2.0 : 1.5)

@@ -16,7 +16,7 @@ private struct RawOuiEntry: Sendable {
     let fullOrg: String
 }
 
-/// 权威离线 IEEE OUI (MA-L / MA-M / MA-S) 查询库
+/// 离线 IEEE OUI (MA-L / MA-M / MA-S) 查询库
 /// 支持 36-bit -> 28-bit -> 24-bit 最长前缀匹配与本地随机私有 MAC 识别
 public final class LanOuiDatabase: @unchecked Sendable {
     public static let shared = LanOuiDatabase()
@@ -181,7 +181,7 @@ public final class LanOuiDatabase: @unchecked Sendable {
         return (firstByte & 0x02) != 0
     }
 
-    /// 按 36-bit -> 28-bit -> 24-bit 顺序查找权威 IEEE 厂商信息；未命中且 U/L 位为 1 时标注随机私有 MAC
+    /// 按 36-bit -> 28-bit -> 24-bit 顺序查找 IEEE 厂商信息；未命中且 U/L 位为 1 时标注随机私有 MAC
     public func lookup(_ rawMac: String) -> LanOuiMatch? {
         guard let norm = Self.normalizeMAC(rawMac) else { return nil }
         // Strip colons to easily form 24/28/36-bit keys -> norm format "aa:bb:cc:dd:ee:ff"
@@ -447,7 +447,6 @@ public final class LanOuiDatabase: @unchecked Sendable {
             return ("Bose", "Bose 音响", "hifispeaker.fill")
         }
 
-        // Generic authentic IEEE vendor display (no fabricated category!)
         let display = fullOrg.count <= 32 ? fullOrg : "\(shortName) 终端"
         return (shortName, display, "network")
     }

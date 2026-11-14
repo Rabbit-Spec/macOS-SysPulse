@@ -74,10 +74,15 @@ public final class PowerSourceEngine {
 
     private func updateHIDPollingCadence(triggerImmediate: Bool = false) {
         guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
-        // Keep fast polling (2.5s) while UPS UI is visible or IOPS doesn't expose UPS (HID-only fallback);
-        // dial down to 30s in background when IOPS already pushes outage/battery notifications.
-        let interval: Double = (isPanelVisible || !lastPollFoundIOPS) ? 2.5 : 30.0
-        HIDHardwareWatchdog.shared.setPollingInterval(interval, triggerImmediate: triggerImmediate)
+        // When macOS IOPS already monitors AC/battery via IOPSNotificationCreateRunLoopSource,
+        // keep HID USB polling at 30s and skip IOPS-redundant usages to eliminate synchronous USB blocking.
+        let iopsActive = lastPollFoundIOPS
+        let interval: Double = iopsActive ? 30.0 : (isPanelVisible ? 8.0 : 30.0)
+        HIDHardwareWatchdog.shared.setPollingInterval(
+            interval,
+            skipIOPSRedundantUsages: iopsActive,
+            triggerImmediate: triggerImmediate
+        )
     }
 
     // MARK: - Lifecycle & Listeners
@@ -86,7 +91,13 @@ public final class PowerSourceEngine {
         HIDHardwareWatchdog.shared.onSnapshotUpdated = { [weak self] snapshot in
             self?.handleBackgroundHIDSnapshot(snapshot)
         }
-        let initialInterval: Double = (isPanelVisible || !lastPollFoundIOPS) ? 2.5 : 30.0
+        let iopsActive = lastPollFoundIOPS
+        let initialInterval: Double = iopsActive ? 30.0 : (isPanelVisible ? 8.0 : 30.0)
+        HIDHardwareWatchdog.shared.setPollingInterval(
+            initialInterval,
+            skipIOPSRedundantUsages: iopsActive,
+            triggerImmediate: false
+        )
         HIDHardwareWatchdog.shared.start(intervalSeconds: initialInterval)
     }
 
@@ -117,12 +128,13 @@ public final class PowerSourceEngine {
             return
         }
 
-        // 2. If battery level or voltage or ratedVA changed, or if the popover panel is currently open, refresh telemetry
+        // 2. Refresh telemetry only when HID values actually changed
         let battChanged = (snapshot.batteryLevel != nil && snapshot.batteryLevel != telemetry.batteryLevel)
         let voltChanged = (snapshot.voltageVolts != nil && Int(snapshot.voltageVolts ?? 0) != Int(telemetry.voltageVolts))
         let vaChanged = (snapshot.configApparentPowerVA != nil && Int(snapshot.configApparentPowerVA ?? 0) != (telemetry.ratedVA ?? 0))
-        if battChanged || voltChanged || vaChanged || isPanelVisible {
-            refresh(forceUIUpdate: isPanelVisible || vaChanged)
+        let loadChanged = (snapshot.upsLoadPercent != nil && Int(snapshot.upsLoadPercent ?? 0) != Int(telemetry.loadPercent ?? -1))
+        if battChanged || voltChanged || vaChanged || loadChanged {
+            refresh(forceUIUpdate: vaChanged || battChanged)
         }
     }
 
@@ -417,7 +429,11 @@ public final class PowerSourceEngine {
             Int(telemetry.voltageVolts) != Int(voltage) ||
             telemetry.isAudibleAlarmEnabled != alarmEnabled
 
-        guard forceUIUpdate || isPanelVisible || stateChanged || statusBarFieldsChanged else {
+        let upsLoadOrWattsChanged =
+            Int(telemetry.loadPercent ?? -1) != Int(liveLoadPercent) ||
+            Int((telemetry.loadWatts ?? -1).rounded()) != Int(liveMacWatts.rounded())
+
+        guard forceUIUpdate || stateChanged || statusBarFieldsChanged || (isPanelVisible && upsLoadOrWattsChanged) else {
             return
         }
 

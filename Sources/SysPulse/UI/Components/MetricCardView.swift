@@ -84,7 +84,7 @@ public struct MetricCardGrid: View {
                 subtext: "UPS 负载 \(Int(telemetry.loadPercent ?? 6))%"
             )
 
-            // Native Interactive Liquid Glass Control Module for Audible Alarm
+            // 蜂鸣器静音控制按钮
             Button(action: {
                 PowerSourceEngine.shared.toggleAudibleAlarm()
                 NSSound.beep()

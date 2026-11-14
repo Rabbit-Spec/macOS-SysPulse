@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 
 // MARK: - 主窗口根视图
 
@@ -7,10 +8,8 @@ public struct MainStudioWindowView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Bindable var navState = StudioWindowNavigationState.shared
     @Bindable var engine = PowerSourceEngine.shared
-    @Bindable var monitor = SystemResourceMonitor.shared
     @Bindable var toggles = FeatureToggleManager.shared
     @Bindable var diskGuardian = DiskGuardian.shared
-    @Namespace private var tabAnimation
 
     private var theme: LiquidGlassTheme {
         LiquidGlassTheme(colorScheme: colorScheme)
@@ -37,7 +36,7 @@ public struct MainStudioWindowView: View {
                     // 顶部导航栏
                     topNavigationBar
 
-                    // 当前标签页内容区（窗口关闭隐藏时卸载子视图树，彻底停止内部动画与后台 .task 轮询）
+                    // 当前标签页内容区（窗口隐藏时卸载以停止内部动画与后台任务）
                     ZStack(alignment: .top) {
                         if navState.isMainWindowVisible {
                             switch navState.selectedTab {
@@ -45,7 +44,7 @@ public struct MainStudioWindowView: View {
                                 StatusOverviewSection(
                                     navState: navState,
                                     engine: engine,
-                                    monitor: monitor,
+                                    monitor: SystemResourceMonitor.shared,
                                     toggles: toggles,
                                     diskGuardian: diskGuardian,
                                     theme: theme,
@@ -105,20 +104,32 @@ public struct MainStudioWindowView: View {
     // MARK: - 顶部导航栏
 
     private var topNavigationBar: some View {
-        ZStack {
-            // 1. 绝对数学居中导航栏：无论左右两端如何变化，永远处于窗口水平正中央！
+        let tabs = StudioTopTab.allCases
+        let tabWidth: CGFloat = 70
+        let tabHeight: CGFloat = 36
+        let tabSpacing: CGFloat = 6
+        let itemPitch = tabWidth + tabSpacing
+        let selectedIndex = tabs.firstIndex(of: navState.selectedTab) ?? 0
+        let sliderX = CGFloat(selectedIndex) * itemPitch
+
+        return ZStack {
+            // 1. 水平居中导航栏
             HStack(spacing: 0) {
-                // 1. 左上角应用图标下拉菜单按钮
+                // 左上角应用图标下拉菜单按钮
                 Button {
                     navState.isIconMenuPresented.toggle()
                 } label: {
-                    ZStack {
-                        Circle()
-                            .fill(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.06))
-                        SysPulseAppIconView(size: 30, forcedColorScheme: colorScheme, isCircle: true)
-                    }
-                    .frame(width: 32, height: 32)
-                    .contentShape(Circle())
+                    SysPulseAppIconView(size: 30, forcedColorScheme: colorScheme, isCircle: true)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
+                        )
+                        .overlay(
+                            Circle()
+                                .strokeBorder(colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.08), lineWidth: 0.6)
+                        )
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .pointingHandOnHover()
@@ -130,26 +141,21 @@ public struct MainStudioWindowView: View {
                 Spacer()
                     .frame(width: 14)
 
-                // 2. 顶部模块切换标签 (支持单击 + 长按连续滑动选择 Continuous Scrubbing)
-                HStack(spacing: 6) {
-                    ForEach(StudioTopTab.allCases) { tab in
+                // 顶部模块切换标签
+                HStack(spacing: tabSpacing) {
+                    ForEach(tabs) { tab in
                         let isSelected = (navState.selectedTab == tab && !navState.isModalPresented)
                         let isHovered = (navState.hoveredTopTab == tab && !isSelected)
                         Button {
-                            withAnimation(.spring(response: 0.30, dampingFraction: 0.78, blendDuration: 0)) {
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.74)) {
                                 navState.selectedTab = tab
                                 navState.isModalPresented = false
                             }
                         } label: {
                             ZStack {
-                                // 选中态：官方原生液态玻璃高透凸透镜流体滑块
-                                if isSelected {
-                                    selectedLiquidGlassPill
-                                        .matchedGeometryEffect(id: "selected_liquid_glass_tab", in: tabAnimation)
-                                } else if isHovered {
-                                    // 未选中项悬停微光
+                                if isHovered {
                                     Capsule(style: .continuous)
-                                        .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
+                                        .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
                                         .transition(.opacity)
                                 }
 
@@ -157,17 +163,11 @@ public struct MainStudioWindowView: View {
                                     .font(.system(size: 14, weight: isSelected ? .bold : .medium, design: .rounded))
                                     .foregroundStyle(
                                         isSelected
-                                            ? (colorScheme == .dark ? Color.white : Color.black.opacity(0.88))
-                                            : theme.primaryText.opacity(0.78)
-                                    )
-                                    .shadow(
-                                        color: (isSelected && colorScheme == .dark) ? Color.black.opacity(0.35) : Color.clear,
-                                        radius: 1,
-                                        x: 0,
-                                        y: 1
+                                            ? (colorScheme == .dark ? Color.white : Color(red: 0.05, green: 0.18, blue: 0.36))
+                                            : theme.primaryText.opacity(0.76)
                                     )
                             }
-                            .frame(width: 70, height: 36)
+                            .frame(width: tabWidth, height: tabHeight)
                             .contentShape(Capsule())
                         }
                         .buttonStyle(.plain)
@@ -183,79 +183,63 @@ public struct MainStudioWindowView: View {
                         }
                     }
                 }
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            navState.isScrubbingTab = true
-                            let itemPitch: CGFloat = 76.0
-                            let totalPitch = CGFloat(StudioTopTab.allCases.count) * itemPitch - 6
-                            let clampedX = max(0, min(value.location.x, totalPitch))
-                            let index = min(max(0, Int(clampedX / itemPitch)), StudioTopTab.allCases.count - 1)
-                            let targetTab = StudioTopTab.allCases[index]
-                            if navState.selectedTab != targetTab {
-                                withAnimation(.spring(response: 0.28, dampingFraction: 0.72, blendDuration: 0)) {
-                                    navState.selectedTab = targetTab
-                                    navState.isModalPresented = false
-                                }
-                            }
-                        }
-                        .onEnded { value in
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.75, blendDuration: 0)) {
-                                navState.isScrubbingTab = false
-                                let itemPitch: CGFloat = 76.0
-                                let totalPitch = CGFloat(StudioTopTab.allCases.count) * itemPitch - 6
-                                let clampedX = max(0, min(value.location.x, totalPitch))
-                                let index = min(max(0, Int(clampedX / itemPitch)), StudioTopTab.allCases.count - 1)
-                                let targetTab = StudioTopTab.allCases[index]
-                                navState.selectedTab = targetTab
-                                navState.isModalPresented = false
-                            }
-                        }
-                )
+                .background(alignment: .leading) {
+                    // 选中标签高亮滑块
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: colorScheme == .dark
+                                    ? [
+                                        Color(red: 0.34, green: 0.56, blue: 0.88).opacity(0.42),
+                                        Color(red: 0.16, green: 0.28, blue: 0.48).opacity(0.36)
+                                    ]
+                                    : [
+                                        Color(red: 0.95, green: 0.98, blue: 1.00).opacity(0.92),
+                                        Color(red: 0.85, green: 0.91, blue: 0.99).opacity(0.86)
+                                    ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: colorScheme == .dark
+                                            ? [
+                                                Color.white.opacity(0.55),
+                                                Color(red: 0.32, green: 0.62, blue: 1.00).opacity(0.28)
+                                            ]
+                                            : [
+                                                Color.white.opacity(0.94),
+                                                Color(red: 0.12, green: 0.42, blue: 0.82).opacity(0.24)
+                                            ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 0.75
+                                )
+                        )
+                        .frame(width: tabWidth, height: tabHeight)
+                        .offset(x: sliderX)
+                        .opacity(navState.isModalPresented ? 0.0 : 1.0)
+                        .animation(.spring(response: 0.34, dampingFraction: 0.74), value: sliderX)
+                        .animation(.easeOut(duration: 0.18), value: navState.isModalPresented)
+                }
                 .padding(.trailing, 2)
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
             .background(
                 Capsule(style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(colorScheme == .dark ? 0.16 : 0.45),
-                                        Color.white.opacity(colorScheme == .dark ? 0.04 : 0.12)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(colorScheme == .dark ? 0.35 : 0.70),
-                                        Color.white.opacity(colorScheme == .dark ? 0.10 : 0.20)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: 0.8
-                            )
-                    )
-                    .shadow(
-                        color: colorScheme == .dark ? Color.black.opacity(0.35) : Color.black.opacity(0.08),
-                        radius: 12,
-                        x: 0,
-                        y: 4
-                    )
+                    .fill(theme.studioCardFill)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
             )
 
-            // 2. 右侧对齐的版本号与检查更新按钮 (独立悬浮，绝不挤压居中导航栏)
+            // 2. 右侧版本号与检查更新按钮
             HStack(spacing: 0) {
                 Spacer()
 
@@ -273,11 +257,23 @@ public struct MainStudioWindowView: View {
                             .foregroundStyle(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan : theme.secondaryText)
                     }
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 5)
                     .background(
-                        Capsule()
-                            .fill(theme.cardFill)
-                            .overlay(Capsule().strokeBorder(AppUpdateManager.shared.hasUpdateAvailable ? Color.cyan.opacity(0.45) : theme.cardBorder, lineWidth: 0.6))
+                        Capsule(style: .continuous)
+                            .fill(
+                                AppUpdateManager.shared.hasUpdateAvailable
+                                    ? Color.cyan.opacity(colorScheme == .dark ? 0.18 : 0.12)
+                                    : (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
+                            )
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                AppUpdateManager.shared.hasUpdateAvailable
+                                    ? Color.cyan.opacity(0.45)
+                                    : (colorScheme == .dark ? Color.white.opacity(0.15) : Color.black.opacity(0.08)),
+                                lineWidth: 0.7
+                            )
                     )
                 }
                 .buttonStyle(.plain)
@@ -289,56 +285,6 @@ public struct MainStudioWindowView: View {
         .frame(height: 44)
         .padding(.top, 35)
         .padding(.horizontal, 8)
-    }
-
-    // MARK: - 选中的原生液态玻璃微凸透镜胶囊
-
-    private var selectedLiquidGlassPill: some View {
-        Capsule(style: .continuous)
-            // 1. 基底高透折射微磨砂层 (通透不失真，保留底层折射与色彩透出)
-            .fill(
-                colorScheme == .dark
-                    ? Color.white.opacity(navState.isScrubbingTab ? 0.24 : 0.18)
-                    : Color.white.opacity(navState.isScrubbingTab ? 0.82 : 0.72)
-            )
-            // 2. 纵向微凸透镜表面张力高光膜 (模拟凸透镜受顶光散射)
-            .overlay(
-                Capsule(style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? (navState.isScrubbingTab ? 0.42 : 0.32) : (navState.isScrubbingTab ? 0.75 : 0.65)),
-                                Color.white.opacity(colorScheme == .dark ? 0.05 : 0.15)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-            )
-            // 3. 极细棱镜反光边缘 (Prismatic Edge Rim，营造立体物理厚度)
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? (navState.isScrubbingTab ? 0.75 : 0.55) : (navState.isScrubbingTab ? 0.95 : 0.85)),
-                                Color.white.opacity(colorScheme == .dark ? 0.12 : 0.25)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
-            )
-            // 4. 空间悬浮微阴影与按压张力
-            .shadow(
-                color: colorScheme == .dark ? Color.black.opacity(navState.isScrubbingTab ? 0.42 : 0.28) : Color.black.opacity(navState.isScrubbingTab ? 0.18 : 0.10),
-                radius: navState.isScrubbingTab ? 6 : 4,
-                x: 0,
-                y: navState.isScrubbingTab ? 3 : 2
-            )
-            .scaleEffect(navState.isScrubbingTab ? CGSize(width: 1.05, height: 0.95) : CGSize(width: 1.0, height: 1.0))
-            .animation(.spring(response: 0.22, dampingFraction: 0.70), value: navState.isScrubbingTab)
     }
 
     // MARK: - 应用图标下拉菜单
@@ -479,7 +425,6 @@ private struct StatusOverviewSection: View {
     let theme: LiquidGlassTheme
     var canvasWidth: CGFloat = 1200
     var canvasHeight: CGFloat = 822
-    @Environment(\.colorScheme) private var colorScheme
 
     private var contentW: CGFloat { max(1152, canvasWidth - 48) }
     private var contentH: CGFloat { max(684, canvasHeight - 79 - 59) }
@@ -487,42 +432,77 @@ private struct StatusOverviewSection: View {
     private var colOtherW: CGFloat { max(256, (contentW - 36 - col1W) / 3.0) }
     private var cardRowH: CGFloat { max(170, round((contentH - 28) * (170.0 / 656.0))) }
     private var processCardH: CGFloat { max(316, (contentH - 28) - 2 * cardRowH) }
-    private var rowScale: CGFloat { max(1.0, cardRowH / 170.0) }
 
     public var body: some View {
         VStack(spacing: 14) {
             // 2x4 核心状态指标卡片网格
-            VStack(spacing: 14) {
-                HStack(spacing: 12) {
-                    healthCard
-                        .frame(width: col1W, height: cardRowH)
-                    cpuCard
-                        .frame(width: colOtherW, height: cardRowH)
-                    gpuCard
-                        .frame(width: colOtherW, height: cardRowH)
-                    memoryCard
-                        .frame(width: colOtherW, height: cardRowH)
-                }
-
-                HStack(spacing: 12) {
-                    powerBatteryCard
-                        .frame(width: col1W, height: cardRowH)
-                    diskSpaceCard
-                        .frame(width: colOtherW, height: cardRowH)
-                    networkCard
-                        .frame(width: colOtherW, height: cardRowH)
-                    fanCard
-                        .frame(width: colOtherW, height: cardRowH)
-                }
-            }
+            OverviewTopBentoGridView(
+                navState: navState,
+                engine: engine,
+                monitor: monitor,
+                toggles: toggles,
+                fan: fan,
+                accessories: accessories,
+                theme: theme,
+                col1W: col1W,
+                colOtherW: colOtherW,
+                cardRowH: cardRowH
+            )
 
             // 底部高能耗进程排行卡片
-            processRankingCard
-                .frame(width: contentW, height: processCardH)
+            OverviewProcessRankingCardView(
+                navState: navState,
+                monitor: monitor,
+                theme: theme,
+                contentW: contentW,
+                processCardH: processCardH
+            )
         }
         .padding(.horizontal, 24)
         .padding(.top, 35)
         .padding(.bottom, 24)
+    }
+}
+
+private struct OverviewTopBentoGridView: View {
+    @Bindable var navState: StudioWindowNavigationState
+    @Bindable var engine: PowerSourceEngine
+    @Bindable var monitor: SystemResourceMonitor
+    @Bindable var toggles: FeatureToggleManager
+    @Bindable var fan: FanController
+    @Bindable var accessories: AccessoryBatteryManager
+    let theme: LiquidGlassTheme
+    let col1W: CGFloat
+    let colOtherW: CGFloat
+    let cardRowH: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var rowScale: CGFloat { max(1.0, cardRowH / 170.0) }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                healthCard
+                    .frame(width: col1W, height: cardRowH)
+                cpuCard
+                    .frame(width: colOtherW, height: cardRowH)
+                gpuCard
+                    .frame(width: colOtherW, height: cardRowH)
+                memoryCard
+                    .frame(width: colOtherW, height: cardRowH)
+            }
+
+            HStack(spacing: 12) {
+                powerBatteryCard
+                    .frame(width: col1W, height: cardRowH)
+                diskSpaceCard
+                    .frame(width: colOtherW, height: cardRowH)
+                networkCard
+                    .frame(width: colOtherW, height: cardRowH)
+                fanCard
+                    .frame(width: colOtherW, height: cardRowH)
+            }
+        }
     }
 
     // 1. 健康度卡片
@@ -553,14 +533,13 @@ private struct StatusOverviewSection: View {
 
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 5) {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text("\(snapshot.score)")
-                                .font(.system(size: 32, weight: .bold, design: .rounded))
-                                .foregroundStyle(theme.primaryText)
-                            Text(snapshot.rating.rawValue)
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundStyle(theme.secondaryText)
-                        }
+                        overviewMetricHeadline(
+                            "\(snapshot.score)",
+                            unit: snapshot.rating.rawValue,
+                            unitSize: 15,
+                            unitSpacing: "  ",
+                            numericValue: Double(snapshot.score)
+                        )
 
                         Text(snapshot.primarySummary)
                             .font(.system(size: 12.5, weight: .medium))
@@ -617,49 +596,21 @@ private struct StatusOverviewSection: View {
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
                     Spacer()
-                    headerBadge("\(temp)°C")
+                    headerBadge("\(temp)°C", numericValue: Double(temp))
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(cpuPercent)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("%")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                overviewMetricHeadline("\(cpuPercent)", unit: "%", numericValue: Double(cpuPercent))
 
                 Spacer(minLength: 2)
 
-                // 多核负载柱状图
-                GeometryReader { geo in
-                    let count = max(8, coreCount)
-                    let totalW = geo.size.width
-                    let spacing: CGFloat = count > 12 ? 2.5 : 3.5
-                    let totalSpacing = spacing * CGFloat(count - 1)
-                    let barWidth = max(3.5, (totalW - totalSpacing) / CGFloat(count))
-
-                    HStack(alignment: .bottom, spacing: spacing) {
-                        ForEach(0..<count, id: \.self) { idx in
-                            let coreVal = idx < coreLoads.count ? coreLoads[idx] : Double(cpuPercent)
-                            let barHeight = max(3.5, min(eqH, 3.5 + (coreVal / 100.0) * (eqH - 3.5)))
-
-                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: coreVal > 75
-                                            ? [Color(red: 0.96, green: 0.58, blue: 0.24), Color(red: 0.90, green: 0.42, blue: 0.20)]
-                                            : [Color(red: 0.32, green: 0.86, blue: 0.58), Color(red: 0.20, green: 0.74, blue: 0.46)],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                                .frame(width: barWidth, height: barHeight)
-                                .animation(.spring(response: 0.32, dampingFraction: 0.72), value: coreVal)
-                        }
-                    }
-                    .frame(width: totalW, height: eqH, alignment: .bottom)
-                }
+                // 多核负载均衡器
+                OverviewCPUFluidEqualizerView(
+                    coreCount: max(8, coreCount),
+                    coreLoads: coreLoads,
+                    fallbackPercent: Double(cpuPercent),
+                    height: eqH,
+                    isDark: colorScheme == .dark
+                )
                 .frame(height: eqH)
 
                 Spacer(minLength: 2)
@@ -695,22 +646,23 @@ private struct StatusOverviewSection: View {
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.95, green: 0.60, blue: 0.20))
                     Spacer()
-                    headerBadge("\(temp)°C")
+                    headerBadge("\(temp)°C", numericValue: Double(temp))
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(gpuPercent)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("%")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                overviewMetricHeadline("\(gpuPercent)", unit: "%", numericValue: Double(gpuPercent))
 
                 Spacer(minLength: 2)
 
-                MiniWaveformLine(history: monitor.hardware.gpuHistory, color: Color(red: 0.95, green: 0.60, blue: 0.20))
-                    .frame(height: round(24.0 * rowScale))
+                SurgeConveyorWaveformView(
+                    primaryHistory: monitor.hardware.gpuHistory,
+                    secondaryHistory: nil,
+                    minScaleCeiling: 20.0,
+                    activeThreshold: 2.0,
+                    accentColor: Color(red: 0.95, green: 0.60, blue: 0.20),
+                    isDark: colorScheme == .dark
+                )
+                .equatable()
+                .frame(height: round(26.0 * rowScale))
 
                 Spacer(minLength: 2)
 
@@ -739,21 +691,14 @@ private struct StatusOverviewSection: View {
                     headerBadge("压力\(monitor.memory.pressureLabel)")
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(usedPercent)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("%")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                overviewMetricHeadline("\(usedPercent)", unit: "%", numericValue: Double(usedPercent))
 
                 Spacer(minLength: 2)
 
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(Color.white.opacity(0.10))
+                            .fill(theme.gaugeTrack)
                         Capsule()
                             .fill(
                                 LinearGradient(
@@ -763,6 +708,7 @@ private struct StatusOverviewSection: View {
                                 )
                             )
                             .frame(width: max(8, geo.size.width * CGFloat(usedPercent) / 100.0))
+                            .animation(.smooth(duration: 0.45), value: usedPercent)
                     }
                 }
                 .frame(height: round(6.0 * rowScale))
@@ -780,12 +726,13 @@ private struct StatusOverviewSection: View {
 
     // 5. 供电与电池卡片
     private var powerBatteryCard: some View {
-        let upsConnected = toggles.enablePluginUPSManager && engine.telemetry.isConnected
-        let isMacBook = toggles.enableMacBookDemoMode || (monitor.loadRuntime.hasInternalBattery && !upsConnected)
-        let batteryLevel = upsConnected
-            ? engine.telemetry.batteryLevel
-            : (monitor.loadRuntime.hasInternalBattery ? monitor.loadRuntime.internalBatteryPercent : 100)
-        let isOnline = upsConnected ? engine.telemetry.state.isAC : (isMacBook ? monitor.loadRuntime.isInternalCharging : true)
+        let presentation = PowerCardPresentation.resolve(
+            upsEnabled: toggles.enablePluginUPSManager,
+            upsTelemetry: engine.telemetry,
+            loadRuntime: monitor.loadRuntime,
+            hardwareBatteryCharging: monitor.hardware.isBatteryCharging,
+            isMacBookDemoMode: toggles.enableMacBookDemoMode
+        )
         let curWatts = monitor.power.totalSystemWatts
         let peakWatts = max(monitor.power.peakWatts, curWatts)
         let topEnergyApp = monitor.topEnergyApps.first?.name ?? "WindowServer"
@@ -795,25 +742,18 @@ private struct StatusOverviewSection: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     PulsingHeaderSymbolView(
-                        systemName: isMacBook ? "battery.100.bolt" : (upsConnected ? "bolt.fill" : "powerplug.fill"),
+                        systemName: presentation.iconName,
                         size: 13,
-                        color: Color(red: 0.35, green: 0.82, blue: 0.55)
+                        color: presentation.iconColor
                     )
-                    Text(isMacBook ? "电池" : (upsConnected ? "UPS 供电" : "AC 供电"))
+                    Text(presentation.title)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Color(red: 0.35, green: 0.82, blue: 0.55))
                     Spacer()
                 }
 
                 HStack(alignment: .center, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        Text("\(batteryLevel)")
-                            .font(.system(size: 32, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.primaryText)
-                        Text("%")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(theme.secondaryText)
-                    }
+                    overviewMetricHeadline("\(presentation.percent)", unit: "%", numericValue: Double(presentation.percent))
 
                     Spacer()
 
@@ -844,9 +784,11 @@ private struct StatusOverviewSection: View {
                 Spacer(minLength: 2)
 
                 HStack(spacing: 7) {
-                    Text(isOnline ? (isMacBook ? "充电中" : "市电在线") : "电池供电")
+                    Text(presentation.statusText)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(isOnline ? Color(red: 0.35, green: 0.85, blue: 0.55) : Color.orange)
+                        .foregroundStyle(presentation.statusColor)
+                        .lineLimit(1)
+                        .layoutPriority(1)
 
                     Text("·")
                         .font(.system(size: 12))
@@ -913,24 +855,18 @@ private struct StatusOverviewSection: View {
                     headerBadge("\(totalGB) GB")
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(freeGB)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                    Text("GB")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                overviewMetricHeadline("\(freeGB)", unit: "GB", numericValue: Double(freeGB))
 
                 Spacer(minLength: 2)
 
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Capsule()
-                            .fill(Color.white.opacity(0.10))
+                            .fill(theme.gaugeTrack)
                         Capsule()
                             .fill(Color.blue)
                             .frame(width: max(8, geo.size.width * CGFloat(usedPct) / 100.0))
+                            .animation(.smooth(duration: 0.45), value: usedPct)
                     }
                 }
                 .frame(height: round(6.0 * rowScale))
@@ -948,6 +884,7 @@ private struct StatusOverviewSection: View {
 
     // 7. 网络吞吐卡片
     private var networkCard: some View {
+        let downloadBytes = monitor.hardware.networkDownloadBytesPerSec
         let parts = monitor.hardware.downloadSpeedParts
         let ifKind = monitor.hardware.primaryInterfaceKind
 
@@ -961,24 +898,20 @@ private struct StatusOverviewSection: View {
                     headerBadge(ifKind)
                 }
 
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(parts.value)
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                        .lineLimit(1)
-                    Text(parts.unit)
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                overviewMetricHeadline(parts.value, unit: parts.unit, numericValue: downloadBytes)
 
                 Spacer(minLength: 2)
 
-                DualSparklineView(
-                    downloadHistory: monitor.hardware.networkHistoryDownload,
-                    uploadHistory: monitor.hardware.networkHistoryUpload,
-                    color: Color.cyan
+                SurgeConveyorWaveformView(
+                    primaryHistory: monitor.hardware.networkHistoryDownload,
+                    secondaryHistory: monitor.hardware.networkHistoryUpload,
+                    minScaleCeiling: 1024.0 * 20.0,
+                    activeThreshold: 512.0,
+                    accentColor: Color.cyan,
+                    isDark: colorScheme == .dark
                 )
-                .frame(height: round(24.0 * rowScale))
+                .equatable()
+                .frame(height: round(26.0 * rowScale))
 
                 Spacer(minLength: 2)
 
@@ -994,7 +927,7 @@ private struct StatusOverviewSection: View {
         .frame(height: cardRowH)
     }
 
-    // 8. 风扇转速与温控卡片（无风扇机型自适应为「静音散热」热工况卡片）
+    // 8. 风扇转速与温控卡片
     private var fanCard: some View {
         let fan = FanController.shared
         let rpm = fan.currentRPM
@@ -1009,17 +942,14 @@ private struct StatusOverviewSection: View {
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundStyle(Color.orange)
                         Spacer()
-                        headerBadge("转速 \(pct)%")
+                        headerBadge("转速 \(pct)%", numericValue: Double(pct))
                     }
 
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(NumberFormatter.localizedString(from: NSNumber(value: rpm), number: .decimal))
-                            .font(.system(size: 32, weight: .bold, design: .rounded))
-                            .foregroundStyle(theme.primaryText)
-                        Text("RPM")
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(theme.secondaryText)
-                    }
+                    overviewMetricHeadline(
+                        NumberFormatter.localizedString(from: NSNumber(value: rpm), number: .decimal),
+                        unit: "RPM",
+                        numericValue: Double(rpm)
+                    )
 
                     Spacer(minLength: 2)
 
@@ -1068,7 +998,10 @@ private struct StatusOverviewSection: View {
                         Text(tier.rawValue)
                             .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
+                            .contentTransition(.opacity)
+                            .animation(.easeInOut(duration: 0.28), value: tier)
                         Text("被动均热 · \(tempC)°C")
+                            .monospacedDigit()
                             .font(.system(size: 13.5, weight: .semibold, design: .rounded))
                             .foregroundStyle(theme.secondaryText)
                     }
@@ -1127,7 +1060,383 @@ private struct StatusOverviewSection: View {
         .pointingHandOnHover()
     }
 
-    // MARK: - 高能耗进程排行列表
+    // MARK: - Component Helpers
+
+    /// 状态卡片主数字与单位排版（支持数字翻页动画）
+    private func overviewMetricHeadline(
+        _ valueText: String,
+        unit: String,
+        unitSize: CGFloat = 14,
+        unitSpacing: String = " ",
+        numericValue: Double
+    ) -> some View {
+        RollingFlipMetricHeadlineView(
+            valueText: valueText,
+            unitText: unitSpacing + unit,
+            unitSize: unitSize,
+            numericValue: numericValue,
+            primaryColor: theme.primaryText,
+            secondaryColor: theme.secondaryText,
+            isDark: colorScheme == .dark
+        )
+    }
+
+    private func cardBackground<Content: View>(id: String = "", @ViewBuilder content: () -> Content) -> some View {
+        OverviewCardShell(id: id, navState: navState, theme: theme) {
+            content()
+        }
+    }
+
+    private func pillBadge(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+            .foregroundStyle(theme.secondaryText)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1.5)
+            .background(
+                Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
+            )
+    }
+
+    private func headerBadge(_ text: String, numericValue: Double? = nil) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .foregroundStyle(theme.secondaryText)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(
+                Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
+            )
+    }
+
+    private func circularPill(icon: String, isActive: Bool) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(isActive ? Color(red: 0.35, green: 0.82, blue: 0.55) : theme.secondaryText)
+            .frame(width: 20, height: 20)
+            .background(
+                Circle().fill(isActive ? Color(red: 0.35, green: 0.82, blue: 0.55).opacity(0.18) : Color.white.opacity(0.05))
+            )
+    }
+}
+
+private struct RollingFlipMetricHeadlineView: NSViewRepresentable, Equatable {
+    let valueText: String
+    let unitText: String
+    let unitSize: CGFloat
+    let numericValue: Double
+    let primaryColor: Color
+    let secondaryColor: Color
+    let isDark: Bool
+
+    nonisolated static func == (lhs: RollingFlipMetricHeadlineView, rhs: RollingFlipMetricHeadlineView) -> Bool {
+        lhs.valueText == rhs.valueText
+            && lhs.unitText == rhs.unitText
+            && lhs.unitSize == rhs.unitSize
+            && lhs.isDark == rhs.isDark
+    }
+
+    func makeNSView(context: Context) -> RollingFlipHeadlineNSView {
+        RollingFlipHeadlineNSView()
+    }
+
+    func updateNSView(_ nsView: RollingFlipHeadlineNSView, context: Context) {
+        nsView.configure(
+            valueText: valueText,
+            unitText: unitText,
+            unitSize: unitSize,
+            numericValue: numericValue,
+            primaryColor: primaryColor,
+            secondaryColor: secondaryColor,
+            isDark: isDark
+        )
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: RollingFlipHeadlineNSView, context: Context) -> CGSize? {
+        nsView.fittingSize
+    }
+}
+
+private final class RollingFlipHeadlineNSView: NSView {
+    private static let valueFont: NSFont = {
+        let base = NSFont.systemFont(ofSize: 32, weight: .bold)
+        let rounded = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+        let mono = rounded.addingAttributes([
+            .featureSettings: [[
+                NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector
+            ]]
+        ])
+        return NSFont(descriptor: mono, size: 32) ?? NSFont.monospacedDigitSystemFont(ofSize: 32, weight: .bold)
+    }()
+
+    private static let unitFont14: NSFont = {
+        let base = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        let desc = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+        return NSFont(descriptor: desc, size: 14) ?? base
+    }()
+
+    private static let unitFont15: NSFont = {
+        let base = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        let desc = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+        return NSFont(descriptor: desc, size: 15) ?? base
+    }()
+
+    private let flipClipContainer = NSView()
+    private let valueLabel = NSTextField(labelWithString: "")
+    private let unitLabel = NSTextField(labelWithString: "")
+
+    private var lastValueText: String?
+    private var lastNumericValue: Double = 0
+    private var lastUnitSize: CGFloat = 0
+    private var lastIsDark: Bool?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupHierarchy()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupHierarchy()
+    }
+
+    private func setupHierarchy() {
+        wantsLayer = true
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+
+        flipClipContainer.wantsLayer = true
+        flipClipContainer.layer?.masksToBounds = true
+        flipClipContainer.translatesAutoresizingMaskIntoConstraints = false
+        flipClipContainer.setContentHuggingPriority(.required, for: .horizontal)
+        flipClipContainer.setContentHuggingPriority(.required, for: .vertical)
+
+        valueLabel.wantsLayer = true
+        valueLabel.font = Self.valueFont
+        valueLabel.maximumNumberOfLines = 1
+        valueLabel.lineBreakMode = .byClipping
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
+        valueLabel.setContentHuggingPriority(.required, for: .vertical)
+        valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        valueLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        unitLabel.font = Self.unitFont14
+        unitLabel.maximumNumberOfLines = 1
+        unitLabel.lineBreakMode = .byClipping
+        unitLabel.translatesAutoresizingMaskIntoConstraints = false
+        unitLabel.setContentHuggingPriority(.required, for: .horizontal)
+        unitLabel.setContentHuggingPriority(.required, for: .vertical)
+        unitLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        unitLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        flipClipContainer.addSubview(valueLabel)
+        addSubview(flipClipContainer)
+        addSubview(unitLabel)
+
+        NSLayoutConstraint.activate([
+            valueLabel.leadingAnchor.constraint(equalTo: flipClipContainer.leadingAnchor),
+            valueLabel.trailingAnchor.constraint(equalTo: flipClipContainer.trailingAnchor),
+            valueLabel.topAnchor.constraint(equalTo: flipClipContainer.topAnchor),
+            valueLabel.bottomAnchor.constraint(equalTo: flipClipContainer.bottomAnchor),
+
+            flipClipContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            flipClipContainer.topAnchor.constraint(equalTo: topAnchor),
+            flipClipContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            unitLabel.leadingAnchor.constraint(equalTo: flipClipContainer.trailingAnchor),
+            unitLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            unitLabel.firstBaselineAnchor.constraint(equalTo: valueLabel.firstBaselineAnchor)
+        ])
+    }
+
+    func configure(
+        valueText: String,
+        unitText: String,
+        unitSize: CGFloat,
+        numericValue: Double,
+        primaryColor: Color,
+        secondaryColor: Color,
+        isDark: Bool
+    ) {
+        if lastIsDark != isDark {
+            lastIsDark = isDark
+            appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
+            valueLabel.textColor = NSColor(primaryColor)
+            unitLabel.textColor = NSColor(secondaryColor)
+        }
+
+        if abs(lastUnitSize - unitSize) > 0.1 {
+            lastUnitSize = unitSize
+            if abs(unitSize - 15) < 0.1 {
+                unitLabel.font = Self.unitFont15
+            } else if abs(unitSize - 14) < 0.1 {
+                unitLabel.font = Self.unitFont14
+            } else {
+                let base = NSFont.systemFont(ofSize: unitSize, weight: .semibold)
+                let desc = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
+                unitLabel.font = NSFont(descriptor: desc, size: unitSize) ?? base
+            }
+        }
+
+        var needsSizeInvalidation = false
+
+        if unitLabel.stringValue != unitText {
+            unitLabel.stringValue = unitText
+            needsSizeInvalidation = true
+        }
+
+        if lastValueText != valueText {
+            if let _ = lastValueText {
+                let transition = CATransition()
+                transition.type = .push
+                transition.subtype = (numericValue >= lastNumericValue) ? .fromBottom : .fromTop
+                transition.duration = 0.22
+                transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                valueLabel.layer?.add(transition, forKey: "metricPushFlip")
+            }
+            lastValueText = valueText
+            lastNumericValue = numericValue
+            valueLabel.stringValue = valueText
+            needsSizeInvalidation = true
+        } else {
+            lastNumericValue = numericValue
+        }
+
+        if needsSizeInvalidation {
+            invalidateIntrinsicContentSize()
+            layoutSubtreeIfNeeded()
+        }
+    }
+}
+
+private struct OverviewCardShell<Content: View>: View {
+    let id: String
+    @Bindable var navState: StudioWindowNavigationState
+    let theme: LiquidGlassTheme
+    let content: Content
+    @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        id: String,
+        navState: StudioWindowNavigationState,
+        theme: LiquidGlassTheme,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.id = id
+        self.navState = navState
+        self.theme = theme
+        self.content = content()
+    }
+
+    var body: some View {
+        let isHovered = (!id.isEmpty && navState.hoveredOverviewCardID == id)
+
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.studioCardFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(
+                            isHovered ? theme.studioCardHoverBorder : theme.studioCardBorder,
+                            lineWidth: isHovered ? 1.1 : 0.8
+                        )
+                )
+        )
+        .offset(y: isHovered ? -2.0 : 0.0)
+        .animation(.spring(response: 0.26, dampingFraction: 0.78), value: isHovered)
+        .onHover { hovering in
+            guard !id.isEmpty else { return }
+            if hovering {
+                navState.hoveredOverviewCardID = id
+            } else if navState.hoveredOverviewCardID == id {
+                navState.hoveredOverviewCardID = nil
+            }
+        }
+    }
+}
+
+/// CPU 多核负载均衡器视图
+private struct OverviewCPUFluidEqualizerView: View, Equatable {
+    let coreCount: Int
+    let coreLoads: [Double]
+    let fallbackPercent: Double
+    let height: CGFloat
+    let isDark: Bool
+
+    nonisolated static func == (lhs: OverviewCPUFluidEqualizerView, rhs: OverviewCPUFluidEqualizerView) -> Bool {
+        lhs.coreCount == rhs.coreCount
+            && lhs.height == rhs.height
+            && lhs.isDark == rhs.isDark
+            && lhs.fallbackPercent == rhs.fallbackPercent
+            && lhs.coreLoads == rhs.coreLoads
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let count = max(8, coreCount)
+            let totalW = geo.size.width
+            let spacing: CGFloat = count > 12 ? 2.5 : 3.5
+            let totalSpacing = spacing * CGFloat(count - 1)
+            let barWidth = max(3.5, (totalW - totalSpacing) / CGFloat(count))
+            let trackColor = isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.055)
+
+            HStack(alignment: .bottom, spacing: spacing) {
+                ForEach(0..<count, id: \.self) { idx in
+                    let rawVal = idx < coreLoads.count ? coreLoads[idx] : fallbackPercent
+                    let quantizedVal = (max(0.0, min(100.0, rawVal)) / 2.0).rounded() * 2.0
+                    let fillRatio = max(0.14, min(1.0, quantizedVal / 100.0))
+                    let heatStep = (max(0.0, min(1.0, (quantizedVal - 50.0) / 40.0)) * 4.0).rounded() / 4.0
+
+                    let topColor = Color(
+                        red: 0.32 + (0.96 - 0.32) * heatStep,
+                        green: 0.86 + (0.58 - 0.86) * heatStep,
+                        blue: 0.58 + (0.24 - 0.58) * heatStep
+                    )
+                    let bottomColor = Color(
+                        red: 0.20 + (0.90 - 0.20) * heatStep,
+                        green: 0.74 + (0.42 - 0.74) * heatStep,
+                        blue: 0.46 + (0.20 - 0.46) * heatStep
+                    )
+
+                    ZStack(alignment: .bottom) {
+                        RoundedRectangle(cornerRadius: 2.0, style: .continuous)
+                            .fill(trackColor)
+                            .frame(width: barWidth, height: height)
+
+                        RoundedRectangle(cornerRadius: 2.0, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [topColor, bottomColor],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .transaction { $0.animation = nil }
+                            .frame(width: barWidth, height: height)
+                            .scaleEffect(x: 1.0, y: fillRatio, anchor: .bottom)
+                            .animation(.easeOut(duration: 0.25), value: fillRatio)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 2.0, style: .continuous))
+                }
+            }
+            .frame(width: totalW, height: height, alignment: .bottom)
+        }
+    }
+}
+
+private struct OverviewProcessRankingCardView: View {
+    @Bindable var navState: StudioWindowNavigationState
+    @Bindable var monitor: SystemResourceMonitor
+    let theme: LiquidGlassTheme
+    let contentW: CGFloat
+    let processCardH: CGFloat
 
     private var currentDisplayApps: [EnergyAppItem] {
         if navState.displayedProcesses.isEmpty {
@@ -1137,29 +1446,15 @@ private struct StatusOverviewSection: View {
     }
 
     private var sortedDisplayApps: [EnergyAppItem] {
-        let list = currentDisplayApps
-        let field = navState.processSortField
-        let order = navState.processSortOrder
-        return list.sorted { a, b in
-            switch field {
-            case .name:
-                let comp = a.name.localizedStandardCompare(b.name)
-                return order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
-            case .memory:
-                return order == .ascending ? (a.memoryBytes < b.memoryBytes) : (a.memoryBytes > b.memoryBytes)
-            case .cpu:
-                return order == .ascending ? (a.cpuPercent < b.cpuPercent) : (a.cpuPercent > b.cpuPercent)
-            case .energy:
-                return order == .ascending ? (a.energyImpactScore < b.energyImpactScore) : (a.energyImpactScore > b.energyImpactScore)
-            case .pid:
-                return order == .ascending ? (a.pid < b.pid) : (a.pid > b.pid)
-            }
+        if !navState.sortedProcesses.isEmpty {
+            return navState.sortedProcesses
         }
+        return currentDisplayApps
     }
 
-    private var processRankingCard: some View {
+    var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 24) {
+            HStack(spacing: 18) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         navState.toggleSort(field: .name)
@@ -1198,7 +1493,7 @@ private struct StatusOverviewSection: View {
                                 .foregroundStyle(Color.cyan)
                         }
                     }
-                    .frame(width: 110, alignment: .trailing)
+                    .frame(width: 96, alignment: .trailing)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1220,7 +1515,7 @@ private struct StatusOverviewSection: View {
                                 .foregroundStyle(Color.cyan)
                         }
                     }
-                    .frame(width: 140, alignment: .trailing)
+                    .frame(width: 124, alignment: .trailing)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1242,7 +1537,7 @@ private struct StatusOverviewSection: View {
                                 .foregroundStyle(Color.cyan)
                         }
                     }
-                    .frame(width: 90, alignment: .trailing)
+                    .frame(width: 78, alignment: .trailing)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1264,7 +1559,7 @@ private struct StatusOverviewSection: View {
                                 .foregroundStyle(Color.cyan)
                         }
                     }
-                    .frame(width: 75, alignment: .trailing)
+                    .frame(width: 68, alignment: .trailing)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1288,12 +1583,13 @@ private struct StatusOverviewSection: View {
             .frame(height: max(272, processCardH - 44))
         }
         .padding(.vertical, 4.5)
+        .frame(width: contentW, height: processCardH)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(theme.cardFill)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.studioCardFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                 )
         )
         .onHover { hovering in
@@ -1313,7 +1609,7 @@ private struct StatusOverviewSection: View {
     }
 
     private func processRow(app: EnergyAppItem) -> some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 18) {
             HStack(spacing: 10) {
                 AppIconImageView(pid: app.pid)
                     .frame(width: 20, height: 20)
@@ -1329,34 +1625,34 @@ private struct StatusOverviewSection: View {
             Text(app.formattedMemory)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .foregroundStyle(theme.primaryText)
-                .frame(width: 110, alignment: .trailing)
+                .frame(width: 96, alignment: .trailing)
 
             HStack(spacing: 6) {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.08))
+                        Capsule().fill(theme.gaugeTrack)
                         Capsule().fill(Color.cyan)
                             .frame(width: max(2, geo.size.width * CGFloat(min(100.0, app.cpuPercent)) / 100.0))
                     }
                 }
-                .frame(width: 65, height: 4.5)
+                .frame(width: 54, height: 4.5)
 
                 Text(String(format: "%.1f", app.cpuPercent))
                     .font(.system(size: 13, weight: .medium, design: .monospaced))
                     .foregroundStyle(theme.primaryText)
-                    .frame(width: 45, alignment: .trailing)
+                    .frame(width: 44, alignment: .trailing)
             }
-            .frame(width: 140, alignment: .trailing)
+            .frame(width: 124, alignment: .trailing)
 
             Text(String(format: "%.1f", app.energyImpactScore))
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .foregroundStyle(app.energyImpactScore > 20 ? Color.orange : theme.primaryText)
-                .frame(width: 90, alignment: .trailing)
+                .frame(width: 78, alignment: .trailing)
 
             Text("\(app.pid)")
                 .font(.system(size: 12.5, weight: .regular, design: .monospaced))
                 .foregroundStyle(theme.secondaryText)
-                .frame(width: 75, alignment: .trailing)
+                .frame(width: 68, alignment: .trailing)
 
             Menu {
                 Button {
@@ -1435,79 +1731,255 @@ private struct StatusOverviewSection: View {
             SystemResourceMonitor.shared.refreshNow()
         }
     }
-
-    // MARK: - Component Helpers
-
-    private func cardBackground<Content: View>(id: String = "", @ViewBuilder content: () -> Content) -> some View {
-        let isHovered = (!id.isEmpty && navState.hoveredOverviewCardID == id)
-        let borderColor = isHovered
-            ? (colorScheme == .dark ? Color.white.opacity(0.28) : Color.black.opacity(0.18))
-            : theme.cardBorder
-
-        return VStack(alignment: .leading, spacing: 0) {
-            content()
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(theme.cardFill)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(borderColor, lineWidth: isHovered ? 1.1 : 0.8)
-                )
-                .shadow(
-                    color: Color.black.opacity(isHovered ? (colorScheme == .dark ? 0.32 : 0.08) : 0.0),
-                    radius: isHovered ? 10 : 0,
-                    y: isHovered ? 4 : 0
-                )
-        )
-        .offset(y: isHovered ? -2.0 : 0.0)
-        .animation(.spring(response: 0.26, dampingFraction: 0.78), value: isHovered)
-        .onHover { hovering in
-            guard !id.isEmpty else { return }
-            if hovering {
-                navState.hoveredOverviewCardID = id
-            } else if navState.hoveredOverviewCardID == id {
-                navState.hoveredOverviewCardID = nil
-            }
-        }
-    }
-
-    private func pillBadge(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
-            .foregroundStyle(theme.secondaryText)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1.5)
-            .background(
-                Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-            )
-    }
-
-    private func headerBadge(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(theme.secondaryText)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1.5)
-            .background(
-                Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-            )
-    }
-
-    private func circularPill(icon: String, isActive: Bool) -> some View {
-        Image(systemName: icon)
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(isActive ? Color(red: 0.35, green: 0.82, blue: 0.55) : theme.secondaryText)
-            .frame(width: 20, height: 20)
-            .background(
-                Circle().fill(isActive ? Color(red: 0.35, green: 0.82, blue: 0.55).opacity(0.18) : Color.white.opacity(0.05))
-            )
-    }
 }
 
 // MARK: - 健康度萌兔徽章视图
+
+private final class HealthRippleAuraNSView: NSView {
+    private let auraLayer = CALayer()
+    private let ringLayer = CAShapeLayer()
+    private var currentKey: String = ""
+    private var currentMascotSize: CGFloat = 90
+    private var currentMaxWaveSpan: CGFloat = 30
+    private var currentTargetWaveScale: CGFloat = 1.24
+    private var currentIsDark: Bool = true
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        auraLayer.contentsGravity = .resizeAspect
+        auraLayer.masksToBounds = false
+        layer?.addSublayer(auraLayer)
+
+        ringLayer.fillColor = nil
+        ringLayer.lineWidth = 1.2
+        ringLayer.masksToBounds = false
+        layer?.addSublayer(ringLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let auraDia = currentMascotSize + currentMaxWaveSpan + 6
+        auraLayer.bounds = CGRect(x: 0, y: 0, width: auraDia, height: auraDia)
+        auraLayer.position = center
+
+        ringLayer.bounds = CGRect(x: 0, y: 0, width: currentMascotSize, height: currentMascotSize)
+        ringLayer.position = center
+        ringLayer.path = CGPath(ellipseIn: ringLayer.bounds, transform: nil)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        NotificationCenter.default.removeObserver(self)
+        if let newWindow {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didBecomeKeyNotification,
+                object: newWindow
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didResignKeyNotification,
+                object: newWindow
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: newWindow
+            )
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncAnimationActivity()
+    }
+
+    @objc private func handleWindowActivityChanged(_ notification: Notification) {
+        syncAnimationActivity()
+    }
+
+    private var shouldAnimateAura: Bool {
+        guard let win = window else { return false }
+        return win.occlusionState.contains(.visible) && win.isKeyWindow
+    }
+
+    private func syncAnimationActivity() {
+        if shouldAnimateAura {
+            if auraLayer.animation(forKey: "syspulse.aura") == nil || ringLayer.animation(forKey: "syspulse.ripple") == nil {
+                installAnimations(targetWaveScale: currentTargetWaveScale, isDark: currentIsDark)
+            }
+        } else {
+            auraLayer.removeAllAnimations()
+            ringLayer.removeAllAnimations()
+        }
+    }
+
+    func configure(
+        mascotSize: CGFloat,
+        maxWaveSpan: CGFloat,
+        targetWaveScale: CGFloat,
+        mainColor: NSColor,
+        isDark: Bool
+    ) {
+        currentMascotSize = mascotSize
+        currentMaxWaveSpan = maxWaveSpan
+        currentTargetWaveScale = targetWaveScale
+        currentIsDark = isDark
+
+        let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let srgb = mainColor.usingColorSpace(.sRGB) ?? mainColor
+        let r = Int(round(srgb.redComponent * 255))
+        let g = Int(round(srgb.greenComponent * 255))
+        let b = Int(round(srgb.blueComponent * 255))
+        let key = "\(Int(round(mascotSize)))-\(Int(round(maxWaveSpan)))-\(r)-\(g)-\(b)-\(isDark)-\(Int(round(backingScale * 10)))"
+
+        if key != currentKey {
+            currentKey = key
+            let auraDia = mascotSize + maxWaveSpan + 6
+            auraLayer.contentsScale = backingScale
+            auraLayer.contents = Self.renderRadialAura(
+                pointDiameter: auraDia,
+                scale: backingScale,
+                color: srgb,
+                startRadiusPt: mascotSize * 0.34,
+                endRadiusPt: min((mascotSize + maxWaveSpan) * 0.56, (mascotSize + maxWaveSpan + 4) * 0.5),
+                isDark: isDark
+            )
+            ringLayer.strokeColor = srgb.withAlphaComponent(0.75).cgColor
+            ringLayer.contentsScale = backingScale
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+            if shouldAnimateAura {
+                installAnimations(targetWaveScale: targetWaveScale, isDark: isDark)
+            }
+        } else {
+            syncAnimationActivity()
+        }
+    }
+
+    private func installAnimations(targetWaveScale: CGFloat, isDark: Bool) {
+        auraLayer.removeAllAnimations()
+        ringLayer.removeAllAnimations()
+        guard shouldAnimateAura else { return }
+
+        let timing = CAMediaTimingFunction(name: .easeInEaseOut)
+        let ambientRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 24)
+
+        let auraScale = CABasicAnimation(keyPath: "transform.scale")
+        auraScale.fromValue = 0.96
+        auraScale.toValue = 1.06
+
+        let auraOpacity = CABasicAnimation(keyPath: "opacity")
+        auraOpacity.fromValue = 0.72
+        auraOpacity.toValue = 1.0
+
+        let auraGroup = CAAnimationGroup()
+        auraGroup.animations = [auraScale, auraOpacity]
+        auraGroup.duration = 2.8
+        auraGroup.autoreverses = true
+        auraGroup.repeatCount = .infinity
+        auraGroup.timingFunction = timing
+        auraGroup.isRemovedOnCompletion = false
+        auraGroup.preferredFrameRateRange = ambientRange
+        auraLayer.add(auraGroup, forKey: "syspulse.aura")
+
+        let ringScale = CABasicAnimation(keyPath: "transform.scale")
+        ringScale.fromValue = 1.04
+        ringScale.toValue = targetWaveScale
+
+        let ringOpacity = CABasicAnimation(keyPath: "opacity")
+        ringOpacity.fromValue = isDark ? 0.55 : 0.44
+        ringOpacity.toValue = isDark ? 0.16 : 0.12
+
+        let ringGroup = CAAnimationGroup()
+        ringGroup.animations = [ringScale, ringOpacity]
+        ringGroup.duration = 2.8
+        ringGroup.autoreverses = true
+        ringGroup.repeatCount = .infinity
+        ringGroup.timingFunction = timing
+        ringGroup.isRemovedOnCompletion = false
+        ringGroup.preferredFrameRateRange = ambientRange
+        ringLayer.add(ringGroup, forKey: "syspulse.ripple")
+    }
+
+    private static func renderRadialAura(
+        pointDiameter: CGFloat,
+        scale: CGFloat,
+        color: NSColor,
+        startRadiusPt: CGFloat,
+        endRadiusPt: CGFloat,
+        isDark: Bool
+    ) -> CGImage? {
+        let px = max(16, Int(ceil(pointDiameter * scale)))
+        let srgbSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: px,
+            height: px,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: srgbSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return nil
+        }
+
+        let colors: [CGColor] = [
+            color.withAlphaComponent(isDark ? 0.34 : 0.22).cgColor,
+            color.withAlphaComponent(isDark ? 0.16 : 0.10).cgColor,
+            color.withAlphaComponent(isDark ? 0.05 : 0.03).cgColor,
+            color.withAlphaComponent(0.0).cgColor
+        ]
+        let locations: [CGFloat] = [0.0, 0.45, 0.78, 1.0]
+        guard let gradient = CGGradient(colorsSpace: srgbSpace, colors: colors as CFArray, locations: locations) else {
+            return nil
+        }
+        let center = CGPoint(x: CGFloat(px) * 0.5, y: CGFloat(px) * 0.5)
+        ctx.drawRadialGradient(
+            gradient,
+            startCenter: center,
+            startRadius: startRadiusPt * scale,
+            endCenter: center,
+            endRadius: endRadiusPt * scale,
+            options: [.drawsBeforeStartLocation]
+        )
+        return ctx.makeImage()
+    }
+}
+
+private struct HealthRippleAuraCAView: NSViewRepresentable {
+    let mascotSize: CGFloat
+    let maxWaveSpan: CGFloat
+    let targetWaveScale: CGFloat
+    let mainColor: Color
+    let isDark: Bool
+
+    func makeNSView(context: Context) -> HealthRippleAuraNSView {
+        HealthRippleAuraNSView()
+    }
+
+    func updateNSView(_ nsView: HealthRippleAuraNSView, context: Context) {
+        nsView.configure(
+            mascotSize: mascotSize,
+            maxWaveSpan: maxWaveSpan,
+            targetWaveScale: targetWaveScale,
+            mainColor: NSColor(mainColor),
+            isDark: isDark
+        )
+    }
+}
 
 public struct HealthPulseAuraBadgeView: View {
     @Environment(\.colorScheme) private var envColorScheme
@@ -1558,67 +2030,32 @@ public struct HealthPulseAuraBadgeView: View {
 
     private var tierColor: Color {
         switch tierIndex {
-        case 1: return Color(red: 0.20, green: 0.82, blue: 0.55) // 极佳：翡翠薄荷绿
-        case 2: return Color(red: 0.15, green: 0.68, blue: 0.95) // 良好：天青纯蓝
-        case 3: return Color(red: 0.98, green: 0.62, blue: 0.15) // 繁忙：活力暖金
-        default: return Color(red: 0.96, green: 0.28, blue: 0.38) // 告警：珊瑚绯红
+        case 1: return Color(red: 0.20, green: 0.82, blue: 0.55) // 极佳
+        case 2: return Color(red: 0.15, green: 0.68, blue: 0.95) // 良好
+        case 3: return Color(red: 0.98, green: 0.62, blue: 0.15) // 繁忙
+        default: return Color(red: 0.96, green: 0.28, blue: 0.38) // 告警
         }
     }
 
     public var body: some View {
         let isDark = (activeScheme == .dark)
         let mainColor = tierColor
-        let maxWaveSpan: CGFloat = max(14.0, (ringSize - mascotSize) * 1.12)
+        // 单侧向外波动 15pt（总直径扩展 30pt @ 90pt 基准尺寸）
+        let maxWaveSpan: CGFloat = max(24.0, 30.0 * (mascotSize / 90.0))
         let targetWaveScale: CGFloat = (mascotSize + maxWaveSpan) / max(1.0, mascotSize)
 
         ZStack {
-            // 1. 紧凑内敛的呼吸基底光晕 + 柔光环（GPU .phaseAnimator 驱动，无 TimelineView / @State）
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            mainColor.opacity(isDark ? 0.34 : 0.22),
-                            mainColor.opacity(isDark ? 0.11 : 0.06),
-                            Color.clear
-                        ],
-                        center: .center,
-                        startRadius: mascotSize * 0.38,
-                        endRadius: (mascotSize + maxWaveSpan) * 0.52
-                    )
-                )
-                .frame(width: mascotSize + maxWaveSpan + 6, height: mascotSize + maxWaveSpan + 6)
-                .blur(radius: 2.0)
-                .phaseAnimator([false, true]) { content, phase in
-                    content
-                        .scaleEffect(phase ? 1.06 : 0.96)
-                        .opacity(phase ? 1.0 : 0.72)
-                } animation: { _ in
-                    .easeInOut(duration: 2.8)
-                }
+            // 1. 外圈呼吸光晕
+            HealthRippleAuraCAView(
+                mascotSize: mascotSize,
+                maxWaveSpan: maxWaveSpan,
+                targetWaveScale: targetWaveScale,
+                mainColor: mainColor,
+                isDark: isDark
+            )
+            .frame(width: mascotSize + maxWaveSpan + 6, height: mascotSize + maxWaveSpan + 6)
 
-            Circle()
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            mainColor.opacity(0.84),
-                            mainColor.opacity(0.45),
-                            mainColor.opacity(0.78)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1.2
-                )
-                .frame(width: mascotSize, height: mascotSize)
-                .phaseAnimator([false, true]) { content, phase in
-                    content
-                        .scaleEffect(phase ? targetWaveScale : 1.04)
-                        .opacity(phase ? (isDark ? 0.16 : 0.12) : (isDark ? 0.55 : 0.44))
-                } animation: { _ in
-                    .easeInOut(duration: 2.8)
-                }
-
-            // 2. 固定不动的中心水彩兔子徽章
+            // 2. 中心水彩兔子徽章
             if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
                 Image(nsImage: img)
                     .resizable()
@@ -1626,9 +2063,13 @@ public struct HealthPulseAuraBadgeView: View {
                     .frame(width: mascotSize, height: mascotSize)
                     .clipShape(Circle())
                     .overlay(
-                        Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
+                        Circle().strokeBorder(isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.08), lineWidth: 1)
                     )
-                    .shadow(color: mainColor.opacity(0.32), radius: 5, y: 2)
+                    .background(
+                        Circle()
+                            .stroke(mainColor.opacity(isDark ? 0.22 : 0.16), lineWidth: 2.5)
+                            .frame(width: mascotSize + 3, height: mascotSize + 3)
+                    )
             } else {
                 Circle()
                     .fill(mainColor.opacity(0.2))
@@ -1657,7 +2098,8 @@ public struct HealthPulseAuraBadgeView: View {
 
         for path in fallbackPaths.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
+               let rawImg = NSImage(contentsOfFile: path) {
+                let img = AppIconManager.downsampledUIImage(from: rawImg, maxPixelSize: 192)
                 switch tier {
                 case 1: cachedTier1 = img
                 case 2: cachedTier2 = img
@@ -1685,7 +2127,6 @@ public struct HealthPulseAuraBadgeView: View {
     }
 }
 
-// Keep SolarSphereView as a direct drop-in alias pointing to HealthPulseAuraBadgeView
 public typealias SolarSphereView = HealthPulseAuraBadgeView
 
 // MARK: - Mini Waveform Line Component
@@ -1764,19 +2205,23 @@ struct MiniWaveformLine: View {
 
                 ZStack {
                     Circle()
-                        .stroke(color.opacity(0.32), lineWidth: 1.2)
+                        .fill(color.opacity(0.24))
+                        .frame(width: 11.5, height: 11.5)
+
+                    Circle()
+                        .stroke(color.opacity(0.35), lineWidth: 1.2)
                         .frame(width: 9.5, height: 9.5)
 
                     Circle()
                         .fill(color)
                         .frame(width: 4.5, height: 4.5)
-                        .shadow(color: color.opacity(0.8), radius: 3)
                 }
                 .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
             }
         }
     }
 }
+
 
 // MARK: - 网络流量波形组件
 
@@ -1855,19 +2300,475 @@ struct DualSparklineView: View {
 
                 ZStack {
                     Circle()
-                        .stroke(color.opacity(0.32), lineWidth: 1.2)
+                        .fill(color.opacity(0.24))
+                        .frame(width: 11.5, height: 11.5)
+
+                    Circle()
+                        .stroke(color.opacity(0.35), lineWidth: 1.2)
                         .frame(width: 9.5, height: 9.5)
 
                     Circle()
                         .fill(color)
                         .frame(width: 4.5, height: 4.5)
-                        .shadow(color: color.opacity(0.8), radius: 3)
                 }
                 .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
             }
         }
     }
 }
+
+/// 连续平移实时波形组件（支持阻尼峰值量程自适应）
+struct SurgeConveyorWaveformView: NSViewRepresentable, Equatable {
+    let primaryHistory: [Double]
+    let secondaryHistory: [Double]?
+    let minScaleCeiling: Double
+    let activeThreshold: Double
+    let accentColor: Color
+    let isDark: Bool
+
+    nonisolated static func == (lhs: SurgeConveyorWaveformView, rhs: SurgeConveyorWaveformView) -> Bool {
+        lhs.primaryHistory == rhs.primaryHistory
+            && lhs.secondaryHistory == rhs.secondaryHistory
+            && lhs.minScaleCeiling == rhs.minScaleCeiling
+            && lhs.isDark == rhs.isDark
+    }
+
+    func makeNSView(context: Context) -> SurgeConveyorWaveformNSView {
+        SurgeConveyorWaveformNSView()
+    }
+
+    func updateNSView(_ nsView: SurgeConveyorWaveformNSView, context: Context) {
+        nsView.configure(
+            primaryHistory: primaryHistory,
+            secondaryHistory: secondaryHistory,
+            minScaleCeiling: minScaleCeiling,
+            activeThreshold: activeThreshold,
+            accentNSColor: NSColor(accentColor),
+            isDark: isDark
+        )
+    }
+}
+
+final class SurgeConveyorWaveformNSView: NSView {
+    override var isFlipped: Bool { true }
+
+    private let gridLayer = CAShapeLayer()
+    private let scrollClipLayer = CALayer()
+    private let waveConveyorLayer = CALayer()
+    private let dotContainerLayer = CALayer()
+    private let haloLayer = CAShapeLayer()
+    private let dotLayer = CAShapeLayer()
+
+    private var lastPrimary: [Double] = []
+    private var lastSecondary: [Double]?
+    private var lastMinScaleCeiling: Double = 20.0
+    private var lastActiveThreshold: Double = 2.0
+    private var lastAccentColor: NSColor = .systemCyan
+    private var lastIsDark: Bool = true
+    private var lastConfiguredSize: CGSize = .zero
+    private var currentDotY: CGFloat?
+
+    private var lastDataTickTime: CFTimeInterval?
+    private var smoothedTickInterval: Double = 1.50
+    private var displayedMaxScale: Double = 0.0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupLayers()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupLayers()
+    }
+
+    private func setupLayers() {
+        wantsLayer = true
+        guard let root = layer else { return }
+        root.masksToBounds = false
+
+        gridLayer.fillColor = nil
+        gridLayer.lineWidth = 0.6
+        gridLayer.lineDashPattern = [3, 3]
+        root.addSublayer(gridLayer)
+
+        scrollClipLayer.masksToBounds = true
+        root.addSublayer(scrollClipLayer)
+
+        waveConveyorLayer.anchorPoint = .zero
+        waveConveyorLayer.contentsGravity = .resize
+        scrollClipLayer.addSublayer(waveConveyorLayer)
+
+        dotContainerLayer.bounds = CGRect(x: 0, y: 0, width: 16, height: 16)
+        dotContainerLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        root.addSublayer(dotContainerLayer)
+
+        haloLayer.bounds = CGRect(x: 0, y: 0, width: 14, height: 14)
+        haloLayer.position = CGPoint(x: 8, y: 8)
+        haloLayer.path = CGPath(ellipseIn: CGRect(x: 2.5, y: 2.5, width: 9, height: 9), transform: nil)
+        haloLayer.lineWidth = 1.0
+        dotContainerLayer.addSublayer(haloLayer)
+
+        dotLayer.bounds = CGRect(x: 0, y: 0, width: 6, height: 6)
+        dotLayer.position = CGPoint(x: 8, y: 8)
+        dotLayer.path = CGPath(ellipseIn: CGRect(x: 0.5, y: 0.5, width: 5, height: 5), transform: nil)
+        dotContainerLayer.addSublayer(dotLayer)
+    }
+
+    override func layout() {
+        super.layout()
+        guard bounds.width > 10, bounds.height > 8 else { return }
+        if lastConfiguredSize != bounds.size {
+            renderAndAnimate(dataAdvanced: false, didSlideLeft: false)
+        }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        NotificationCenter.default.removeObserver(self)
+        if let newWindow {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didBecomeKeyNotification,
+                object: newWindow
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didResignKeyNotification,
+                object: newWindow
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleWindowActivityChanged),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: newWindow
+            )
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            waveConveyorLayer.removeAllAnimations()
+            haloLayer.removeAllAnimations()
+            dotContainerLayer.removeAllAnimations()
+            lastDataTickTime = nil
+        } else {
+            updatePulseState()
+            if bounds.width > 10, bounds.height > 8, !lastPrimary.isEmpty {
+                renderAndAnimate(dataAdvanced: false, didSlideLeft: false)
+            }
+        }
+    }
+
+    @objc private func handleWindowActivityChanged(_ notification: Notification) {
+        updatePulseState()
+        if !isWindowVisibleOnScreen {
+            waveConveyorLayer.removeAllAnimations()
+            dotContainerLayer.removeAllAnimations()
+        }
+    }
+
+    private var isWindowVisibleOnScreen: Bool {
+        guard let win = window else { return false }
+        return win.occlusionState.contains(.visible)
+    }
+
+    private var conveyorFrameRateRange: CAFrameRateRange {
+        if window?.isKeyWindow == true {
+            return CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        }
+        return CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+    }
+
+    func configure(
+        primaryHistory: [Double],
+        secondaryHistory: [Double]?,
+        minScaleCeiling: Double,
+        activeThreshold: Double,
+        accentNSColor: NSColor,
+        isDark: Bool
+    ) {
+        let dataChanged = (primaryHistory != lastPrimary || secondaryHistory != lastSecondary)
+        let styleChanged = (isDark != lastIsDark || minScaleCeiling != lastMinScaleCeiling)
+        let wasEmpty = lastPrimary.isEmpty
+        let didSlideLeft = !wasEmpty
+            && primaryHistory.count == lastPrimary.count
+            && primaryHistory.count > 2
+            && Array(lastPrimary.dropFirst()) == Array(primaryHistory.dropLast())
+
+        if dataChanged {
+            let now = CACurrentMediaTime()
+            if let prev = lastDataTickTime {
+                let dt = now - prev
+                if dt >= 0.45 && dt <= 3.0 {
+                    smoothedTickInterval = smoothedTickInterval * 0.65 + dt * 0.35
+                }
+            }
+            lastDataTickTime = now
+        }
+
+        lastPrimary = primaryHistory
+        lastSecondary = secondaryHistory
+        lastMinScaleCeiling = minScaleCeiling
+        lastActiveThreshold = activeThreshold
+        lastAccentColor = accentNSColor
+        lastIsDark = isDark
+
+        guard dataChanged || styleChanged || lastConfiguredSize != bounds.size else { return }
+        renderAndAnimate(dataAdvanced: dataChanged && !wasEmpty, didSlideLeft: didSlideLeft)
+        updatePulseState()
+    }
+
+    private func updatePulseState() {
+        let latestPrimary = lastPrimary.last ?? 0
+        let latestSecondary = lastSecondary?.last ?? 0
+        let isActive = isWindowVisibleOnScreen && (latestPrimary > lastActiveThreshold || latestSecondary > lastActiveThreshold)
+
+        let tone = lastAccentColor.usingColorSpace(.sRGB) ?? .systemCyan
+        haloLayer.fillColor = tone.withAlphaComponent(0.24).cgColor
+        haloLayer.strokeColor = tone.withAlphaComponent(0.42).cgColor
+        dotLayer.fillColor = tone.cgColor
+
+        if isActive {
+            if haloLayer.animation(forKey: "surgeHaloPulse") == nil {
+                let scale = CABasicAnimation(keyPath: "transform.scale")
+                scale.fromValue = 0.88
+                scale.toValue = 1.75
+
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0.72
+                fade.toValue = 0.0
+
+                let group = CAAnimationGroup()
+                group.animations = [scale, fade]
+                group.duration = 1.65
+                group.repeatCount = .infinity
+                group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                group.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 24)
+                haloLayer.add(group, forKey: "surgeHaloPulse")
+            }
+            haloLayer.opacity = 1.0
+        } else {
+            haloLayer.removeAnimation(forKey: "surgeHaloPulse")
+            haloLayer.transform = CATransform3DIdentity
+            haloLayer.opacity = 0.55
+        }
+    }
+
+    private func renderAndAnimate(dataAdvanced: Bool, didSlideLeft: Bool) {
+        let w = bounds.width
+        let h = bounds.height
+        guard w > 16, h > 8 else { return }
+
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        lastConfiguredSize = bounds.size
+
+        let rightPad: CGFloat = 5.5
+        let visibleW = max(12, w - rightPad)
+
+        // 1. 水平参考网格线
+        let gridPath = CGMutablePath()
+        let midY = round(h * 0.44 * scale) / scale
+        let baseY = round((h - 2.0) * scale) / scale
+        gridPath.move(to: CGPoint(x: 0, y: midY))
+        gridPath.addLine(to: CGPoint(x: visibleW, y: midY))
+        gridPath.move(to: CGPoint(x: 0, y: baseY))
+        gridPath.addLine(to: CGPoint(x: visibleW, y: baseY))
+        gridLayer.frame = bounds
+        gridLayer.path = gridPath
+        gridLayer.strokeColor = (lastIsDark ? NSColor.white : NSColor.black).withAlphaComponent(lastIsDark ? 0.075 : 0.065).cgColor
+
+        // 2. 计算波形绘制尺寸（右侧预留 1 个采样步长用于连续左移）
+        let samplesPrimary = lastPrimary.isEmpty ? [0, 0] : lastPrimary
+        let samplesSecondary = lastSecondary ?? []
+        let count = samplesPrimary.count
+        let intervalsInViewport = CGFloat(max(1, count - 2))
+        let stepX = visibleW / intervalsInViewport
+        let totalLayerW = visibleW + stepX
+
+        // Snapshot live presentation coordinates BEFORE updating layer contents
+        let curPresentationTX = waveConveyorLayer.presentation()?.transform.m41 ?? (-stepX)
+        let curPresentationDotY = dotContainerLayer.presentation()?.position.y ?? currentDotY
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        scrollClipLayer.frame = CGRect(x: 0, y: 0, width: visibleW, height: h)
+        waveConveyorLayer.bounds = CGRect(x: 0, y: 0, width: totalLayerW, height: h)
+        waveConveyorLayer.position = .zero
+        waveConveyorLayer.contentsScale = scale
+        CATransaction.commit()
+
+        let peakPrimary = samplesPrimary.max() ?? 0.0
+        let peakSecondary = samplesSecondary.max() ?? 0.0
+        let targetMax = max(lastMinScaleCeiling, peakPrimary, peakSecondary * 0.85)
+        if displayedMaxScale <= 0.0 || targetMax >= displayedMaxScale || !dataAdvanced {
+            displayedMaxScale = targetMax
+        } else {
+            // 柔和阻尼衰减：波峰移出时曲线缓慢下沉，不突变
+            displayedMaxScale = max(targetMax, displayedMaxScale * 0.88 + targetMax * 0.12)
+        }
+        let maxScale = max(lastMinScaleCeiling, displayedMaxScale)
+
+        func yFor(_ val: Double) -> CGFloat {
+            let norm = min(1.0, max(0.0, CGFloat(val / maxScale)))
+            return h - (norm * (h * 0.74) + h * 0.13)
+        }
+
+        // 3. Draw bitmap once per update
+        let pixelW = max(1, Int(ceil(totalLayerW * scale)))
+        let pixelH = max(1, Int(ceil(h * scale)))
+        if let ctx = CGContext(
+            data: nil,
+            width: pixelW,
+            height: pixelH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) {
+            ctx.translateBy(x: 0, y: CGFloat(pixelH))
+            ctx.scaleBy(x: scale, y: -scale)
+
+            let accentRGB = lastAccentColor.usingColorSpace(.sRGB) ?? .systemCyan
+            let secondaryColor = NSColor(srgbRed: 0.55, green: 0.58, blue: 1.0, alpha: lastIsDark ? 0.34 : 0.42)
+
+            if samplesSecondary.count >= 2 && peakSecondary > 128.0 {
+                let secPath = buildSmoothCurvePath(values: samplesSecondary, stepX: stepX, yMapper: yFor)
+                ctx.saveGState()
+                ctx.addPath(secPath)
+                ctx.setStrokeColor(secondaryColor.cgColor)
+                ctx.setLineWidth(1.0)
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                ctx.strokePath()
+                ctx.restoreGState()
+            }
+
+            let primaryLine = buildSmoothCurvePath(values: samplesPrimary, stepX: stepX, yMapper: yFor)
+            let areaPath = primaryLine.mutableCopy() ?? CGMutablePath()
+            let lastX = CGFloat(count - 1) * stepX
+            areaPath.addLine(to: CGPoint(x: lastX, y: h))
+            areaPath.addLine(to: CGPoint(x: 0, y: h))
+            areaPath.closeSubpath()
+
+            ctx.saveGState()
+            ctx.addPath(areaPath)
+            ctx.clip()
+            let gradColors = [
+                accentRGB.withAlphaComponent(lastIsDark ? 0.30 : 0.24).cgColor,
+                accentRGB.withAlphaComponent(0.0).cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: gradColors, locations: [0.0, 1.0]) {
+                ctx.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: 0, y: 0),
+                    end: CGPoint(x: 0, y: h),
+                    options: []
+                )
+            }
+            ctx.restoreGState()
+
+            ctx.saveGState()
+            ctx.addPath(primaryLine)
+            ctx.setStrokeColor(accentRGB.withAlphaComponent(lastIsDark ? 0.20 : 0.14).cgColor)
+            ctx.setLineWidth(3.4)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.strokePath()
+            ctx.restoreGState()
+
+            ctx.saveGState()
+            ctx.addPath(primaryLine)
+            ctx.setStrokeColor(accentRGB.cgColor)
+            ctx.setLineWidth(1.65)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.strokePath()
+            ctx.restoreGState()
+
+            if let cgImage = ctx.makeImage() {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                waveConveyorLayer.contents = cgImage
+                CATransaction.commit()
+            }
+        }
+
+        // 4. 连续水平滚动动画（失焦降频，全零直线静止）
+        let targetY = yFor(samplesPrimary.last ?? 0.0)
+        let dotX = w - rightPad
+        let restingTransform = CATransform3DMakeTranslation(-stepX, 0, 0)
+        let dotMoved = abs((currentDotY ?? targetY) - targetY) > 0.35
+        let isFlatBaseline = peakPrimary <= lastActiveThreshold * 0.25
+            && peakSecondary <= 128.0
+            && !dotMoved
+
+        if dataAdvanced && isWindowVisibleOnScreen && count > 2 && !isFlatBaseline {
+            let rateRange = conveyorFrameRateRange
+            // 相位无缝衔接：若上一帧动画未走完，新位置从 (curPresentationTX + stepX) 继续匀速滑向 -stepX
+            let startTX: CGFloat = didSlideLeft
+                ? min(stepX * 0.4, max(-stepX * 0.6, curPresentationTX + stepX))
+                : 0.0
+            let slideDuration = min(2.2, max(0.85, smoothedTickInterval)) + 0.04
+
+            waveConveyorLayer.removeAnimation(forKey: "surgeConveyor")
+            let slide = CABasicAnimation(keyPath: "transform.translation.x")
+            slide.fromValue = startTX
+            slide.toValue = -stepX
+            slide.duration = slideDuration
+            slide.timingFunction = CAMediaTimingFunction(name: .linear)
+            slide.fillMode = .forwards
+            slide.isRemovedOnCompletion = false
+            slide.preferredFrameRateRange = rateRange
+            waveConveyorLayer.transform = restingTransform
+            waveConveyorLayer.add(slide, forKey: "surgeConveyor")
+
+            let startY = curPresentationDotY ?? targetY
+            dotContainerLayer.removeAnimation(forKey: "dotTrackY")
+            let moveY = CABasicAnimation(keyPath: "position.y")
+            moveY.fromValue = startY
+            moveY.toValue = targetY
+            moveY.duration = slideDuration
+            moveY.timingFunction = CAMediaTimingFunction(name: .linear)
+            moveY.preferredFrameRateRange = rateRange
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            dotContainerLayer.position = CGPoint(x: dotX, y: targetY)
+            CATransaction.commit()
+            dotContainerLayer.add(moveY, forKey: "dotTrackY")
+        } else {
+            waveConveyorLayer.removeAnimation(forKey: "surgeConveyor")
+            dotContainerLayer.removeAnimation(forKey: "dotTrackY")
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            waveConveyorLayer.transform = restingTransform
+            dotContainerLayer.position = CGPoint(x: dotX, y: targetY)
+            CATransaction.commit()
+        }
+        currentDotY = targetY
+    }
+
+    private func buildSmoothCurvePath(values: [Double], stepX: CGFloat, yMapper: (Double) -> CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        for (idx, val) in values.enumerated() {
+            let x = CGFloat(idx) * stepX
+            let y = yMapper(val)
+            if idx == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                let prevX = CGFloat(idx - 1) * stepX
+                let prevY = yMapper(values[idx - 1])
+                let midX = (prevX + x) * 0.5
+                path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: midX, y: prevY), control2: CGPoint(x: midX, y: y))
+            }
+        }
+        return path
+    }
+}
+
 
 // MARK: - Shared Energy App Row View
 
@@ -1940,7 +2841,7 @@ private struct AppIconImageView: View {
     }
 }
 
-// MARK: - Discrete Aligned Slider (macOS 原生液态玻璃流体滑块)
+// MARK: - 分档刻度滑块
 
 public struct DiscreteAlignedSlider: View {
     public let title: String
@@ -1999,7 +2900,7 @@ public struct DiscreteAlignedSlider: View {
                 let thumbX = trackInset + usableWidth * activeRatio
 
                 ZStack(alignment: .topLeading) {
-                    // 1. 液态玻璃底槽 (7pt 圆角胶囊滑道，带微光阴影)
+                    // 1. 滑道底槽
                     Capsule(style: .continuous)
                         .fill(theme.cardFill.opacity(0.85))
                         .overlay(
@@ -2009,7 +2910,7 @@ public struct DiscreteAlignedSlider: View {
                         .frame(width: usableWidth, height: 7)
                         .position(x: trackInset + usableWidth / 2, y: 12)
 
-                    // 2. 润泽激活水流填充层 (带有表面张力反光)
+                    // 2. 激活填充层
                     if enabled && selectedIdx > 0 {
                         Capsule(style: .continuous)
                             .fill(
@@ -2071,7 +2972,7 @@ public struct DiscreteAlignedSlider: View {
                             .pointingHandOnHover()
                     }
 
-                    // 4. 原生液态玻璃微凸透镜滑块 (Lens Puck)
+                    // 4. 滑块按钮
                     liquidGlassSliderThumb(thumbX: thumbX)
                         .gesture(
                             DragGesture(minimumDistance: 0)
@@ -2099,7 +3000,7 @@ public struct DiscreteAlignedSlider: View {
 
     private func liquidGlassSliderThumb(thumbX: CGFloat) -> some View {
         ZStack {
-            // 1. 基底高透折射微磨砂层 (通透有厚度)
+            // 1. 磨砂底面
             Circle()
                 .fill(
                     enabled
@@ -2107,7 +3008,7 @@ public struct DiscreteAlignedSlider: View {
                         : Color.gray.opacity(0.25)
                 )
 
-            // 2. 纵向微凸透镜表面张力高光膜 (模拟凸透镜受顶光反射)
+            // 2. 顶部高光层
             Circle()
                 .fill(
                     LinearGradient(
@@ -2120,7 +3021,7 @@ public struct DiscreteAlignedSlider: View {
                     )
                 )
 
-            // 3. 极细棱镜反光边缘 (Prismatic Rim Light)
+            // 3. 高光描边
             Circle()
                 .strokeBorder(
                     LinearGradient(
@@ -2134,7 +3035,7 @@ public struct DiscreteAlignedSlider: View {
                     lineWidth: 0.9
                 )
 
-            // 4. 中央微核冷光水滴 (Lens Core)
+            // 4. 中心圆点
             Circle()
                 .fill(enabled ? Color.orange : Color.gray.opacity(0.5))
                 .frame(width: 7, height: 7)
@@ -2153,11 +3054,30 @@ private struct CustomizationTogglesSection: View {
     @Bindable var toggles: FeatureToggleManager
     let theme: LiquidGlassTheme
     @Bindable var permissions = SystemPermissionManager.shared
+    @Bindable var updater = AppUpdateManager.shared
 
     public var body: some View {
         VStack(spacing: 16) {
             // 系统权限状态检测
             permissionCheckGroup
+
+            // Software Update Strategy
+            VStack(alignment: .leading, spacing: 10) {
+                Label("软件更新检查策略", systemImage: "arrow.triangle.2.circlepath.circle")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    compactToggle("每日早晚各自动检查 1 次更新", isOn: $updater.autoUpdateCheckEnabled)
+
+                    Text("开启后仅在每日早间（06:00–13:00）与晚间（18:00–24:00）各静默检查 1 次并启用 ETag 零配额缓存；关闭后仅在手动点击检查更新时联网。")
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .background(cardBackground)
 
             // Menu Bar Display Items
             VStack(alignment: .leading, spacing: 12) {
@@ -2217,67 +3137,87 @@ private struct CustomizationTogglesSection: View {
             }
 
             VStack(spacing: 10) {
-                permissionRow(
+                permissionSwitchRow(
                     icon: "internaldrive.fill",
                     iconColor: .cyan,
                     title: "完全磁盘访问权限 (Full Disk Access)",
                     description: "智能清理与应用管理深度扫描系统日志、用户缓存与残留垃圾时必需",
                     status: permissions.fullDiskAccessStatus,
-                    actionTitle: permissions.fullDiskAccessStatus.isAuthorized ? "已授权" : "前往系统设置授权",
-                    action: {
-                        permissions.openFullDiskAccessSettings()
-                    }
+                    isTCCManaged: true,
+                    onEnable: { permissions.openFullDiskAccessSettings(expectAuthorized: true) },
+                    onDisable: { permissions.openFullDiskAccessSettings(expectAuthorized: false) }
                 )
 
                 Divider().overlay(theme.dividerColor.opacity(0.5))
 
-                permissionRow(
+                permissionSwitchRow(
+                    icon: "antenna.radiowaves.left.and.right",
+                    iconColor: .blue,
+                    title: "蓝牙访问权限 (Bluetooth)",
+                    description: "读取 AirPods 系列、妙控键盘/触控板及蓝牙外设的连接状态与实时电量",
+                    status: permissions.bluetoothStatus,
+                    isTCCManaged: true,
+                    onEnable: { permissions.requestBluetoothPermission() },
+                    onDisable: { permissions.openBluetoothSettings(expectAuthorized: false) }
+                )
+
+                Divider().overlay(theme.dividerColor.opacity(0.5))
+
+                permissionSwitchRow(
                     icon: "bell.badge.fill",
                     iconColor: .orange,
                     title: "桌面通知权限 (Notifications)",
                     description: "UPS 断电告警、低电量关机倒计时与垃圾清理完毕时发送即时横幅提醒",
                     status: permissions.notificationStatus,
-                    actionTitle: permissions.notificationStatus.isAuthorized ? "已授权" : "请求系统授权",
-                    action: {
+                    isTCCManaged: true,
+                    onEnable: {
                         if permissions.notificationStatus == .notDetermined {
                             permissions.requestNotificationPermission()
                         } else {
-                            permissions.openNotificationSettings()
+                            permissions.openNotificationSettings(expectAuthorized: true)
                         }
-                    }
+                    },
+                    onDisable: { permissions.openNotificationSettings(expectAuthorized: false) }
                 )
 
                 Divider().overlay(theme.dividerColor.opacity(0.5))
 
-                permissionRow(
+                permissionSwitchRow(
                     icon: "externaldrive.badge.checkmark",
                     iconColor: .purple,
                     title: "外置磁盘安全推出权限 (Apple Events)",
                     description: "外置磁盘逃生舱在市电意外断开时向系统发送安全退出指令",
                     status: permissions.automationStatus,
-                    actionTitle: permissions.automationStatus.isAuthorized ? "已授权" : (permissions.automationStatus == .notDetermined ? "请求系统授权" : "前往系统设置授权"),
-                    action: {
-                        permissions.requestAutomationPermission()
-                    }
+                    isTCCManaged: true,
+                    onEnable: { permissions.requestAutomationPermission() },
+                    onDisable: { permissions.openAutomationSettings(expectAuthorized: false) }
                 )
 
                 Divider().overlay(theme.dividerColor.opacity(0.5))
 
-                permissionRow(
+                permissionSwitchRow(
                     icon: "fan.fill",
                     iconColor: .orange,
                     title: "风扇控制特权授权 (SMC Helper)",
-                    description: "在手动降温或强冷模式下写入 AppleSMC 调节风扇转速，安装一次可跨后续版本复用",
+                    description: "在手动降温或强冷模式下写入 AppleSMC 调节风扇转速，关闭开关可卸载特权助手",
                     status: permissions.fanHelperStatus,
-                    actionTitle: permissions.fanHelperStatus.isAuthorized ? "已授权" : "请求系统授权",
-                    action: {
-                        permissions.requestFanHelperPermission()
-                    }
+                    isTCCManaged: false,
+                    onEnable: { permissions.requestFanHelperPermission() },
+                    onDisable: { permissions.revokeFanHelperPermission() }
                 )
 
                 Divider().overlay(theme.dividerColor.opacity(0.5))
 
-                launchAtLoginPermissionRow
+                permissionSwitchRow(
+                    icon: "power.circle.fill",
+                    iconColor: .green,
+                    title: "开机自启动授权 (Login Items)",
+                    description: "默认开启 · 系统登录后自动在后台启动 SysPulse 并恢复菜单栏监控与断电保护",
+                    status: permissions.launchAtLoginStatus,
+                    isTCCManaged: false,
+                    onEnable: { permissions.setLaunchAtLogin(true) },
+                    onDisable: { permissions.setLaunchAtLogin(false) }
+                )
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.pillFill))
@@ -2286,14 +3226,15 @@ private struct CustomizationTogglesSection: View {
         .background(cardBackground)
     }
 
-    private func permissionRow(
+    private func permissionSwitchRow(
         icon: String,
         iconColor: Color,
         title: String,
         description: String,
         status: SystemPermissionManager.PermissionStatus,
-        actionTitle: String,
-        action: @escaping () -> Void
+        isTCCManaged: Bool,
+        onEnable: @escaping () -> Void,
+        onDisable: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
@@ -2309,11 +3250,11 @@ private struct CustomizationTogglesSection: View {
 
                     Text(status.title)
                         .font(.system(size: 9.5, weight: .bold))
-                        .foregroundStyle(status.isAuthorized ? .green : .orange)
+                        .foregroundStyle(status.isAuthorized ? .green : (status == .denied ? .red : .orange))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
                         .background(
-                            Capsule().fill((status.isAuthorized ? Color.green : Color.orange).opacity(0.15))
+                            Capsule().fill((status.isAuthorized ? Color.green : (status == .denied ? Color.red : Color.orange)).opacity(0.15))
                         )
                 }
 
@@ -2324,89 +3265,37 @@ private struct CustomizationTogglesSection: View {
 
             Spacer()
 
-            Button(action: action) {
-                Text(actionTitle)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(status.isAuthorized ? theme.secondaryText : Color.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4.5)
-                    .background(
-                        Capsule().fill(status.isAuthorized ? theme.cardBorder.opacity(0.5) : Color.cyan)
-                    )
-            }
-            .buttonStyle(.plain)
-            .pointingHandOnHover()
-            .disabled(status.isAuthorized)
-        }
-    }
-
-    private var launchAtLoginPermissionRow: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "power.circle.fill")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(Color.green)
-                .frame(width: 26, height: 26)
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("开机自启动授权 (Login Items)")
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(theme.primaryText)
-
-                    Text(permissions.launchAtLoginStatus.title)
-                        .font(.system(size: 9.5, weight: .bold))
-                        .foregroundStyle(permissions.launchAtLoginStatus.isAuthorized ? .green : .orange)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(
-                            Capsule().fill((permissions.launchAtLoginStatus.isAuthorized ? Color.green : Color.orange).opacity(0.15))
-                        )
-                }
-
-                Text("默认开启 · 系统登录后自动在后台启动 SysPulse 并恢复菜单栏监控与断电保护")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(theme.secondaryText)
-            }
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                if permissions.launchAtLoginStatus == .denied {
-                    Button {
-                        permissions.openLoginItemsSettings()
-                    } label: {
-                        Text("前往登录项允许")
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(Color.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4.5)
-                            .background(Capsule().fill(Color.orange))
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { status.isAuthorized },
+                    set: { enabled in
+                        if enabled {
+                            onEnable()
+                        } else {
+                            onDisable()
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-                }
-
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { permissions.isLaunchAtLoginEnabled },
-                        set: { permissions.setLaunchAtLogin($0) }
-                    )
                 )
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .pointingHandOnHover()
-            }
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .pointingHandOnHover()
+            .help(
+                status.isAuthorized && isTCCManaged
+                    ? "关闭将打开系统设置取消授权，切回后自动同步状态"
+                    : description
+            )
         }
     }
 
     private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(theme.cardFill)
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(theme.studioCardFill)
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(theme.cardBorder, lineWidth: 0.9)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
             )
     }
 }
@@ -2467,11 +3356,11 @@ private struct WindowAboutSection: View {
             .padding(16)
             .frame(maxWidth: 480)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(theme.cardFill)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(theme.cardBorder, lineWidth: 0.9)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                     )
             )
         }
@@ -2516,16 +3405,13 @@ private struct WindowLiquidBackdrop: View {
     let theme: LiquidGlassTheme
 
     public var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: theme.backdropGradientColors(isAC: state.isAC),
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .opacity(theme.isLight ? 0.5 : 0.35)
-        }
+        // 单层环境色罩
+        LinearGradient(
+            colors: theme.studioBackdropTintColors(isAC: state.isAC),
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .allowsHitTesting(false)
     }
 }
 

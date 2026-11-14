@@ -221,7 +221,7 @@ public struct LiquidGlassPanel: View {
                         Capsule()
                             .fill(isActive ? Color(red: 0.35, green: 0.85, blue: 0.55) : metricTrackFill)
                             .frame(height: 3.5)
-                            .animation(.spring(response: 0.30, dampingFraction: 0.72), value: isActive)
+                            .transaction { $0.animation = nil }
                     }
                 }
 
@@ -629,58 +629,35 @@ public struct LiquidGlassPanel: View {
     // MARK: - 3. 供电状态与外设电量卡片
 
     private var batteryAccessoriesCard: some View {
-        let upsConnected = toggles.enablePluginUPSManager && engine.telemetry.isConnected
-        let isLaptop = monitor.loadRuntime.hasInternalBattery
-        let batteryPct = isLaptop ? monitor.loadRuntime.internalBatteryPercent : (upsConnected && engine.telemetry.batteryLevel > 0 ? engine.telemetry.batteryLevel : 100)
-        let isCharging = (upsConnected && engine.telemetry.isCharging) || monitor.loadRuntime.isInternalCharging || monitor.hardware.isBatteryCharging
-        let statusString: String = {
-            if isCharging { return "充电中" }
-            if (upsConnected && engine.telemetry.state.isAC) || monitor.loadRuntime.isInternalPluggedIn || !isLaptop { return "市电在线" }
-            return "电池供电"
-        }()
-
-        let headerIcon: (name: String, color: Color) = {
-            if isCharging {
-                return ("battery.100.bolt", Color(red: 0.35, green: 0.85, blue: 0.55))
-            }
-            if isLaptop {
-                if monitor.loadRuntime.isInternalPluggedIn {
-                    return ("bolt.fill", Color(red: 0.35, green: 0.85, blue: 0.55))
-                }
-                if batteryPct > 50 {
-                    return ("battery.75", Color(red: 0.35, green: 0.85, blue: 0.55))
-                } else if batteryPct > 20 {
-                    return ("battery.50", Color(red: 0.95, green: 0.70, blue: 0.25))
-                } else {
-                    return ("battery.25", Color(red: 0.95, green: 0.40, blue: 0.35))
-                }
-            }
-            if upsConnected {
-                return ("bolt.shield.fill", Color(red: 0.35, green: 0.82, blue: 0.55))
-            }
-            return ("powerplug.fill", Color(red: 0.35, green: 0.82, blue: 0.55))
-        }()
+        let presentation = PowerCardPresentation.resolve(
+            upsEnabled: toggles.enablePluginUPSManager,
+            upsTelemetry: engine.telemetry,
+            loadRuntime: monitor.loadRuntime,
+            hardwareBatteryCharging: monitor.hardware.isBatteryCharging,
+            isMacBookDemoMode: toggles.enableMacBookDemoMode
+        )
 
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
                     PulsingHeaderSymbolView(
-                        systemName: headerIcon.name,
+                        systemName: presentation.iconName,
                         size: 11,
-                        color: headerIcon.color
+                        color: presentation.iconColor
                     )
-                    Text(isLaptop ? "电池" : (upsConnected ? "UPS 供电" : "AC 供电"))
+                    Text(presentation.title)
                         .font(.system(size: 11.5, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.primaryText)
                 }
 
-                Text("\(batteryPct)%")
+                Text("\(presentation.percent)%")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(theme.primaryText)
 
-                Text(statusString)
+                Text(presentation.statusText)
                     .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
+                    .foregroundStyle(presentation.isOnBattery ? Color.orange : theme.secondaryText)
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -933,8 +910,8 @@ public final class AppIconLookupCache: @unchecked Sendable {
     private let appIconCache = NSCache<NSString, NSImage>()
 
     private init() {
-        fileIconCache.countLimit = 256
-        appIconCache.countLimit = 128
+        fileIconCache.countLimit = 96
+        appIconCache.countLimit = 64
     }
 
     public func icon(forFilePath path: String) -> NSImage {
@@ -942,7 +919,8 @@ public final class AppIconLookupCache: @unchecked Sendable {
         if let cached = fileIconCache.object(forKey: key) {
             return cached
         }
-        let img = NSWorkspace.shared.icon(forFile: path)
+        let raw = NSWorkspace.shared.icon(forFile: path)
+        let img = AppIconManager.downsampledUIImage(from: raw, maxPixelSize: 48, exactPixelTarget: true)
         fileIconCache.setObject(img, forKey: key)
         return img
     }
@@ -952,11 +930,19 @@ public final class AppIconLookupCache: @unchecked Sendable {
         if let cached = appIconCache.object(forKey: key) {
             return cached
         }
-        if let running = NSRunningApplication(processIdentifier: pid), let img = running.icon {
+        if let running = NSRunningApplication(processIdentifier: pid), let raw = running.icon {
+            let img = AppIconManager.downsampledUIImage(from: raw, maxPixelSize: 48, exactPixelTarget: true)
             appIconCache.setObject(img, forKey: key)
             return img
         }
-        return NSWorkspace.shared.icon(for: .applicationBundle)
+        let fallbackKey = "fallback:app" as NSString
+        if let cached = appIconCache.object(forKey: fallbackKey) {
+            return cached
+        }
+        let rawFallback = NSWorkspace.shared.icon(for: .applicationBundle)
+        let img = AppIconManager.downsampledUIImage(from: rawFallback, maxPixelSize: 48, exactPixelTarget: true)
+        appIconCache.setObject(img, forKey: fallbackKey)
+        return img
     }
 
     public func icon(forBundleIdentifier bundleIdentifier: String?) -> NSImage? {
@@ -966,14 +952,16 @@ public final class AppIconLookupCache: @unchecked Sendable {
             return cached
         }
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-            let img = NSWorkspace.shared.icon(forFile: url.path)
+            let raw = NSWorkspace.shared.icon(forFile: url.path)
+            let img = AppIconManager.downsampledUIImage(from: raw, maxPixelSize: 48, exactPixelTarget: true)
             appIconCache.setObject(img, forKey: key)
             return img
         }
         if let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first,
-           let icon = runningApp.icon {
-            appIconCache.setObject(icon, forKey: key)
-            return icon
+           let raw = runningApp.icon {
+            let img = AppIconManager.downsampledUIImage(from: raw, maxPixelSize: 48, exactPixelTarget: true)
+            appIconCache.setObject(img, forKey: key)
+            return img
         }
         return nil
     }

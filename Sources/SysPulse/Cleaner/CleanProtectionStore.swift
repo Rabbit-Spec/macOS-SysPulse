@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 import Observation
 
-/// CleanProtectionStore - 极简白名单防护规则存储与管理器
+/// CleanProtectionStore - 白名单防护规则存储与管理器
 /// 配置文件持久化保存在 ~/.config/syspulse/whitelist，支持自定义增删改、通配符与注释。
 @Observable
 public final class CleanProtectionStore: @unchecked Sendable {

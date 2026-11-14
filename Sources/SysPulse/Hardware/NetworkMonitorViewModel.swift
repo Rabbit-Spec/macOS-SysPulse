@@ -31,7 +31,7 @@ public final class NetworkMonitorViewModel {
     public var selectedRankingTab: AppRankingSubTab = .apps
     public var appTrafficSortMode: AppTrafficSortMode = .today
 
-    // 24-Hour Real Traffic Data (0:00 - 23:00) in MB (@MainActor 主线程安全快照，防止多线程竞争读取)
+    // 24-Hour Traffic Data (0:00 - 23:00) in MB
     public private(set) var hourlyTrafficMB: [Double] = Array(repeating: 0.0, count: 24)
 
     public var peakHourIndex: Int {
@@ -63,7 +63,7 @@ public final class NetworkMonitorViewModel {
     public var isMeasuringLatency: Bool = false
     public var isSpeedTestCardActive: Bool = false
 
-    // Socket Connections & Network Hardware (系统真实内核动态遥测)
+    // Socket Connections & Network Hardware
     public var activeSocketCount: Int = 0
     public var activeProcessCount: Int = 0
     public var activeInterfaceCount: Int = 1
@@ -142,7 +142,6 @@ public final class NetworkMonitorViewModel {
     private var lastTrafficPollTime: Date = Date.distantPast
 
     private init() {
-        // Safe decoupled initialization backed by NetworkTrafficPersistenceManager atomic snapshot
         let snapshot = NetworkTrafficPersistenceManager.shared.currentSnapshot()
         applyTrafficSnapshot(snapshot)
     }
@@ -395,7 +394,7 @@ public final class NetworkMonitorViewModel {
         return nil
     }
 
-    // MARK: - 2. Real Cumulative Traffic & 24h Trend (基于 NetworkTrafficPersistenceManager 跨重启持久化网卡真实吞吐)
+    // MARK: - 2. Cumulative Traffic & 24h Trend
 
     public func refreshRealTraffic(iface: String? = nil) {
         let activeIface = iface ?? NetworkDetailModel.detectGatewayAndInterface().iface

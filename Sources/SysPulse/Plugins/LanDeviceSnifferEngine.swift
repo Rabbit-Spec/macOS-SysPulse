@@ -244,7 +244,7 @@ private final class ScanToken: @unchecked Sendable {
     }
 }
 
-/// 独立的局域网 ARP 嗅探与设备诊断引擎 (完全独立解耦，不依赖任何第三方或 Portal 逻辑)
+/// 局域网 ARP 嗅探与设备诊断引擎
 @Observable
 @MainActor
 public final class LanDeviceSnifferEngine {
@@ -263,7 +263,7 @@ public final class LanDeviceSnifferEngine {
     public var searchQuery: String = ""
     public var copiedNotice: String? = nil
 
-    // 设备编辑状态 (纯响应式数据流，彻底摒弃 @State)
+    // 设备编辑状态
     public var editingMAC: String? = nil
     public var editingNameInput: String = ""
     public var editingVendorInput: String = ""
@@ -273,7 +273,7 @@ public final class LanDeviceSnifferEngine {
     public var ruleTargetInput: String = ""
     public var showPresetIconPicker: Bool = false
 
-    /// 常用精品预设 SF Symbol 图标库
+    /// 预设 SF Symbol 图标列表
     public static let presetIcons: [String] = [
         "gamecontroller.fill", "gamecontroller", "tv.fill", "iphone", "ipad",
         "laptopcomputer", "desktopcomputer", "wifi.router", "network",
@@ -756,7 +756,7 @@ public final class LanDeviceSnifferEngine {
         }
     }
 
-    /// 全网段极速轻量探活 (分批向网段 1~254 发送轻量无阻塞 UDP 触发内核自动 ARP 解析)
+    /// 分批向网段 1~254 发送无阻塞 UDP 探测以触发 ARP 解析
     nonisolated public static func sweepSubnetFast(basePrefix: String, interfaceName: String? = nil) {
         let targets = (1...254).map { "\(basePrefix).\($0)" }
         probeHostsViaUDP(

@@ -43,26 +43,29 @@ public struct AppNetworkItem: Identifiable, Sendable {
 }
 
 public struct ActiveSocketItem: Identifiable, Sendable {
-    public let id: UUID
+    public let id: String
     public let pid: Int32
     public let processName: String
+    public let icon: NSImage?
     public let proto: String
     public let localAddress: String
     public let remoteAddress: String
     public let state: String
 
     public init(
-        id: UUID = UUID(),
+        id: String? = nil,
         pid: Int32,
         processName: String,
+        icon: NSImage? = nil,
         proto: String,
         localAddress: String,
         remoteAddress: String,
         state: String
     ) {
-        self.id = id
+        self.id = id ?? "\(pid)-\(proto)-\(localAddress)-\(remoteAddress)-\(state)"
         self.pid = pid
         self.processName = processName
+        self.icon = icon
         self.proto = proto
         self.localAddress = localAddress
         self.remoteAddress = remoteAddress
@@ -523,7 +526,7 @@ public final class NetworkDetailModel {
         let client = CWWiFiClient.shared()
         let iface = client.interface()
         if let iface = iface {
-            // 读取 Wi-Fi 协议标准 (仅显示 Wi-Fi 版本，不显示 802.11be/ax 等技术代号)
+            // 读取 Wi-Fi 协议标准
             let mode = iface.activePHYMode().rawValue
             switch mode {
             case 1: self.wifiProtocol = "Wi-Fi 1"
@@ -585,7 +588,7 @@ public final class NetworkDetailModel {
         }
     }
 
-    // MARK: - Public IP Detection (仅获取互联网公网 IP，不查询国家与运营商)
+    // MARK: - Public IP Detection
 
     private func fetchPublicIPAndGeo() {
         guard !isLoadingGeoIP else { return }
@@ -755,13 +758,27 @@ public final class NetworkDetailModel {
                 }
                 let prevSnapshot = UsageAndIconCache.shared.swapPrevAppBytes(with: nextSnapshot)
 
+                var runningByPid: [Int32: NSRunningApplication] = [:]
+                var runningByBundleID: [String: NSRunningApplication] = [:]
+                for app in NSWorkspace.shared.runningApplications {
+                    if app.processIdentifier > 0 {
+                        runningByPid[app.processIdentifier] = app
+                    }
+                    if let bid = app.bundleIdentifier, runningByBundleID[bid] == nil {
+                        runningByBundleID[bid] = app
+                    }
+                }
+
                 var items: [AppNetworkItem] = []
+                var batchToPersist: [(name: String, bundleID: String?, bytes: UInt64)] = []
+                batchToPersist.reserveCapacity(50)
+
                 for raw in rawItems {
                     let pid = raw.pid
-                    let runningApp = NSRunningApplication(processIdentifier: pid)
+                    let runningApp = runningByPid[pid]
                     let displayName = runningApp?.localizedName ?? Self.cleanProcessName(raw.rawName)
 
-                    // 严格过滤微小无意义系统噪音（< 10KB）与系统 NTP 守护进程 timed
+                    // 过滤小于 10KB 的系统噪音与 timed 守护进程
                     guard raw.total >= 10240, raw.rawName != "timed", displayName != "timed" else { continue }
 
                     var downSpeed: Double = 0
@@ -775,11 +792,7 @@ public final class NetworkDetailModel {
                     let bundleID = runningApp?.bundleIdentifier
                     let icon = Self.cachedAppIcon(bundleID: bundleID, pid: pid, runningApp: runningApp)
 
-                    NetworkTrafficPersistenceManager.shared.recordAppTraffic(
-                        name: displayName,
-                        bundleID: bundleID,
-                        bytes: raw.total
-                    )
+                    batchToPersist.append((name: displayName, bundleID: bundleID, bytes: raw.total))
 
                     items.append(AppNetworkItem(
                         pid: pid,
@@ -795,12 +808,16 @@ public final class NetworkDetailModel {
                     if items.count >= 50 { break }
                 }
 
-                // 合并今日已记录但在当前采样瞬间未活跃通信的应用（确保应用流量排行跨启动/全天记忆不丢失）
+                if !batchToPersist.isEmpty {
+                    NetworkTrafficPersistenceManager.shared.recordAppTrafficBatch(batchToPersist)
+                }
+
+                // 合并当日已持久化但当前未活跃的应用流量
                 let existingNames = Set(items.map { $0.name })
                 let saved = NetworkTrafficPersistenceManager.shared.getPersistedAppTraffic()
                 for entry in saved where !existingNames.contains(entry.name) {
                     guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
-                    let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
+                    let running = entry.bundleIdentifier.flatMap { runningByBundleID[$0] }
                     let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                     items.append(AppNetworkItem(
                         pid: running?.processIdentifier ?? 0,
@@ -821,7 +838,7 @@ public final class NetworkDetailModel {
                 var monthItems: [AppNetworkItem] = []
                 for entry in savedMonth {
                     guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
-                    let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
+                    let running = entry.bundleIdentifier.flatMap { runningByBundleID[$0] }
                     let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
                     monthItems.append(AppNetworkItem(
                         pid: running?.processIdentifier ?? 0,
@@ -873,6 +890,13 @@ public final class NetworkDetailModel {
                 task.waitUntilExit()
                 guard let output = String(data: data, encoding: .utf8) else { return nil }
 
+                var runningByPid: [Int32: NSRunningApplication] = [:]
+                for app in NSWorkspace.shared.runningApplications where app.processIdentifier > 0 {
+                    runningByPid[app.processIdentifier] = app
+                }
+                var passMetaCache: [Int32: (name: String, icon: NSImage?)] = [:]
+                var seenSocketIDs: [String: Int] = [:]
+
                 var sockets: [ActiveSocketItem] = []
                 var tcpEstablished = 0
                 var udpCount = 0
@@ -913,12 +937,28 @@ public final class NetworkDetailModel {
                         remote = ends.count > 1 ? ends[1] : ""
                     }
 
-                    let runningApp = NSRunningApplication(processIdentifier: pid)
-                    let displayName = runningApp?.localizedName ?? Self.cleanProcessName(cmd)
+                    let meta: (name: String, icon: NSImage?)
+                    if let cached = passMetaCache[pid] {
+                        meta = cached
+                    } else {
+                        let runningApp = runningByPid[pid]
+                        let displayName = runningApp?.localizedName ?? Self.cleanProcessName(cmd)
+                        let icon = Self.cachedAppIcon(bundleID: runningApp?.bundleIdentifier, pid: pid, runningApp: runningApp)
+                        let built = (displayName, icon)
+                        passMetaCache[pid] = built
+                        meta = built
+                    }
+
+                    let baseKey = "\(pid)-\(proto)-\(local)-\(remote)-\(state)"
+                    let dupIndex = seenSocketIDs[baseKey, default: 0]
+                    seenSocketIDs[baseKey] = dupIndex + 1
+                    let uniqueID = dupIndex == 0 ? baseKey : "\(baseKey)#\(dupIndex)"
 
                     let item = ActiveSocketItem(
+                        id: uniqueID,
                         pid: pid,
-                        processName: displayName,
+                        processName: meta.name,
+                        icon: meta.icon,
                         proto: proto,
                         localAddress: local,
                         remoteAddress: remote,

@@ -10,6 +10,7 @@ public struct PluginsDashboardView: View {
     @Bindable var metadataManager = LanDeviceMetadataManager.shared
     @Bindable var engine = PowerSourceEngine.shared
     @Bindable var diskGuardian = DiskGuardian.shared
+    @Bindable var antigravityManager = AntigravityContextManager.shared
     @Bindable var toggles = FeatureToggleManager.shared
     let theme: LiquidGlassTheme
     var canvasWidth: CGFloat = 1200
@@ -62,6 +63,14 @@ public struct PluginsDashboardView: View {
                         pluginManager.scanLocalDevices()
                     }
                 }
+                if toggles.enablePluginAntigravityContext {
+                    antigravityManager.checkOnEntry()
+                }
+            }
+        }
+        .onChange(of: pluginManager.activePluginType) { _, newPlugin in
+            if newPlugin == .antigravityContext && toggles.enablePluginAntigravityContext {
+                antigravityManager.checkOnEntry()
             }
         }
     }
@@ -74,24 +83,64 @@ public struct PluginsDashboardView: View {
             headerSection
                 .frame(width: contentW, height: 52, alignment: .leading)
 
-            // 插件生态卡片列表 (2x2 极简 Bento 磨砂玻璃网格)
+            // 插件卡片网格（支持拖拽排序）
             let colW = (contentW - 14) / 2
-            VStack(spacing: 14) {
-                HStack(spacing: 14) {
-                    psPortalCard
-                        .frame(width: colW)
-                    wifiLatencyCard
-                        .frame(width: colW)
-                }
+            let rows = max(1, (toggles.pluginModuleOrder.count + 1) / 2)
+            let gridH = CGFloat(rows) * 172.0 + CGFloat(max(0, rows - 1)) * 14.0
 
-                HStack(spacing: 14) {
-                    arpSnifferCard
-                        .frame(width: colW)
-                    upsManagerCard
-                        .frame(width: colW)
+            ScrollView(.vertical, showsIndicators: false) {
+                ZStack(alignment: .topLeading) {
+                    ForEach(PluginModuleType.allCases) { moduleType in
+                        let idx = toggles.pluginModuleOrder.firstIndex(of: moduleType) ?? 0
+                        let slot = pluginSlotOrigin(index: idx, colW: colW)
+                        let isDragging = (navState.draggingPluginCard == moduleType)
+                        let isHovered = (navState.hoveredPluginCard == moduleType && navState.draggingPluginCard == nil)
+                        let posX = isDragging ? (navState.dragPluginBaseOrigin.x + navState.dragPluginTranslation.width) : slot.x
+                        let posY = isDragging ? (navState.dragPluginBaseOrigin.y + navState.dragPluginTranslation.height) : slot.y
+
+                        moduleCard(for: moduleType, colW: colW)
+                            .frame(width: colW, height: 172)
+                            .offset(x: posX, y: posY)
+                            .zIndex(isDragging ? 100 : (isHovered ? 10 : 0))
+                    }
                 }
+                .frame(width: contentW, height: gridH, alignment: .topLeading)
+                .coordinateSpace(name: "pluginGrid")
+                .padding(.horizontal, 16)
+                .padding(.top, 3)
+                .padding(.bottom, 12)
             }
+            .padding(.horizontal, -16)
             .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .onAppear {
+            navState.draggingPluginCard = nil
+            navState.dragPluginTranslation = .zero
+        }
+    }
+
+    private func pluginSlotOrigin(index: Int, colW: CGFloat) -> CGPoint {
+        let row = index / 2
+        let col = index % 2
+        return CGPoint(
+            x: CGFloat(col) * (colW + 14.0),
+            y: CGFloat(row) * (172.0 + 14.0)
+        )
+    }
+
+    @ViewBuilder
+    private func moduleCard(for type: PluginModuleType, colW: CGFloat) -> some View {
+        let content: AnyView = {
+            switch type {
+            case .psPortal: return AnyView(psPortalCardContent)
+            case .wifiLatency: return AnyView(wifiLatencyCardContent)
+            case .arpSniffer: return AnyView(arpSnifferCardContent)
+            case .upsManager: return AnyView(upsManagerCardContent)
+            case .antigravityContext: return AnyView(antigravityContextCardContent)
+            }
+        }()
+        pluginModuleCardShell(for: type, colW: colW) {
+            content
         }
     }
 
@@ -118,35 +167,107 @@ public struct PluginsDashboardView: View {
             .help(toggles.isPluginEnabled(type) ? "点击停用此插件并释放后台资源" : "点击启用此插件")
     }
 
+    private func pluginModuleCardShell<Content: View>(
+        for type: PluginModuleType,
+        colW: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let isHovered = (navState.hoveredPluginCard == type && navState.draggingPluginCard == nil)
+        let isDragging = (navState.draggingPluginCard == type)
+
+        return content()
+            .padding(16)
+            .frame(width: colW, height: 172)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(
+                                (isHovered || isDragging) ? theme.studioCardHoverBorder : theme.studioCardBorder,
+                                lineWidth: (isHovered || isDragging) ? 1.15 : 0.8
+                            )
+                    )
+            )
+            .shadow(
+                color: isDragging ? Color.black.opacity(colorScheme == .dark ? 0.36 : 0.16) : Color.clear,
+                radius: isDragging ? 18 : 0,
+                x: 0,
+                y: isDragging ? 10 : 0
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .scaleEffect(isDragging ? 1.025 : 1.0)
+            .offset(y: (!isDragging && isHovered) ? -2.0 : 0.0)
+            .animation(.spring(response: 0.26, dampingFraction: 0.78), value: isHovered)
+            .onHover { hovering in
+                guard navState.draggingPluginCard == nil else { return }
+                if hovering {
+                    navState.hoveredPluginCard = type
+                } else if navState.hoveredPluginCard == type {
+                    navState.hoveredPluginCard = nil
+                }
+            }
+            .onTapGesture {
+                guard navState.draggingPluginCard == nil else { return }
+                navState.hoveredPluginCard = nil
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    pluginManager.activePluginType = type
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .named("pluginGrid"))
+                    .onChanged { value in
+                        if navState.draggingPluginCard == nil {
+                            let startIdx = toggles.pluginModuleOrder.firstIndex(of: type) ?? 0
+                            navState.hoveredPluginCard = nil
+                            navState.dragPluginBaseOrigin = pluginSlotOrigin(index: startIdx, colW: colW)
+                            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                                navState.draggingPluginCard = type
+                            }
+                        }
+                        guard navState.draggingPluginCard == type else { return }
+                        navState.dragPluginTranslation = value.translation
+
+                        let centerX = navState.dragPluginBaseOrigin.x + value.translation.width + colW * 0.5
+                        let centerY = navState.dragPluginBaseOrigin.y + value.translation.height + 86.0
+                        let order = toggles.pluginModuleOrder
+                        if let currentIdx = order.firstIndex(of: type) {
+                            for (candidateIdx, candidateType) in order.enumerated() where candidateIdx != currentIdx {
+                                let origin = pluginSlotOrigin(index: candidateIdx, colW: colW)
+                                let hitRect = CGRect(x: origin.x, y: origin.y, width: colW, height: 172.0).insetBy(dx: 8, dy: 8)
+                                if hitRect.contains(CGPoint(x: centerX, y: centerY)) {
+                                    withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                                        toggles.movePluginModule(from: type, to: candidateType)
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    .onEnded { _ in
+                        guard navState.draggingPluginCard == type else { return }
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.80)) {
+                            navState.draggingPluginCard = nil
+                            navState.dragPluginTranslation = .zero
+                        }
+                    }
+            )
+            .pointingHandOnHover()
+    }
+
     // MARK: - 卡片 1: PS Portal 串流画质增强
 
-    private var psPortalCard: some View {
+    private var psPortalCardContent: some View {
         let enabled = toggles.enablePluginPSPortal
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 14) {
-                // 原生现有手柄图标 (蓝色渐变 + 白色手柄)
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(
-                            LinearGradient(
-                                colors: enabled
-                                    ? [Color.blue.opacity(0.85), Color.indigo.opacity(0.9)]
-                                    : [Color.gray.opacity(0.45), Color.gray.opacity(0.6)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                        )
-
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(Color.white)
-                }
+                PluginArtworkIconView(
+                    kind: .psPortal,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -235,50 +356,21 @@ public struct PluginsDashboardView: View {
                 .foregroundStyle(enabled ? Color.blue : theme.secondaryText)
             }
         }
-        .padding(16)
-        .frame(height: 172)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                pluginManager.activePluginType = .psPortal
-            }
-        }
-        .pointingHandOnHover()
     }
 
     // MARK: - 卡片 2: Wi-Fi 低延迟
 
-    private var wifiLatencyCard: some View {
+    private var wifiLatencyCardContent: some View {
         let enabled = toggles.enablePluginWiFiLatency
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(
-                            LinearGradient(
-                                colors: enabled
-                                    ? [Color.teal.opacity(0.85), Color.cyan.opacity(0.9)]
-                                    : [Color.gray.opacity(0.45), Color.gray.opacity(0.6)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                        )
-
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: 22))
-                        .foregroundStyle(Color.white)
-                }
+                PluginArtworkIconView(
+                    kind: .wifiLatency,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -354,50 +446,21 @@ public struct PluginsDashboardView: View {
                 .foregroundStyle(enabled ? Color.teal : theme.secondaryText)
             }
         }
-        .padding(16)
-        .frame(height: 172)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                pluginManager.activePluginType = .wifiLatency
-            }
-        }
-        .pointingHandOnHover()
     }
 
     // MARK: - 卡片 3: 局域网 ARP 嗅探与设备诊断
 
-    private var arpSnifferCard: some View {
+    private var arpSnifferCardContent: some View {
         let enabled = toggles.enablePluginARPSniffer
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(
-                            LinearGradient(
-                                colors: enabled
-                                    ? [Color.purple.opacity(0.85), Color.indigo.opacity(0.9)]
-                                    : [Color.gray.opacity(0.45), Color.gray.opacity(0.6)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                        )
-
-                    Image(systemName: "network")
-                        .font(.system(size: 22))
-                        .foregroundStyle(Color.white)
-                }
+                PluginArtworkIconView(
+                    kind: .arpSniffer,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -470,50 +533,21 @@ public struct PluginsDashboardView: View {
                 .foregroundStyle(enabled ? Color.purple : theme.secondaryText)
             }
         }
-        .padding(16)
-        .frame(height: 172)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                pluginManager.activePluginType = .arpSniffer
-            }
-        }
-        .pointingHandOnHover()
     }
 
     // MARK: - 卡片 4: UPS 不间断电源智能管理
 
-    private var upsManagerCard: some View {
+    private var upsManagerCardContent: some View {
         let enabled = toggles.enablePluginUPSManager
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(
-                            LinearGradient(
-                                colors: enabled
-                                    ? [Color.orange.opacity(0.85), Color.yellow.opacity(0.85)]
-                                    : [Color.gray.opacity(0.45), Color.gray.opacity(0.6)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                        )
-
-                    Image(systemName: "battery.100.bolt")
-                        .font(.system(size: 22))
-                        .foregroundStyle(Color.white)
-                }
+                PluginArtworkIconView(
+                    kind: .upsManager,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -586,20 +620,124 @@ public struct PluginsDashboardView: View {
                 .foregroundStyle(enabled ? Color.orange : theme.secondaryText)
             }
         }
-        .padding(16)
-        .frame(height: 172)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 16))
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                pluginManager.activePluginType = .upsManager
+    }
+
+    // MARK: - 卡片 5: Antigravity 上下文扩容
+
+    private var antigravityContextCardContent: some View {
+        let enabled = toggles.enablePluginAntigravityContext
+        let needsReapply = antigravityManager.versionWatchState.needsReapplyWarning
+        let isPatched = antigravityManager.latestReport?.clampState.isPatched ?? false
+        let isOriginal = antigravityManager.latestReport?.clampState == .original256K
+
+        let badgeColor: Color = {
+            if needsReapply { return .orange }
+            if isPatched { return .green }
+            if isOriginal { return .orange }
+            return .indigo
+        }()
+
+        let badgeText: String = {
+            if antigravityManager.isAnalyzing { return "检测中" }
+            if needsReapply { return "待重新解锁" }
+            if let clamp = antigravityManager.latestReport?.clampState {
+                return clamp.compactBadge
+            }
+            if antigravityManager.selectedTargetPath.isEmpty { return "未发现目标" }
+            return "就绪"
+        }()
+
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 14) {
+                PluginArtworkIconView(
+                    kind: .antigravityContext,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("Antigravity 上下文扩容")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+
+                        Text("ARM64")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(enabled ? Color.indigo : theme.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill((enabled ? Color.indigo : Color.gray).opacity(0.12)))
+
+                        Spacer()
+
+                        HStack(spacing: 8) {
+                            if enabled {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(badgeColor)
+                                        .frame(width: 6, height: 6)
+                                    Text(badgeText)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(badgeColor)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(badgeColor.opacity(0.12)))
+                            } else {
+                                pluginDisabledBadge
+                            }
+                            pluginCardToggle(for: .antigravityContext, tint: .indigo)
+                        }
+                    }
+
+                    Text("纯 Swift 原生 Mach-O 引擎 · Go pclntab 符号直改与版本更新监测")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                }
+            }
+
+            Text("免 Python 环境依赖，直接定位语言服务 GetCheckpointConfig 解除 256K 上限，并在每次进入时自动校验版本号与生效状态。")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 0)
+
+            HStack {
+                if enabled {
+                    let verText = antigravityManager.currentAppVersion.map { "v\($0)" } ?? "未识别版本"
+                    if needsReapply {
+                        Text("版本变更/失效 (\(verText)) · 建议重新解锁")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.orange)
+                    } else if let clamp = antigravityManager.latestReport?.clampState {
+                        Text("当前版本: \(verText) · \(clamp.compactBadge)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(isPatched ? Color.green : theme.secondaryText)
+                    } else {
+                        Text("当前版本: \(verText) · 进入自动体检")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                } else {
+                    Text("模块未启用 · 零后台资源占用")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText.opacity(0.75))
+                }
+
+                Spacer()
+
+                HStack(spacing: 4) {
+                    Text(enabled ? "进入控制台" : "查看详情")
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(enabled ? Color.indigo : theme.secondaryText)
             }
         }
-        .pointingHandOnHover()
     }
 
     // MARK: - 二级页面分发器
@@ -610,6 +748,7 @@ public struct PluginsDashboardView: View {
         case .wifiLatency: return .teal
         case .arpSniffer: return .purple
         case .upsManager: return .orange
+        case .antigravityContext: return .indigo
         }
     }
 
@@ -619,6 +758,17 @@ public struct PluginsDashboardView: View {
         case .wifiLatency: return "antenna.radiowaves.left.and.right"
         case .arpSniffer: return "network"
         case .upsManager: return "battery.100.bolt"
+        case .antigravityContext: return "sparkles"
+        }
+    }
+
+    private func artworkKind(for plugin: PluginModuleType) -> PluginArtworkKind {
+        switch plugin {
+        case .psPortal: return .psPortal
+        case .wifiLatency: return .wifiLatency
+        case .arpSniffer: return .arpSniffer
+        case .upsManager: return .upsManager
+        case .antigravityContext: return .antigravityContext
         }
     }
 
@@ -632,6 +782,8 @@ public struct PluginsDashboardView: View {
             return "按需启用后将允许枚举本地网卡与读取物理内核 ARP 拓扑表。停用状态下不发送任何局域网探活包。"
         case .upsManager:
             return "按需启用后将开启 USB-HID 外置电源轮询与断电自动保护；未启用时，状态总览与菜单栏将默认显示 AC / 内置电池供电。"
+        case .antigravityContext:
+            return "按需启用后可使用纯 Swift 原生引擎解析并解除 Antigravity 语言服务的 256K 上下文上限，并自动记忆版本号以便更新后及时提醒重新解锁。"
         }
     }
 
@@ -658,8 +810,8 @@ public struct PluginsDashboardView: View {
                     .padding(.vertical, 7)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(theme.cardFill)
-                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                            .fill(theme.studioCardFill)
+                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                     )
                 }
                 .buttonStyle(.plain)
@@ -690,8 +842,8 @@ public struct PluginsDashboardView: View {
                             .padding(.vertical, 7)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(theme.cardFill)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                    .fill(theme.studioCardFill)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                             )
                         }
                         .buttonStyle(.plain)
@@ -712,8 +864,8 @@ public struct PluginsDashboardView: View {
                             .padding(.vertical, 7)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(theme.cardFill)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                    .fill(theme.studioCardFill)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                             )
                         }
                         .buttonStyle(.plain)
@@ -733,8 +885,8 @@ public struct PluginsDashboardView: View {
                             .padding(.vertical, 7)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(theme.cardFill)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                    .fill(theme.studioCardFill)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                             )
                         }
                         .buttonStyle(.plain)
@@ -769,13 +921,36 @@ public struct PluginsDashboardView: View {
                             .padding(.vertical, 7)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(theme.cardFill)
+                                    .fill(theme.studioCardFill)
                                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.4), lineWidth: 0.8))
                             )
                         }
                         .buttonStyle(.plain)
                         .pointingHandOnHover()
                         .help("通过特权模式将 UPS 关机阈值同步至 macOS 系统底层 IOPMCopyUPSShutdownLevels")
+                    }
+                } else if isEnabled && plugin == .antigravityContext {
+                    HStack(spacing: 8) {
+                        Button {
+                            antigravityManager.refreshAllStatus()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12))
+                                Text(antigravityManager.isAnalyzing ? "检测中..." : "重新检测版本与状态")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(theme.studioCardFill)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+                        .disabled(antigravityManager.isAnalyzing || antigravityManager.isApplying)
                     }
                 }
 
@@ -795,13 +970,13 @@ public struct PluginsDashboardView: View {
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(theme.cardFill)
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                        .fill(theme.studioCardFill)
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                 )
             }
             .frame(width: contentW)
 
-            // 各专属工作台（未启用时展示零占用引导面板）
+            // 各模块工作台（未启用时展示引导面板）
             if !isEnabled {
                 disabledPluginPlaceholder(for: plugin)
                     .frame(width: contentW)
@@ -816,6 +991,8 @@ public struct PluginsDashboardView: View {
                     arpSnifferDetailWorkstation
                 case .upsManager:
                     upsManagerDetailWorkstation
+                case .antigravityContext:
+                    antigravityContextDetailWorkstation
                 }
             }
         }
@@ -827,17 +1004,12 @@ public struct PluginsDashboardView: View {
         return VStack(spacing: 20) {
             Spacer()
 
-            ZStack {
-                Circle()
-                    .fill(accent.opacity(0.10))
-                    .frame(width: 84, height: 84)
-                Circle()
-                    .strokeBorder(accent.opacity(0.25), lineWidth: 1)
-                    .frame(width: 84, height: 84)
-                Image(systemName: iconName(for: plugin))
-                    .font(.system(size: 34))
-                    .foregroundStyle(accent)
-            }
+            PluginArtworkIconView(
+                kind: artworkKind(for: plugin),
+                size: 78,
+                isEnabled: false,
+                forcedColorScheme: colorScheme
+            )
 
             VStack(spacing: 8) {
                 Text("「\(plugin.name)」尚未启用")
@@ -877,21 +1049,21 @@ public struct PluginsDashboardView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.studioCardFill)
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
         )
     }
 
-    // MARK: - PS Portal 专属工作台 (100% 毫无改动，完全原样保留现存页面)
+    // MARK: - PS Portal 工作台
 
     private var psPortalDetailWorkstation: some View {
         VStack(spacing: 14) {
-            // 主插件卡片（PS Portal 画质增强控制面板）
+            // 主插件卡片
             mainPluginCard
                 .frame(width: contentW)
 
-            // 实时中继遥测与通信日志卡片（自适应占满纵向剩余全部空间，与其它页面底边距完全统一）
+            // 实时中继遥测与通信日志卡片
             liveLogCard
                 .frame(width: contentW)
                 .frame(maxHeight: .infinity)
@@ -907,25 +1079,11 @@ public struct PluginsDashboardView: View {
         VStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .center, spacing: 16) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.teal.opacity(0.85), Color.cyan.opacity(0.9)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 54, height: 54)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                            )
-
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .font(.system(size: 26))
-                            .foregroundStyle(Color.white)
-                    }
+                    PluginArtworkIconView(
+                        kind: .wifiLatency,
+                        size: 58,
+                        forcedColorScheme: colorScheme
+                    )
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
@@ -1000,41 +1158,27 @@ public struct PluginsDashboardView: View {
             }
             .padding(16)
             .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(theme.cardFill)
-                    .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
             )
 
             Spacer()
         }
     }
 
-    // MARK: - 局域网 ARP 嗅探专属工作台 (独立引擎，支持全网并发探活/真实网卡锁定/自定义改名与图标上传)
+    // MARK: - 局域网 ARP 嗅探工作台
 
     private var arpSnifferDetailWorkstation: some View {
         VStack(spacing: 12) {
             // 顶部工具栏与状态卡片
             VStack(spacing: 12) {
                 HStack(alignment: .center, spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.purple.opacity(0.85), Color.indigo.opacity(0.9)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 44, height: 44)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                            )
-
-                        Image(systemName: "network")
-                            .font(.system(size: 20))
-                            .foregroundStyle(Color.white)
-                    }
+                    PluginArtworkIconView(
+                        kind: .arpSniffer,
+                        size: 50,
+                        forcedColorScheme: colorScheme
+                    )
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
@@ -1095,8 +1239,8 @@ public struct PluginsDashboardView: View {
                         .padding(.vertical, 7)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(theme.cardFill)
-                                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                .fill(theme.studioCardFill)
+                                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                         )
                         .foregroundStyle(theme.primaryText)
                     }
@@ -1135,10 +1279,10 @@ public struct PluginsDashboardView: View {
                         .padding(.vertical, 7)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(lanSniffer.showVendorRulesPanel ? Color.purple : theme.cardFill)
+                                .fill(lanSniffer.showVendorRulesPanel ? Color.purple : theme.studioCardFill)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .strokeBorder(lanSniffer.showVendorRulesPanel ? Color.purple : theme.cardBorder, lineWidth: 0.8)
+                                        .strokeBorder(lanSniffer.showVendorRulesPanel ? Color.purple : theme.studioCardBorder, lineWidth: 0.8)
                                 )
                         )
                         .foregroundStyle(lanSniffer.showVendorRulesPanel ? Color.white : theme.primaryText)
@@ -1147,7 +1291,7 @@ public struct PluginsDashboardView: View {
                     .pointingHandOnHover()
                     .help("管理全局厂商名称 / MAC 前缀映射规则（如 Shenzhen Zhangyue → iReader）")
 
-                    // 重新探测按钮 (触发全网段极速轻量探活)
+                    // 重新探测按钮
                     Button {
                         lanSniffer.startScan()
                     } label: {
@@ -1200,7 +1344,7 @@ public struct PluginsDashboardView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.white.opacity(0.04))
-                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                     )
 
                     HStack(spacing: 6) {
@@ -1233,8 +1377,8 @@ public struct PluginsDashboardView: View {
             .padding(14)
             .background(
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(theme.cardFill)
-                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                    .fill(theme.studioCardFill)
+                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
             )
 
             // 表头栏
@@ -1282,8 +1426,8 @@ public struct PluginsDashboardView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 14)
-                        .fill(theme.cardFill)
-                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                        .fill(theme.studioCardFill)
+                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                 )
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
@@ -1297,8 +1441,8 @@ public struct PluginsDashboardView: View {
                 .frame(maxHeight: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: 14)
-                        .fill(theme.cardFill)
-                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                        .fill(theme.studioCardFill)
+                        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                 )
             }
         }
@@ -1321,10 +1465,10 @@ public struct PluginsDashboardView: View {
     private func rowBorderColor(for dev: LanDeviceItem, isEditing: Bool) -> Color {
         if isEditing { return Color.purple.opacity(0.5) }
         if dev.isGateway { return Color.teal.opacity(0.2) }
-        return theme.cardBorder.opacity(0.4)
+        return theme.studioCardBorder.opacity(0.4)
     }
 
-    // MARK: - 单台局域网设备行组件 (支持就地自定义改名与图标上传)
+    // MARK: - 单台局域网设备行组件
 
     private func lanDeviceRow(_ dev: LanDeviceItem) -> some View {
         let isEditing = (lanSniffer.editingMAC == dev.mac)
@@ -1395,7 +1539,7 @@ public struct PluginsDashboardView: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
                                     .strokeBorder(
-                                        isEditing ? Color.purple.opacity(0.5) : theme.cardBorder.opacity(0.45),
+                                        isEditing ? Color.purple.opacity(0.5) : theme.studioCardBorder.opacity(0.45),
                                         lineWidth: 0.6
                                     )
                             )
@@ -1592,7 +1736,7 @@ public struct PluginsDashboardView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(inputFill)
-                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.8))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.studioCardBorder.opacity(0.6), lineWidth: 0.8))
                     )
                     .frame(minWidth: 280, maxWidth: 360)
 
@@ -1609,7 +1753,7 @@ public struct PluginsDashboardView: View {
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(inputFill)
-                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.8))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.studioCardBorder.opacity(0.6), lineWidth: 0.8))
                     )
                     .frame(width: 190)
 
@@ -1741,7 +1885,7 @@ public struct PluginsDashboardView: View {
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(controlFill)
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.studioCardBorder.opacity(0.5), lineWidth: 0.6))
                 )
                 .foregroundStyle(theme.primaryText)
                 .buttonStyle(.plain)
@@ -1816,7 +1960,7 @@ public struct PluginsDashboardView: View {
                                             .fill(isSelected ? Color.purple : controlFill)
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 6)
-                                                    .strokeBorder(isSelected ? Color.purple : theme.cardBorder.opacity(0.5), lineWidth: 0.6)
+                                                    .strokeBorder(isSelected ? Color.purple : theme.studioCardBorder.opacity(0.5), lineWidth: 0.6)
                                             )
                                     )
                             }
@@ -1906,10 +2050,10 @@ public struct PluginsDashboardView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(theme.cardFill)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(theme.studioCardFill)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
                                 .strokeBorder(Color.cyan.opacity(0.35), lineWidth: 1.0)
                         )
                 )
@@ -2194,17 +2338,17 @@ public struct PluginsDashboardView: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                .fill(theme.studioCardFill)
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
         )
     }
 
     private var upsCardBackground: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(theme.cardFill)
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(theme.studioCardFill)
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(theme.cardBorder, lineWidth: 0.9)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.9)
             )
     }
 
@@ -2230,7 +2374,7 @@ public struct PluginsDashboardView: View {
         let totalStr = disk.formattedSize
 
         return HStack(spacing: 14) {
-            // 1. 左侧大图标底座 (46x46pt 磨砂渐变微框)
+            // 1. 左侧磁盘图标
             ZStack {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .fill(
@@ -2318,7 +2462,7 @@ public struct PluginsDashboardView: View {
                         .fill(theme.pillFill)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(theme.cardBorder, lineWidth: 0.6)
+                                .strokeBorder(theme.studioCardBorder, lineWidth: 0.6)
                         )
                 )
             }
@@ -2333,7 +2477,7 @@ public struct PluginsDashboardView: View {
                 .fill(theme.pillFill.opacity(0.7))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                        .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                 )
         )
     }
@@ -2379,7 +2523,7 @@ public struct PluginsDashboardView: View {
                 .fill(theme.pillFill.opacity(0.45))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.8)
+                        .strokeBorder(theme.studioCardBorder.opacity(0.6), lineWidth: 0.8)
                 )
         )
     }
@@ -2400,21 +2544,49 @@ public struct PluginsDashboardView: View {
 
             Spacer()
 
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(toggles.enabledPluginsCount > 0 ? Color.green : Color.gray.opacity(0.5))
-                    .frame(width: 7, height: 7)
-                Text("已启用 \(toggles.enabledPluginsCount) / 4 个功能模块")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(toggles.enabledPluginsCount > 0 ? theme.primaryText : theme.secondaryText)
+            HStack(spacing: 8) {
+                if toggles.isCustomPluginOrder {
+                    Button {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.80)) {
+                            toggles.resetPluginModuleOrder()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("恢复默认排序")
+                                .font(.system(size: 11.5, weight: .medium))
+                        }
+                        .foregroundStyle(theme.secondaryText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(theme.studioCardFill)
+                                .overlay(Capsule().strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .help("将模块中心卡片恢复为默认排列顺序")
+                }
+
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(toggles.enabledPluginsCount > 0 ? Color.green : Color.gray.opacity(0.5))
+                        .frame(width: 7, height: 7)
+                    Text("已启用 \(toggles.enabledPluginsCount) / \(PluginModuleType.allCases.count) 个功能模块")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(toggles.enabledPluginsCount > 0 ? theme.primaryText : theme.secondaryText)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule()
+                        .fill(theme.studioCardFill)
+                        .overlay(Capsule().strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                )
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(theme.cardFill)
-                    .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
-            )
         }
     }
 
@@ -2424,25 +2596,11 @@ public struct PluginsDashboardView: View {
         VStack(spacing: 16) {
             // 插件基本信息与启停开关
             HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.blue.opacity(0.85), Color.indigo.opacity(0.9)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 54, height: 54)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
-                        )
-
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(Color.white)
-                }
+                PluginArtworkIconView(
+                    kind: .psPortal,
+                    size: 58,
+                    forcedColorScheme: colorScheme
+                )
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
@@ -2489,7 +2647,7 @@ public struct PluginsDashboardView: View {
                             .foregroundStyle(theme.secondaryText)
                     }
 
-                    // 管理员特权注入说明 (Test20 样式)
+                    // 管理员特权注入说明
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.shield.fill")
                             .font(.system(size: 11))
@@ -2519,7 +2677,7 @@ public struct PluginsDashboardView: View {
                         .background(
                             Capsule()
                                 .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-                                .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                .overlay(Capsule().strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                         )
                         .foregroundStyle(theme.secondaryText)
                     }
@@ -2639,7 +2797,7 @@ public struct PluginsDashboardView: View {
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 10)
                                                 .strokeBorder(
-                                                    isSelected ? Color.blue : theme.cardBorder,
+                                                    isSelected ? Color.blue : theme.studioCardBorder,
                                                     lineWidth: 0.8
                                                 )
                                         )
@@ -2651,7 +2809,7 @@ public struct PluginsDashboardView: View {
                         }
                     }
 
-                    // 中继模式切换 (方案 A 单向直连 vs 方案 B 双向遥测)
+                    // 中继模式切换
                     HStack(spacing: 8) {
                         Text("中继模式:")
                             .font(.system(size: 11.5, weight: .medium))
@@ -2683,7 +2841,7 @@ public struct PluginsDashboardView: View {
                         .background(
                             Capsule()
                                 .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
-                                .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                                .overlay(Capsule().strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
                         )
                         .disabled(pluginManager.isRunning)
 
@@ -2746,7 +2904,7 @@ public struct PluginsDashboardView: View {
                             )
                         }
 
-                        // PS5 IP 输入框 (科技蓝专属)
+                        // PS5 IP 输入框
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Image(systemName: "tv.fill")
@@ -2771,7 +2929,7 @@ public struct PluginsDashboardView: View {
                                 .disabled(pluginManager.isRunning)
                         }
 
-                        // PS Portal IP 输入框 (幻彩靛蓝专属)
+                        // PS Portal IP 输入框
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 4) {
                                 Image(systemName: "gamecontroller.fill")
@@ -2797,7 +2955,7 @@ public struct PluginsDashboardView: View {
                         }
                     }
 
-                    // 扫描到的 Sony 设备快捷填入条（保持固定最低高度，确保与左侧底部间距一致）
+                    // 扫描到的 Sony 设备快捷填入条
                     let sonyDevices = pluginManager.discoveredDevices.filter { $0.isLikelySony }
                     Group {
                         if !sonyDevices.isEmpty {
@@ -2863,9 +3021,9 @@ public struct PluginsDashboardView: View {
         }
         .padding(18)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.studioCardFill)
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
         )
     }
 
@@ -2991,14 +3149,14 @@ public struct PluginsDashboardView: View {
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(colorScheme == .dark ? 0.45 : 0.85))
-                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
             )
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.cardFill)
-                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(theme.studioCardFill)
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
         )
     }
 
@@ -3025,7 +3183,7 @@ public struct PluginsDashboardView: View {
         let resolvedHorizontalPadding: CGFloat = horizontalPadding ?? (useCardStyle ? 10 : 8)
         let resolvedVerticalPadding: CGFloat = verticalPadding ?? (useCardStyle ? 6 : 5.5)
         let fillColor: Color = useCardStyle
-            ? theme.cardFill
+            ? theme.studioCardFill
             : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
 
         return Menu {
@@ -3070,12 +3228,409 @@ public struct PluginsDashboardView: View {
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(fillColor)
-                    .overlay(RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(theme.cardBorder, lineWidth: 0.8))
+                    .overlay(RoundedRectangle(cornerRadius: cornerRadius).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
             )
         }
         .buttonStyle(.plain)
         .pointingHandOnHover()
         .disabled(disabled)
+    }
+
+    // MARK: - 卡片 5 二级工作台: Antigravity 上下文扩容
+
+    private var antigravityContextDetailWorkstation: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 14) {
+                // 1. 版本更新或失效提示横幅（每次进入自动检测后触发）
+                if let banner = antigravityManager.versionWatchState.bannerTitle {
+                    HStack(spacing: 12) {
+                        Image(systemName: antigravityManager.versionWatchState.needsReapplyWarning ? "exclamationmark.triangle.fill" : "info.circle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(antigravityManager.versionWatchState.needsReapplyWarning ? Color.orange : Color.indigo)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(antigravityManager.versionWatchState.needsReapplyWarning ? "需要重新执行上下文解锁" : "发现外部已解锁状态")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(theme.primaryText)
+                            Text(banner)
+                                .font(.system(size: 12))
+                                .foregroundStyle(theme.secondaryText)
+                        }
+
+                        Spacer()
+
+                        if case .externalPatchedUnrecorded = antigravityManager.versionWatchState {
+                            Button {
+                                antigravityManager.syncCurrentVersionMemory()
+                            } label: {
+                                Text("记录当前版本")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Color.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.indigo))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                        } else {
+                            Button {
+                                antigravityManager.applySelectedPatch(autoRestartIfRunning: true)
+                            } label: {
+                                Text("立即重新执行")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Color.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                            .disabled(antigravityManager.isApplying)
+                        }
+                    }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill((antigravityManager.versionWatchState.needsReapplyWarning ? Color.orange : Color.indigo).opacity(0.10))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .strokeBorder((antigravityManager.versionWatchState.needsReapplyWarning ? Color.orange : Color.indigo).opacity(0.35), lineWidth: 0.9)
+                            )
+                    )
+                }
+
+                // 2. 顶部概要与版本记忆对比卡片
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            PluginArtworkIconView(
+                                kind: .antigravityContext,
+                                size: 54,
+                                isEnabled: true,
+                                forcedColorScheme: colorScheme
+                            )
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("目标应用与版本记忆")
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .foregroundStyle(theme.primaryText)
+                                Text(antigravityManager.selectedTargetPath.isEmpty ? "尚未检测到 language_server 二进制" : antigravityManager.selectedTargetPath)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(theme.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+
+                            Spacer()
+                        }
+
+                        HStack(spacing: 12) {
+                            antigravityStatPill(
+                                label: "当前 Antigravity 版本",
+                                value: antigravityManager.currentAppVersion.map { "v\($0)" } ?? "未识别",
+                                tint: .indigo
+                            )
+                            antigravityStatPill(
+                                label: "已记忆上次解锁版本",
+                                value: antigravityManager.memory.lastKnownVersion.map { "v\($0)" } ?? "尚未记忆",
+                                tint: antigravityManager.versionWatchState.needsReapplyWarning ? .orange : .green
+                            )
+                            antigravityStatPill(
+                                label: "当前实测生效状态",
+                                value: antigravityManager.latestReport?.clampState.compactBadge ?? (antigravityManager.isAnalyzing ? "检测中..." : "未检测"),
+                                tint: (antigravityManager.latestReport?.clampState.isPatched ?? false) ? .green : .orange
+                            )
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(theme.studioCardFill)
+                            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                    )
+                }
+
+                // 3. 运行环境检测卡片
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("运行环境自动体检与适配")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                        Spacer()
+                        if !antigravityManager.discoveredTargets.isEmpty {
+                            Menu {
+                                ForEach(antigravityManager.discoveredTargets) { cand in
+                                    Button {
+                                        antigravityManager.selectedTargetPath = cand.path
+                                        antigravityManager.refreshAllStatus()
+                                    } label: {
+                                        Text("\(cand.displayName) · \(cand.path)")
+                                    }
+                                }
+                                Divider()
+                                Button("手动选择其他文件...") {
+                                    antigravityManager.selectCustomTargetViaPanel()
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder.badge.gearshape")
+                                        .font(.system(size: 11))
+                                    Text("切换目标 (\(antigravityManager.discoveredTargets.count))")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(theme.pillFill))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                        } else {
+                            Button("手动选择 binary...") {
+                                antigravityManager.selectCustomTargetViaPanel()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.indigo)
+                            .pointingHandOnHover()
+                        }
+                    }
+
+                    let envItems = antigravityManager.environmentItems
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                        ForEach(envItems) { item in
+                            let itemColor: Color = {
+                                switch item.level {
+                                case .ready: return .green
+                                case .warning: return .orange
+                                case .blocked: return .red
+                                }
+                            }()
+                            HStack(spacing: 10) {
+                                Circle()
+                                    .fill(itemColor)
+                                    .frame(width: 8, height: 8)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(theme.primaryText)
+                                    Text(item.detail)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(theme.secondaryText)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                if let actionTitle = item.actionTitle {
+                                    Button {
+                                        if item.id == "codesign" {
+                                            antigravityManager.installCommandLineTools()
+                                        } else if item.id == "perm" {
+                                            antigravityManager.selectCustomTargetViaPanel()
+                                        } else if item.id == "proc" {
+                                            antigravityManager.quitAntigravityOnly()
+                                        }
+                                    } label: {
+                                        Text(actionTitle)
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                            .foregroundStyle(itemColor)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Capsule().fill(itemColor.opacity(0.14)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .pointingHandOnHover()
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(theme.pillFill.opacity(0.55))
+                                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.studioCardBorder.opacity(0.6), lineWidth: 0.7))
+                            )
+                        }
+                    }
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(theme.studioCardFill)
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                )
+
+                // 4. 扩容档位选择 + 字节修改预览 + 一键执行与回滚
+                HStack(alignment: .top, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("上下文上限档位")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+
+                        HStack(spacing: 8) {
+                            ForEach(AntigravityContextPreset.allCases) { preset in
+                                let selected = (antigravityManager.selectedPreset == preset)
+                                Button {
+                                    antigravityManager.selectedPreset = preset
+                                    antigravityManager.refreshAllStatus()
+                                } label: {
+                                    Text(preset.shortLabel)
+                                        .font(.system(size: 12, weight: selected ? .bold : .medium))
+                                        .foregroundStyle(selected ? Color.white : theme.primaryText)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 7)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .fill(selected ? Color.indigo : theme.pillFill)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .pointingHandOnHover()
+                            }
+                        }
+
+                        if antigravityManager.selectedPreset == .custom {
+                            HStack(spacing: 8) {
+                                Text("自定义 Token 上限:")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(theme.secondaryText)
+                                TextField("例如 900K / 512K / 983040", text: $antigravityManager.customTokensText)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .frame(width: 190)
+                                Button("预检") {
+                                    antigravityManager.refreshAllStatus()
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.indigo)
+                                .pointingHandOnHover()
+                            }
+                        }
+
+                        HStack(spacing: 10) {
+                            Button {
+                                antigravityManager.applySelectedPatch(autoRestartIfRunning: true)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: antigravityManager.isApplying ? "hourglass" : "wand.and.stars")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(antigravityManager.isApplying ? "处理中..." : (antigravityManager.isAntigravityRunning ? "一键解锁并重启 Antigravity" : "一键执行上下文解锁"))
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(Color.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                .background(RoundedRectangle(cornerRadius: 9).fill(Color.indigo))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                            .disabled(antigravityManager.isApplying || !antigravityManager.isAppleSilicon || antigravityManager.selectedTargetPath.isEmpty)
+
+                            let hasBackup = antigravityManager.memory.managedBackupPath != nil || !antigravityManager.legacyBackupPaths.isEmpty
+                            if hasBackup {
+                                Button {
+                                    antigravityManager.restoreFromBackup()
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "arrow.uturn.backward")
+                                            .font(.system(size: 11, weight: .bold))
+                                        Text("还原原版 256K")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .foregroundStyle(theme.primaryText)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 9)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 9)
+                                            .fill(theme.pillFill)
+                                            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .pointingHandOnHover()
+                                .disabled(antigravityManager.isApplying)
+                            }
+                        }
+
+                        if let msg = antigravityManager.statusMessage {
+                            Text(msg)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Color.green)
+                        }
+                        if let err = antigravityManager.lastError {
+                            Text(err)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Color.red)
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(theme.studioCardFill)
+                            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                    )
+
+                    // 右侧 Mach-O & ARM64 字节预检视图
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Mach-O ARM64 符号与字节预检")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+
+                        if let report = antigravityManager.latestReport {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Slice: 0x\(String(report.sliceOffset, radix: 16)) · __text: 0x\(String(report.textVirtualSize, radix: 16))")
+                                Text("pclntab: 0x\(String(report.pclnOffset, radix: 16)) (\(report.pclnVersion), \(report.functionCount) funcs)")
+                                Text("GetCheckpointConfig: +0x\(String(report.symbolOffset, radix: 16)) (\(report.symbolSize) B)")
+                                Text("SHA-256: \(String(report.binarySHA256.prefix(16)))…")
+                                Divider().opacity(0.3)
+                                ForEach(report.edits) { edit in
+                                    Text("0x\(String(edit.fileOffset, radix: 16)): \(edit.originalHex) -> \(edit.replacementHex)")
+                                        .foregroundStyle(edit.originalBytes == edit.replacementBytes ? Color.green : Color.cyan)
+                                }
+                            }
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                        } else {
+                            Text(antigravityManager.isAnalyzing ? "正在解析 ARM64 Mach-O 与 Go pclntab..." : "暂无分析报告")
+                                .font(.system(size: 12))
+                                .foregroundStyle(theme.secondaryText)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(16)
+                    .frame(width: 410, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(theme.studioCardFill)
+                            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
+                    )
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .onAppear {
+            antigravityManager.checkOnEntry()
+        }
+    }
+
+    private func antigravityStatPill(label: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.secondaryText)
+            Text(value)
+                .font(.system(size: 12.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(tint)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(theme.pillFill.opacity(0.55))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.studioCardBorder.opacity(0.6), lineWidth: 0.7))
+        )
     }
 
     private func logColor(for line: String) -> Color {

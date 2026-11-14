@@ -317,6 +317,7 @@ struct SysPulseApp {
             }
 
             let section = StudioWindowSection(rawValue: sectionName) ?? .overview
+            StudioWindowNavigationState.shared.isMainWindowVisible = true
             StudioWindowNavigationState.shared.selectedSection = section
             if sectionName == "modal" || sectionName == "settings" {
                 StudioWindowNavigationState.shared.openModal(tab: .settings)
@@ -331,6 +332,25 @@ struct SysPulseApp {
                 StudioWindowNavigationState.shared.selectedTab = .plugins
                 StudioWindowNavigationState.shared.isModalPresented = false
                 PSPortalPluginManager.shared.activePluginType = .upsManager
+            } else if sectionName == "plugins" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = nil
+                AntigravityContextManager.shared.checkOnEntry()
+                let deadline = Date().addingTimeInterval(3.0)
+                while AntigravityContextManager.shared.isAnalyzing && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                }
+            } else if sectionName == "antigravityPlugin" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                FeatureToggleManager.shared.setPluginEnabled(.antigravityContext, true)
+                PSPortalPluginManager.shared.activePluginType = .antigravityContext
+                AntigravityContextManager.shared.checkOnEntry()
+                let deadline = Date().addingTimeInterval(3.5)
+                while AntigravityContextManager.shared.isAnalyzing && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                }
             } else if sectionName == "aboutModal" {
                 StudioWindowNavigationState.shared.openModal(tab: .about)
             }
@@ -355,9 +375,9 @@ struct SysPulseApp {
                 while SystemCleanerEngine.shared.isScanning && Date() < deadline {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.2))
                 }
-            } else if sectionName == "plugins" || sectionName == "psportal" {
+            } else if sectionName == "plugins" || sectionName == "psportal" || sectionName == "antigravityPlugin" || sectionName == "upsModal" || sectionName == "ups" {
                 StudioWindowNavigationState.shared.selectedTab = .plugins
-                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
             } else if sectionName == "space" || sectionName == "spaceAnalysis" {
                 StudioWindowNavigationState.shared.selectedTab = .space
                 StorageAnalysisEngine.shared.startScan(location: .downloads)
@@ -606,9 +626,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // 启动后延迟 3.5 秒静默检查一次 GitHub Releases 是否有新版本
+        // 启动后延迟 3.5 秒按每日早/晚各一次时段槽静默检查一次更新（已检查过或处于非早/晚时段则不发网络请求）
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-            AppUpdateManager.shared.checkForUpdates(userInitiated: false)
+            AppUpdateManager.shared.checkForUpdatesIfScheduledSlotDue()
         }
 
         // Allow clean IPC termination and window opening

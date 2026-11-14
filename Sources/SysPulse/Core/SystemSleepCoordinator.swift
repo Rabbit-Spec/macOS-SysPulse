@@ -57,6 +57,7 @@ public final class SystemSleepCoordinator {
             PSPortalPluginManager.shared.stopRelay()
         }
         ActiveConnectionsViewModel.shared.stopAutoRefresh()
+        AppUpdateManager.shared.pauseForSleep()
     }
 
     private func handleDidWake() {
@@ -72,5 +73,6 @@ public final class SystemSleepCoordinator {
         if ActiveConnectionsWindowController.shared.window?.isVisible == true {
             ActiveConnectionsViewModel.shared.startAutoRefresh()
         }
+        AppUpdateManager.shared.resumeFromWake()
     }
 }

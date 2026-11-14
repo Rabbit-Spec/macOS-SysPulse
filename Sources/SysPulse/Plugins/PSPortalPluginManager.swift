@@ -53,6 +53,7 @@ public enum PluginModuleType: String, CaseIterable, Identifiable, Sendable {
     case wifiLatency = "wifi_latency"
     case arpSniffer = "arp_sniffer"
     case upsManager = "ups_manager"
+    case antigravityContext = "antigravity_context"
 
     public var id: String { rawValue }
 
@@ -62,6 +63,7 @@ public enum PluginModuleType: String, CaseIterable, Identifiable, Sendable {
         case .wifiLatency: return "Wi-Fi 低延迟"
         case .arpSniffer: return "局域网 ARP 嗅探与设备诊断"
         case .upsManager: return "UPS 电源管理"
+        case .antigravityContext: return "Antigravity 上下文扩容"
         }
     }
 }
@@ -266,7 +268,7 @@ public final class PSPortalPluginManager {
             return
         }
 
-        // 仅在缺失时初始化参考脚本，仅在尺寸/修改时间变化时增量同步原生引擎与清单（避免每次启动反复重拷 scapy 目录）
+        // 按需初始化参考脚本，并在文件变化时增量同步原生引擎与清单
         if let items = try? fileManager.contentsOfDirectory(atPath: bundlePluginDir.path) {
             for item in items {
                 let src = bundlePluginDir.appendingPathComponent(item)
@@ -399,7 +401,7 @@ public final class PSPortalPluginManager {
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: dir.path)
     }
 
-    // MARK: - 检查插件更新 (精确双向比对)
+    // MARK: - 检查插件更新
 
     public func checkForPluginUpdates() {
         guard !isCheckingForUpdates else { return }

@@ -155,7 +155,7 @@ public final class FanController {
         }
 
         // Cool or MaxCool mode:
-        // 1. Only use installed helper silently if it matches the latest bundled binary (prevents stale 0.1.7 helper)
+        // 1. Only use installed helper silently if it matches the latest bundled binary
         if Self.isInstalledHelperUpToDate() {
             let pct = mode.targetPercent
             self.needsAuthorization = false
@@ -297,6 +297,14 @@ public final class FanController {
                 statusText = activeMode.strategyText
             }
         }
+    }
+
+    public func syncAuthorizationRevoked() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        activeMode = .auto
+        needsAuthorization = false
+        statusText = activeMode.strategyText
     }
 
     nonisolated private static func isInstalledHelperUpToDate() -> Bool {

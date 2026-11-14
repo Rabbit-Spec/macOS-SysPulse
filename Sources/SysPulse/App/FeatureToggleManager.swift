@@ -58,7 +58,7 @@ public final class FeatureToggleManager {
         didSet { save("SP_Mod_MacBookDemoMode", enableMacBookDemoMode) }
     }
 
-    // MARK: - 3. Plugins Center Module Switches (插件中心按需解耦开关，首次安装默认全关)
+    // MARK: - 3. 插件中心模块开关
 
     public var enablePluginPSPortal: Bool {
         didSet { save("SP_Plugin_PSPortal", enablePluginPSPortal) }
@@ -72,9 +72,45 @@ public final class FeatureToggleManager {
     public var enablePluginUPSManager: Bool {
         didSet { save("SP_Plugin_UPSManager", enablePluginUPSManager) }
     }
+    public var enablePluginAntigravityContext: Bool {
+        didSet { save("SP_Plugin_AntigravityContext", enablePluginAntigravityContext) }
+    }
+
+    private static let pluginOrderKey = "SP_Plugins_CardOrder"
+
+    public var pluginModuleOrder: [PluginModuleType] {
+        didSet {
+            UserDefaults.standard.set(pluginModuleOrder.map(\.rawValue), forKey: Self.pluginOrderKey)
+        }
+    }
+
+    public var isCustomPluginOrder: Bool {
+        pluginModuleOrder != PluginModuleType.allCases
+    }
+
+    public func movePluginModule(from source: PluginModuleType, to destination: PluginModuleType) {
+        guard source != destination,
+              let fromIdx = pluginModuleOrder.firstIndex(of: source),
+              let toIdx = pluginModuleOrder.firstIndex(of: destination)
+        else { return }
+        var updated = pluginModuleOrder
+        let item = updated.remove(at: fromIdx)
+        updated.insert(item, at: toIdx)
+        pluginModuleOrder = updated
+    }
+
+    public func resetPluginModuleOrder() {
+        pluginModuleOrder = PluginModuleType.allCases
+    }
 
     public var enabledPluginsCount: Int {
-        [enablePluginPSPortal, enablePluginWiFiLatency, enablePluginARPSniffer, enablePluginUPSManager].filter { $0 }.count
+        [
+            enablePluginPSPortal,
+            enablePluginWiFiLatency,
+            enablePluginARPSniffer,
+            enablePluginUPSManager,
+            enablePluginAntigravityContext
+        ].filter { $0 }.count
     }
 
     public func isPluginEnabled(_ type: PluginModuleType) -> Bool {
@@ -83,6 +119,7 @@ public final class FeatureToggleManager {
         case .wifiLatency: return enablePluginWiFiLatency
         case .arpSniffer: return enablePluginARPSniffer
         case .upsManager: return enablePluginUPSManager
+        case .antigravityContext: return enablePluginAntigravityContext
         }
     }
 
@@ -122,6 +159,12 @@ public final class FeatureToggleManager {
             } else {
                 PowerSourceEngine.shared.deactivate()
                 DiskGuardian.shared.handlePowerRestored()
+            }
+        case .antigravityContext:
+            guard enablePluginAntigravityContext != enabled else { return }
+            enablePluginAntigravityContext = enabled
+            if enabled {
+                AntigravityContextManager.shared.checkOnEntry()
             }
         }
     }
@@ -176,6 +219,19 @@ public final class FeatureToggleManager {
         self.enablePluginWiFiLatency = readBool("SP_Plugin_WiFiLatency", defaultValue: false)
         self.enablePluginARPSniffer = readBool("SP_Plugin_ARPSniffer", defaultValue: false)
         self.enablePluginUPSManager = readBool("SP_Plugin_UPSManager", defaultValue: false)
+        self.enablePluginAntigravityContext = readBool("SP_Plugin_AntigravityContext", defaultValue: false)
+
+        let storedOrder = d.stringArray(forKey: Self.pluginOrderKey) ?? []
+        var parsedOrder: [PluginModuleType] = []
+        for raw in storedOrder {
+            if let item = PluginModuleType(rawValue: raw), !parsedOrder.contains(item) {
+                parsedOrder.append(item)
+            }
+        }
+        for item in PluginModuleType.allCases where !parsedOrder.contains(item) {
+            parsedOrder.append(item)
+        }
+        self.pluginModuleOrder = parsedOrder
 
         saveAllToDisk()
     }
@@ -207,7 +263,8 @@ public final class FeatureToggleManager {
             "SP_Plugin_PSPortal": enablePluginPSPortal,
             "SP_Plugin_WiFiLatency": enablePluginWiFiLatency,
             "SP_Plugin_ARPSniffer": enablePluginARPSniffer,
-            "SP_Plugin_UPSManager": enablePluginUPSManager
+            "SP_Plugin_UPSManager": enablePluginUPSManager,
+            "SP_Plugin_AntigravityContext": enablePluginAntigravityContext
         ]
         if let data = try? JSONEncoder().encode(dict) {
             try? data.write(to: Self.settingsFileURL, options: .atomic)
@@ -235,6 +292,8 @@ public final class FeatureToggleManager {
         setPluginEnabled(.wifiLatency, false)
         setPluginEnabled(.arpSniffer, false)
         setPluginEnabled(.upsManager, false)
+        setPluginEnabled(.antigravityContext, false)
+        pluginModuleOrder = PluginModuleType.allCases
         saveAllToDisk()
     }
 }

@@ -77,6 +77,9 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
     private var cachedElements: [(role: HIDTargetRole, element: IOHIDElement)] = []
 
     private var activeIntervalSeconds: Double = 30.0
+    private var skipIOPSRedundantUsages: Bool = false
+    private var lastPollTimestamp: CFAbsoluteTime = 0
+    private var elementFailureCounts: [Int: Int] = [:]
     private var isPausedForSleep: Bool = false
     private var pendingResumeWorkItem: DispatchWorkItem?
 
@@ -126,15 +129,21 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
     }
 
     /// Dynamically adjust polling interval without reopening IOHIDManager.
-    public func setPollingInterval(_ intervalSeconds: Double, triggerImmediate: Bool = false) {
+    public func setPollingInterval(
+        _ intervalSeconds: Double,
+        skipIOPSRedundantUsages: Bool = false,
+        triggerImmediate: Bool = false
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
             let changed = abs(self.activeIntervalSeconds - intervalSeconds) > 0.1
             self.activeIntervalSeconds = intervalSeconds
+            self.skipIOPSRedundantUsages = skipIOPSRedundantUsages
             guard !self.isPausedForSleep else { return }
+            let shouldPollNow = triggerImmediate && (CFAbsoluteTimeGetCurrent() - self.lastPollTimestamp >= 15.0)
             if changed || self.timer == nil {
-                self.scheduleTimerLocked(intervalSeconds: intervalSeconds, fireImmediately: triggerImmediate)
-            } else if triggerImmediate {
+                self.scheduleTimerLocked(intervalSeconds: intervalSeconds, fireImmediately: shouldPollNow)
+            } else if shouldPollNow {
                 self.pollHardware()
             }
         }
@@ -180,10 +189,14 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
         timer = nil
     }
 
+    private var cachedRatedVA: Double?
+
     private func clearCachedDevice() {
         cachedDevice = nil
         cachedDeviceName = nil
         cachedVendorID = nil
+        cachedRatedVA = nil
+        elementFailureCounts.removeAll(keepingCapacity: false)
         cachedElements.removeAll(keepingCapacity: false)
     }
 
@@ -255,6 +268,7 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
 
     private func pollHardware() {
         guard !isPausedForSleep else { return }
+        lastPollTimestamp = CFAbsoluteTimeGetCurrent()
         var snapshot = RawHIDPowerState()
 
         if let manager = hidManager,
@@ -270,8 +284,24 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
                 let seedValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, cachedElements[0].element, 0, 0)
                 var valueRef = Unmanaged.passUnretained(seedValue)
 
-                for entry in cachedElements {
+                for (idx, entry) in cachedElements.enumerated() {
+                    if entry.role == .configApparentPowerVA, let knownVA = cachedRatedVA {
+                        snapshot.configApparentPowerVA = knownVA
+                        continue
+                    }
+                    if skipIOPSRedundantUsages {
+                        switch entry.role {
+                        case .acPresent, .isCharging, .isDischarging, .batteryLevel, .runTimeToEmpty:
+                            continue
+                        case .voltageVolts, .upsLoadPercent, .configApparentPowerVA:
+                            break
+                        }
+                    }
+                    if (elementFailureCounts[idx] ?? 0) >= 3 {
+                        continue
+                    }
                     if IOHIDDeviceGetValue(dev, entry.element, &valueRef) == kIOReturnSuccess {
+                        elementFailureCounts[idx] = 0
                         let val = IOHIDValueGetIntegerValue(valueRef.takeUnretainedValue())
                         switch entry.role {
                         case .acPresent:
@@ -296,9 +326,13 @@ public final class HIDHardwareWatchdog: @unchecked Sendable {
                             }
                         case .configApparentPowerVA:
                             if val > 0 {
-                                snapshot.configApparentPowerVA = Double(val)
+                                let va = Double(val)
+                                cachedRatedVA = va
+                                snapshot.configApparentPowerVA = va
                             }
                         }
+                    } else {
+                        elementFailureCounts[idx, default: 0] += 1
                     }
                 }
             }

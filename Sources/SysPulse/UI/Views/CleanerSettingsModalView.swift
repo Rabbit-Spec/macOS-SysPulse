@@ -202,11 +202,11 @@ public struct CleanerSettingsModalView: View {
     private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(theme.cardFill)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.studioCardFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(theme.cardBorder, lineWidth: 0.8)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
                     )
             )
     }

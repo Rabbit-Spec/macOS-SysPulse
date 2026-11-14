@@ -1,9 +1,34 @@
 import Foundation
 import AppKit
+import CoreBluetooth
 import CoreServices
 import UserNotifications
 import ServiceManagement
 import Observation
+
+@MainActor
+private final class BluetoothAuthorizationRequester: NSObject, CBCentralManagerDelegate {
+    private var manager: CBCentralManager?
+    private let onComplete: @MainActor () -> Void
+
+    init(onComplete: @escaping @MainActor () -> Void) {
+        self.onComplete = onComplete
+        super.init()
+        self.manager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionShowPowerAlertKey: false]
+        )
+    }
+
+    nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.manager = nil
+            self.onComplete()
+        }
+    }
+}
 
 @Observable
 @MainActor
@@ -27,6 +52,7 @@ public final class SystemPermissionManager {
     }
 
     public private(set) var fullDiskAccessStatus: PermissionStatus = .notDetermined
+    public private(set) var bluetoothStatus: PermissionStatus = .notDetermined
     public private(set) var notificationStatus: PermissionStatus = .notDetermined
     public private(set) var automationStatus: PermissionStatus = .notDetermined
     public private(set) var fanHelperStatus: PermissionStatus = .notDetermined
@@ -41,6 +67,7 @@ public final class SystemPermissionManager {
     private static let launchAtLoginPrefKey = "SP_LaunchAtLogin_Preferred"
 
     private var pollTask: Task<Void, Never>? = nil
+    private var bluetoothRequester: BluetoothAuthorizationRequester? = nil
 
     private init() {
         checkAllPermissions()
@@ -60,11 +87,53 @@ public final class SystemPermissionManager {
 
     public func checkAllPermissions() {
         checkFullDiskAccess()
+        checkBluetoothPermission()
         checkNotificationPermission()
         checkAutomationPermission()
         checkFanHelperPermission()
         checkLaunchAtLoginPermission()
     }
+
+    // MARK: - Bluetooth Privacy Authorization
+
+    public func checkBluetoothPermission() {
+        switch CBCentralManager.authorization {
+        case .allowedAlways:
+            bluetoothStatus = .authorized
+        case .denied, .restricted:
+            bluetoothStatus = .denied
+        case .notDetermined:
+            bluetoothStatus = .notDetermined
+        @unknown default:
+            bluetoothStatus = .notDetermined
+        }
+    }
+
+    public func requestBluetoothPermission() {
+        if CBCentralManager.authorization == .notDetermined {
+            bluetoothRequester = BluetoothAuthorizationRequester { [weak self] in
+                guard let self else { return }
+                self.checkBluetoothPermission()
+                self.bluetoothRequester = nil
+                if self.bluetoothStatus == .denied {
+                    self.openBluetoothSettings()
+                }
+            }
+        } else {
+            openBluetoothSettings()
+        }
+    }
+
+    public func openBluetoothSettings(expectAuthorized: Bool = true) {
+        openSettingsURL("x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")
+        startPermissionPoll { [weak self] in
+            guard let self else { return true }
+            self.checkBluetoothPermission()
+            return expectAuthorized ? self.bluetoothStatus.isAuthorized : !self.bluetoothStatus.isAuthorized
+        }
+    }
+
+    // MARK: - Launch at Login
 
     public func checkLaunchAtLoginPermission() {
         switch SMAppService.mainApp.status {
@@ -122,8 +191,19 @@ public final class SystemPermissionManager {
         }
     }
 
+    // MARK: - Fan Helper Privileged Authorization
+
     public func checkFanHelperPermission() {
-        fanHelperStatus = Self.checkInstalledFanHelperStatus()
+        guard Self.hasValidHelperBinaryAttributes() else {
+            fanHelperStatus = .notDetermined
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let status = Self.checkInstalledFanHelperStatus()
+            Task { @MainActor [weak self] in
+                self?.fanHelperStatus = status
+            }
+        }
     }
 
     public func requestFanHelperPermission() {
@@ -131,25 +211,41 @@ public final class SystemPermissionManager {
             let succeeded = Self.installPrivilegedHelper(additionalFanPercent: nil)
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.checkFanHelperPermission()
                 if succeeded {
-                    self.checkFanHelperPermission()
+                    self.fanHelperStatus = .authorized
                     FanController.shared.syncAuthorizationGranted()
-                } else {
-                    self.fanHelperStatus = .denied
                 }
             }
         }
     }
 
-    public nonisolated static func checkInstalledFanHelperStatus() -> PermissionStatus {
-        guard FileManager.default.isExecutableFile(atPath: installedHelperPath) else {
-            return .notDetermined
+    public func revokeFanHelperPermission() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let succeeded = Self.uninstallPrivilegedHelper()
+            let updatedStatus = Self.checkInstalledFanHelperStatus()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.fanHelperStatus = updatedStatus
+                if succeeded || updatedStatus != .authorized {
+                    FanController.shared.syncAuthorizationRevoked()
+                }
+            }
         }
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: installedHelperPath),
+    }
+
+    private nonisolated static func hasValidHelperBinaryAttributes() -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: installedHelperPath),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: installedHelperPath),
               let owner = attrs[.ownerAccountID] as? NSNumber,
-              let perms = attrs[.posixPermissions] as? NSNumber,
-              owner.intValue == 0,
-              (perms.intValue & 0o4000) != 0 else {
+              let perms = attrs[.posixPermissions] as? NSNumber else {
+            return false
+        }
+        return owner.intValue == 0 && (perms.intValue & 0o4000) != 0
+    }
+
+    public nonisolated static func checkInstalledFanHelperStatus() -> PermissionStatus {
+        guard hasValidHelperBinaryAttributes() else {
             return .notDetermined
         }
 
@@ -199,8 +295,17 @@ public final class SystemPermissionManager {
             let clamped = max(0, min(100, pct))
             shellCmd += " && \(qDst) --fan \(clamped)"
         }
-        let script = "do shell script \"\(appleScriptEscaped(shellCmd))\" with administrator privileges"
+        return runPrivilegedShell(shellCmd)
+    }
 
+    public nonisolated static func uninstallPrivilegedHelper() -> Bool {
+        guard FileManager.default.fileExists(atPath: installedHelperPath) else { return true }
+        let qDst = shellSingleQuoted(installedHelperPath)
+        return runPrivilegedShell("rm -f \(qDst)")
+    }
+
+    private nonisolated static func runPrivilegedShell(_ shellCmd: String) -> Bool {
+        let script = "do shell script \"\(appleScriptEscaped(shellCmd))\" with administrator privileges"
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", script]
@@ -212,6 +317,8 @@ public final class SystemPermissionManager {
             return false
         }
     }
+
+    // MARK: - Automation (Apple Events)
 
     public func checkAutomationPermission() {
         let targetDesc = NSAppleEventDescriptor(bundleIdentifier: "com.apple.finder")
@@ -243,11 +350,13 @@ public final class SystemPermissionManager {
                 guard let self else { return }
                 self.checkAutomationPermission()
                 if resultStatus == OSStatus(errAEEventNotPermitted) || self.automationStatus == .denied {
-                    self.openAutomationSettings()
+                    self.openAutomationSettings(expectAuthorized: true)
                 }
             }
         }
     }
+
+    // MARK: - Full Disk Access
 
     public func checkFullDiskAccess() {
         // Genuine TCC-protected directories on macOS that throw EPERM without Full Disk Access
@@ -284,6 +393,8 @@ public final class SystemPermissionManager {
         fullDiskAccessStatus = granted ? .authorized : .denied
     }
 
+    // MARK: - Notifications
+
     public func checkNotificationPermission() {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             let status = settings.authorizationStatus
@@ -307,36 +418,38 @@ public final class SystemPermissionManager {
             Task { @MainActor in
                 self.notificationStatus = granted ? .authorized : .denied
                 if !granted {
-                    self.openNotificationSettings()
+                    self.openNotificationSettings(expectAuthorized: true)
                 }
             }
         }
     }
 
-    public func openFullDiskAccessSettings() {
+    // MARK: - System Settings Redirect + Polling
+
+    public func openFullDiskAccessSettings(expectAuthorized: Bool = true) {
         openSettingsURL("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         startPermissionPoll { [weak self] in
             guard let self else { return true }
             self.checkFullDiskAccess()
-            return self.fullDiskAccessStatus.isAuthorized
+            return expectAuthorized ? self.fullDiskAccessStatus.isAuthorized : !self.fullDiskAccessStatus.isAuthorized
         }
     }
 
-    public func openNotificationSettings() {
+    public func openNotificationSettings(expectAuthorized: Bool = true) {
         openSettingsURL("x-apple.systempreferences:com.apple.preference.notifications")
         startPermissionPoll { [weak self] in
             guard let self else { return true }
             self.checkNotificationPermission()
-            return self.notificationStatus.isAuthorized
+            return expectAuthorized ? self.notificationStatus.isAuthorized : !self.notificationStatus.isAuthorized
         }
     }
 
-    public func openAutomationSettings() {
+    public func openAutomationSettings(expectAuthorized: Bool = true) {
         openSettingsURL("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
         startPermissionPoll { [weak self] in
             guard let self else { return true }
             self.checkAutomationPermission()
-            return self.automationStatus.isAuthorized
+            return expectAuthorized ? self.automationStatus.isAuthorized : !self.automationStatus.isAuthorized
         }
     }
 

@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import Observation
 
-public struct GitHubReleaseInfo: Sendable, Equatable {
+public struct GitHubReleaseInfo: Sendable, Equatable, Codable {
     public let tagName: String
     public let version: String
     public let title: String
@@ -56,10 +56,28 @@ public final class AppUpdateManager {
 
     public var state: UpdateCheckState = .idle
     public var availableRelease: GitHubReleaseInfo? = nil
+    public var autoUpdateCheckEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(autoUpdateCheckEnabled, forKey: Self.autoCheckEnabledKey)
+            if autoUpdateCheckEnabled {
+                startSlotMonitorIfNeeded()
+            } else {
+                stopSlotMonitor()
+            }
+        }
+    }
+
     private var downloadTask: Task<Void, Never>? = nil
     private var currentDownloadTask: URLSessionDownloadTask? = nil
     private var currentURLSession: URLSession? = nil
     private var activeDownloadId = UUID()
+    private var slotMonitorTimer: Timer? = nil
+
+    private static let autoCheckEnabledKey = "SP_Update_AutoCheckEnabled"
+    private static let lastAutoSlotKey = "SP_Update_LastAutoSlot"
+    private static let releaseETagKey = "SP_Update_ReleaseETag"
+    private static let cachedReleaseDataKey = "SP_Update_CachedReleaseJSON"
+    private static let rateLimitResetKey = "SP_Update_RateLimitReset"
 
     private static func otaStagingDirectory() throws -> URL {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -76,7 +94,82 @@ public final class AppUpdateManager {
         availableRelease != nil
     }
 
-    private init() {}
+    private init() {
+        if UserDefaults.standard.object(forKey: Self.autoCheckEnabledKey) != nil {
+            self.autoUpdateCheckEnabled = UserDefaults.standard.bool(forKey: Self.autoCheckEnabledKey)
+        }
+        if let cached = Self.loadCachedRelease(),
+           Self.isVersion(cached.version, newerThan: AppMetadata.version) {
+            self.availableRelease = cached
+            self.state = .updateAvailable(cached)
+        }
+        if self.autoUpdateCheckEnabled {
+            startSlotMonitorIfNeeded()
+        }
+    }
+
+    /// Returns a daily slot identifier only during the morning (06:00–12:59) and evening (18:00–23:59) windows.
+    public static func currentDailySlotKey(for date: Date = Date()) -> String? {
+        let cal = Calendar.current
+        let hour = cal.component(.hour, from: date)
+        let period: String
+        if hour >= 6 && hour < 13 {
+            period = "AM"
+        } else if hour >= 18 && hour < 24 {
+            period = "PM"
+        } else {
+            return nil
+        }
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        guard let y = comps.year, let m = comps.month, let d = comps.day else { return nil }
+        return String(format: "%04d-%02d-%02d-%@", y, m, d, period)
+    }
+
+    public func startSlotMonitorIfNeeded() {
+        guard autoUpdateCheckEnabled else { return }
+        guard slotMonitorTimer == nil else { return }
+        slotMonitorTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { _ in
+            Task { @MainActor in
+                AppUpdateManager.shared.checkForUpdatesIfScheduledSlotDue()
+            }
+        }
+    }
+
+    public func stopSlotMonitor() {
+        slotMonitorTimer?.invalidate()
+        slotMonitorTimer = nil
+    }
+
+    public func pauseForSleep() {
+        stopSlotMonitor()
+    }
+
+    public func resumeFromWake() {
+        if autoUpdateCheckEnabled {
+            startSlotMonitorIfNeeded()
+            checkForUpdatesIfScheduledSlotDue()
+        }
+    }
+
+    /// Automatically checks for updates at most twice daily (morning slot & evening slot).
+    public func checkForUpdatesIfScheduledSlotDue() {
+        guard autoUpdateCheckEnabled else { return }
+        guard let slotKey = Self.currentDailySlotKey() else { return }
+        let lastSlot = UserDefaults.standard.string(forKey: Self.lastAutoSlotKey)
+        guard lastSlot != slotKey else { return }
+
+        let resetAt = UserDefaults.standard.double(forKey: Self.rateLimitResetKey)
+        if resetAt > Date().timeIntervalSince1970 {
+            return
+        }
+
+        if case .checking = state { return }
+        if case .downloading = state { return }
+        if case .installing = state { return }
+
+        UserDefaults.standard.set(slotKey, forKey: Self.lastAutoSlotKey)
+        performUpdateCheck(userInitiated: false, forceRefresh: false, isScheduledAuto: true)
+    }
 
     public func checkForUpdates(userInitiated: Bool = true, forceRefresh: Bool = false) {
         if userInitiated {
@@ -88,11 +181,19 @@ public final class AppUpdateManager {
             return
         }
 
-        // 如果已经在下载中或安装中，保持当前状态
+        performUpdateCheck(userInitiated: userInitiated, forceRefresh: forceRefresh, isScheduledAuto: false)
+    }
+
+    private func performUpdateCheck(userInitiated: Bool, forceRefresh: Bool, isScheduledAuto: Bool) {
+        if case .checking = state { return }
         if case .downloading = state { return }
         if case .installing = state { return }
 
-        state = .checking
+        if isScheduledAuto {
+            // Silent check avoids flashing modal errors if network is offline or rate-limited
+        } else {
+            state = .checking
+        }
 
         Task { @MainActor in
             do {
@@ -105,15 +206,18 @@ public final class AppUpdateManager {
                         self.state = .updateAvailable(info)
                     } else {
                         self.availableRelease = nil
-                        self.state = .upToDate(currentVersion: AppMetadata.version, checkedAt: nowStr)
+                        if !isScheduledAuto || !self.hasUpdateAvailable {
+                            self.state = .upToDate(currentVersion: AppMetadata.version, checkedAt: nowStr)
+                        }
                     }
                 } else {
-                    // 仓库尚未创建首个 Release 或 Tag 时视为已是最新
                     self.availableRelease = nil
                     self.state = .upToDate(currentVersion: AppMetadata.version, checkedAt: nowStr)
                 }
             } catch {
-                self.state = .failed(message: error.localizedDescription)
+                if !isScheduledAuto {
+                    self.state = .failed(message: error.localizedDescription)
+                }
             }
         }
     }
@@ -227,12 +331,31 @@ public final class AppUpdateManager {
         }
     }
 
-    // MARK: - GitHub API Fetching
+    // MARK: - GitHub API Fetching & ETag Cache
+
+    private static func loadCachedRelease() -> GitHubReleaseInfo? {
+        guard let data = UserDefaults.standard.data(forKey: cachedReleaseDataKey) else { return nil }
+        return try? JSONDecoder().decode(GitHubReleaseInfo.self, from: data)
+    }
+
+    private static func saveCachedRelease(_ info: GitHubReleaseInfo, etag: String?) {
+        if let data = try? JSONEncoder().encode(info) {
+            UserDefaults.standard.set(data, forKey: cachedReleaseDataKey)
+        }
+        if let etag, !etag.isEmpty {
+            UserDefaults.standard.set(etag, forKey: releaseETagKey)
+        }
+    }
 
     private static func fetchLatestReleaseFromGitHub() async throws -> GitHubReleaseInfo? {
         var request = URLRequest(url: latestReleaseAPIURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("SysPulse/\(AppMetadata.version)", forHTTPHeaderField: "User-Agent")
+        if let cachedETag = UserDefaults.standard.string(forKey: releaseETagKey),
+           loadCachedRelease() != nil,
+           !cachedETag.isEmpty {
+            request.setValue(cachedETag, forHTTPHeaderField: "If-None-Match")
+        }
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 12
 
@@ -241,10 +364,39 @@ public final class AppUpdateManager {
             throw NSError(domain: "AppUpdateManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的网络响应。"])
         }
 
+        // 304 Not Modified: GitHub 不消耗每小时 API 配额，直接复用本地缓存
+        if http.statusCode == 304, let cached = loadCachedRelease() {
+            UserDefaults.standard.removeObject(forKey: rateLimitResetKey)
+            return cached
+        }
+
         if http.statusCode == 200 {
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                return parseReleaseJSON(json)
+            UserDefaults.standard.removeObject(forKey: rateLimitResetKey)
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let parsed = parseReleaseJSON(json) {
+                let etag = http.value(forHTTPHeaderField: "ETag")
+                saveCachedRelease(parsed, etag: etag)
+                return parsed
             }
+        }
+
+        if http.statusCode == 403 || http.statusCode == 429 {
+            var resetHint = "稍后"
+            if let resetRaw = http.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+               let resetEpoch = TimeInterval(resetRaw),
+               resetEpoch > Date().timeIntervalSince1970 {
+                UserDefaults.standard.set(resetEpoch, forKey: rateLimitResetKey)
+                let fmt = DateFormatter()
+                fmt.dateFormat = "HH:mm"
+                resetHint = fmt.string(from: Date(timeIntervalSince1970: resetEpoch)) + " 后"
+            } else {
+                UserDefaults.standard.set(Date().timeIntervalSince1970 + 1800, forKey: rateLimitResetKey)
+            }
+            throw NSError(
+                domain: "AppUpdateManager",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "GitHub API 访问频率受限 (HTTP \(http.statusCode))，请于\(resetHint)再试或直接前往 Releases 页面下载。"]
+            )
         }
 
         // 若 latest release 返回 404（尚未发布 Release 或仅推送了 Git Tag），回退查询 Tags 列表

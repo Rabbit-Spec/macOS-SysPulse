@@ -487,7 +487,7 @@ public final class SystemCleanerEngine {
                         }
                     }
                 } else {
-                    // 系统与应用缓存、运行日志、Xcode/Homebrew/npm 开发产物：纯临时衍生垃圾，直接安全物理释放，绝不污染倒灌废纸篓
+                    // 缓存、日志与开发产物直接物理删除，不移入废纸篓
                     if let subs = try? fm.contentsOfDirectory(at: item.path, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey], options: []) {
                         var folderFreed: Int64 = 0
                         var allRemoved = !subs.isEmpty
@@ -515,7 +515,7 @@ public final class SystemCleanerEngine {
                 }
             }
 
-            // 阶段二：用户明确勾选废纸篓时的压轴清空（最后一步统一执行）
+            // 阶段二：清空废纸篓
             if !trashItems.isEmpty {
                 if Task.isCancelled { return }
                 currentStep += 1
@@ -529,7 +529,7 @@ public final class SystemCleanerEngine {
                     script.executeAndReturnError(&err)
                 }
 
-                // 2. 双保险：遍历所有已知的 Trash 目录尝试清理子项
+                // 2. 补充清理各已知废纸篓目录残留子项
                 let allTrashes = Self.discoverAllTrashLocations()
                 var directRemovedCount = 0
                 for tURL in allTrashes {
