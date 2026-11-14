@@ -55,6 +55,9 @@ public struct StorageCleanerSection: View {
         .padding(.horizontal, 24)
         .padding(.top, 35)
         .padding(.bottom, 24)
+        .onAppear {
+            cleaner.startAutoScanIfNeeded()
+        }
     }
 
     // MARK: - 清理说明与残留分类卡片

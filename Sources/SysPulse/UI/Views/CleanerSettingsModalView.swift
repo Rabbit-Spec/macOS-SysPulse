@@ -141,6 +141,37 @@ public struct CleanerSettingsModalView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("扫描行为")
+                    .font(.system(size: 14.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+
+                cardContainer {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("进入清理页时自动扫描")
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .foregroundStyle(theme.primaryText)
+
+                            Spacer()
+
+                            Toggle("", isOn: $cleaner.autoScanOnEnter)
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .labelsHidden()
+                                .pointingHandOnHover()
+                        }
+
+                        Text("开启后，首次切入智能清理页面且当前尚无扫描结果时会自动开始扫描（手动取消后本次会话内不再自动重扫）。")
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(theme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
             Spacer(minLength: 0)
         }
     }

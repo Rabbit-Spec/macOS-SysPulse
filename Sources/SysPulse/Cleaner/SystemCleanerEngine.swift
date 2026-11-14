@@ -21,8 +21,14 @@ public final class SystemCleanerEngine {
             UserDefaults.standard.set(deleteMode.rawValue, forKey: "SP_Cleaner_DeleteMode")
         }
     }
+    public var autoScanOnEnter: Bool = true {
+        didSet {
+            UserDefaults.standard.set(autoScanOnEnter, forKey: "SP_Cleaner_AutoScanOnEnter")
+        }
+    }
 
     private var currentTask: Task<Void, Never>? = nil
+    private var suppressAutoScanInSession: Bool = false
 
     public init() {
         let savedFreed = UserDefaults.standard.integer(forKey: "PG_Clean_LastFreedBytes")
@@ -41,6 +47,9 @@ public final class SystemCleanerEngine {
         if let savedMode = UserDefaults.standard.string(forKey: "SP_Cleaner_DeleteMode"),
            let mode = CleanDeleteMode(rawValue: savedMode) {
             self.deleteMode = mode
+        }
+        if UserDefaults.standard.object(forKey: "SP_Cleaner_AutoScanOnEnter") != nil {
+            self.autoScanOnEnter = UserDefaults.standard.bool(forKey: "SP_Cleaner_AutoScanOnEnter")
         }
     }
 
@@ -184,15 +193,25 @@ public final class SystemCleanerEngine {
     }
 
     public func cancelScan() {
+        suppressAutoScanInSession = true
         currentTask?.cancel()
         currentTask = nil
         status = .idle
         currentScanPath = ""
     }
 
+    /// Trigger an automatic scan when entering the Cleaner tab if enabled, idle, and not cancelled this session.
+    public func startAutoScanIfNeeded() {
+        guard autoScanOnEnter, !suppressAutoScanInSession else { return }
+        guard status == .idle else { return }
+        startScan()
+    }
+
     // MARK: - 扫描引擎
 
     public func startScan() {
+        guard !isCleaning else { return }
+        suppressAutoScanInSession = false
         currentTask?.cancel()
         status = .scanning(progress: 0.05, currentPath: "正在排查系统残留…")
         currentScanPath = "正在排查系统残留…"
