@@ -143,7 +143,7 @@ public final class AnalysisNode: Identifiable, @unchecked Sendable {
     }
 
     public var icon: NSImage {
-        NSWorkspace.shared.icon(forFile: path)
+        AppIconLookupCache.shared.icon(forFilePath: path)
     }
 
     public var extensionName: String {
@@ -181,7 +181,7 @@ public struct AnalysisLargeFileItem: Identifiable, Sendable {
     }
 
     public var icon: NSImage {
-        NSWorkspace.shared.icon(forFile: path)
+        AppIconLookupCache.shared.icon(forFilePath: path)
     }
 }
 

@@ -399,10 +399,10 @@ public struct NetworkMonitorSection: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text("\(vm.internetPingMs)")
+                Text(vm.internetPingMs > 0 ? "\(vm.internetPingMs)" : "--")
                     .font(.system(size: 38, weight: .bold, design: .rounded))
                     .foregroundStyle(theme.primaryText)
-                Text("ms")
+                Text(vm.internetPingMs > 0 ? "ms" : vm.pingStatusText)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(theme.secondaryText)
             }
@@ -411,9 +411,9 @@ public struct NetworkMonitorSection: View {
 
             // 路由网关与 DNS 解析延迟
             HStack(spacing: 0) {
-                latencySubCell(title: "路由网关", ms: vm.routerPingText)
+                latencySubCell(title: "路由网关", ms: vm.routerPingText, unit: vm.routerPingText == "--" ? "" : "ms")
                 Divider().frame(height: 24).overlay(theme.dividerColor.opacity(0.4))
-                latencySubCell(title: "DNS 解析", ms: vm.dnsPingText)
+                latencySubCell(title: "DNS 解析", ms: vm.dnsPingText, unit: vm.dnsPingText == "--" ? "" : "ms")
             }
             .padding(.top, 6)
             .border(width: 0.8, edges: [.top], color: theme.dividerColor.opacity(0.3))

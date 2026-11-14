@@ -131,7 +131,7 @@ public final class PSPortalPluginManager {
     public var isCheckingForUpdates: Bool = false
     public var updateStatusMessage: String? = nil
     public var logs: [PortalLogEntry] = []
-    public var pluginVersion: String = "0.1.2"
+    public var pluginVersion: String = "0.1.3"
     public var pluginAuthor: String = "atameric"
     public var pluginRepo: String = "https://github.com/atameric/ps5-portal-high-bitrate"
     public var installedCommitSHA: String = "4430daa"
@@ -151,8 +151,18 @@ public final class PSPortalPluginManager {
     private var resetWorkItem: DispatchWorkItem?
     private var hasExplicitInterfaceConfig: Bool = false
 
-    private let logFilePath = "/tmp/syspulse_psportal.log"
-    private let pidFilePath = "/tmp/syspulse_psportal.pid"
+    nonisolated private static let privilegedEngineDirectory = "/Library/Application Support/SysPulse"
+    nonisolated private static let privilegedEnginePath = "/Library/Application Support/SysPulse/portal_engine"
+    private let pidFilePath = "/Library/Application Support/SysPulse/syspulse_psportal.pid"
+
+    private var logFilePath: String {
+        let logsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/SysPulse", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: logsDir.path) {
+            try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        }
+        return logsDir.appendingPathComponent("psportal.log").path
+    }
 
     public var pluginDirectoryURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -303,7 +313,7 @@ public final class PSPortalPluginManager {
         {
           "id": "com.syspulse.plugin.psportal",
           "name": "PS Portal 串流画质增强",
-          "version": "0.1.2",
+          "version": "0.1.3",
           "author": "atameric",
           "license": "GPL-3.0",
           "repo": "https://github.com/atameric/ps5-portal-high-bitrate",
@@ -473,11 +483,67 @@ public final class PSPortalPluginManager {
         }
     }
 
+    nonisolated private static func collectPortalScanArpSnapshot(
+        targetIface: String,
+        localIP: String,
+        gatewayIP: String
+    ) -> [String: (ip: String, mac: String, ifName: String)] {
+        var rawEntries = LanDeviceSnifferEngine.readArpTableViaKernelSysctl()
+        if rawEntries.isEmpty {
+            rawEntries = LanDeviceSnifferEngine.readArpTableViaCli()
+        }
+
+        var arpByIP: [String: (ip: String, mac: String, ifName: String)] = [:]
+        for entry in rawEntries {
+            let ip = entry.ip
+            let mac = LanOuiDatabase.normalizeMAC(entry.mac) ?? entry.mac.lowercased()
+            let ifName = entry.ifName.isEmpty ? targetIface : entry.ifName
+
+            guard !ip.isEmpty, ip.contains("."),
+                  !entry.isLocal, ip != localIP, ip != "127.0.0.1", ip != gatewayIP,
+                  !ip.hasSuffix(".255"), !ip.hasPrefix("224."), !ip.hasPrefix("239."),
+                  ip != "255.255.255.255" else { continue }
+            guard mac.count == 17,
+                  mac != "00:00:00:00:00:00",
+                  mac != "ff:ff:ff:ff:ff:ff" else { continue }
+            if !localIP.isEmpty && !entry.ifName.isEmpty && entry.ifName != targetIface {
+                continue
+            }
+            if arpByIP[ip] != nil && ifName != targetIface {
+                continue
+            }
+            arpByIP[ip] = (ip: ip, mac: mac, ifName: ifName)
+        }
+        return arpByIP
+    }
+
+    private final class ProbeResultBox<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: T
+
+        init(_ initial: T) {
+            self.storage = initial
+        }
+
+        func set(_ value: T) {
+            lock.lock()
+            storage = value
+            lock.unlock()
+        }
+
+        func get() -> T {
+            lock.lock()
+            let copy = storage
+            lock.unlock()
+            return copy
+        }
+    }
+
     public func scanLocalDevices() {
         guard !isScanningDevices else { return }
         detectInterfaces()
         self.isScanningDevices = true
-        self.appendLog("[SysPulse] 正在探测局域网活动设备...")
+        self.appendLog("[SysPulse] 正在唤醒并探测局域网 PS5 / PS Portal 设备...")
 
         let targetIface = self.selectedInterface
         let localIP = self.selectedInterfaceInfo?.ip ?? ""
@@ -486,92 +552,220 @@ public final class PSPortalPluginManager {
         let currentPortal = self.portalIP.trimmingCharacters(in: .whitespacesAndNewlines)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 1. 复用零子进程轻量 UDP 扫网（绑定目标网卡并读取真实子网广播地址）
             let subnetInfo = ActiveInterfaceInfo.ipv4SubnetInfo(for: targetIface)
-            let subnetSeed = !localIP.isEmpty ? localIP : gatewayIP
-            let parts = subnetSeed.split(separator: ".")
-            var broadcastTargets = ["255.255.255.255"]
-            if let bcast = subnetInfo?.broadcast, !bcast.isEmpty, !broadcastTargets.contains(bcast) {
-                broadcastTargets.append(bcast)
-            }
-            if parts.count == 4 {
-                let prefix = "\(parts[0]).\(parts[1]).\(parts[2])"
-                LanDeviceSnifferEngine.sweepSubnetFast(basePrefix: prefix, interfaceName: targetIface)
-                let fallbackBcast = "\(prefix).255"
-                if !broadcastTargets.contains(fallbackBcast) {
-                    broadcastTargets.append(fallbackBcast)
-                }
-                usleep(280_000)
-            }
-
-            // 2. 直接通过 BSD Sysctl 读取内核 ARP 缓存表，空表时回退 /usr/sbin/arp
-            var rawEntries = LanDeviceSnifferEngine.readArpTableViaKernelSysctl()
-            if rawEntries.isEmpty {
-                rawEntries = LanDeviceSnifferEngine.readArpTableViaCli()
-            }
-
-            var arpByIP: [String: (ip: String, mac: String, ifName: String)] = [:]
-            for entry in rawEntries {
-                let ip = entry.ip
-                let mac = entry.mac.lowercased()
-                let ifName = entry.ifName.isEmpty ? targetIface : entry.ifName
-
-                guard !ip.isEmpty, ip.contains("."),
-                      !entry.isLocal, ip != localIP, ip != "127.0.0.1", ip != gatewayIP,
-                      !ip.hasSuffix(".255"), !ip.hasPrefix("224."), !ip.hasPrefix("239."),
-                      ip != "255.255.255.255" else { continue }
-                guard mac.count == 17,
-                      mac != "00:00:00:00:00:00",
-                      mac != "ff:ff:ff:ff:ff:ff" else { continue }
-                // 若选定网卡有活跃 IP，严格过滤掉明确属于其他网卡/网桥的 ARP 条目
-                if !localIP.isEmpty && !entry.ifName.isEmpty && entry.ifName != targetIface {
-                    continue
-                }
-
-                if arpByIP[ip] != nil && ifName != targetIface {
-                    continue
-                }
-                arpByIP[ip] = (ip: ip, mac: mac, ifName: ifName)
-            }
-
-            // 3. 对 Sony 候选设备与当前填入 IP 执行 PlayStation DDP (UDP 9302) 精准辨别
-            DispatchQueue.main.async {
-                self?.appendLog("[SysPulse] 正在通过 PlayStation DDP (UDP 9302) 辨别主机与 Portal 掌机...")
-            }
-
-            var ddpTargets = arpByIP.values.filter { LanDeviceSnifferEngine.isSonyOUI($0.mac) }.map { $0.ip }
-            if !currentPS5.isEmpty { ddpTargets.append(currentPS5) }
-            if !currentPortal.isEmpty { ddpTargets.append(currentPortal) }
-            let ddpMap = LanDeviceSnifferEngine.probePlayStationDDP(
-                targetIPs: ddpTargets,
-                broadcastIPs: broadcastTargets,
+            let (targetHosts, resolvedBroadcasts) = LanDeviceSnifferEngine.resolveScanTargetHosts(
                 interfaceName: targetIface,
-                timeoutMs: 280
+                fallbackGatewayIP: gatewayIP
             )
+            var mutableBroadcasts = resolvedBroadcasts
+            if let bcast = subnetInfo?.broadcast, !bcast.isEmpty, !mutableBroadcasts.contains(bcast) {
+                mutableBroadcasts.append(bcast)
+            }
+            let broadcastTargets = mutableBroadcasts
+
+            // 优先定向唤醒已记录的 PS5 / Portal IP（突破无线 DTIM 深度待机省电唤醒延迟）
+            let priorityIPs = Array(Set([currentPS5, currentPortal].filter {
+                !$0.isEmpty && $0 != localIP && $0 != gatewayIP && Self.isValidUnicastIPv4($0)
+            }))
+
+            // 第 1 阶段：优先 IP ICMP + TCP (9295/443/80) + UDP (5353/9302) 唤醒，兼顾全网段 UDP + ICMP 扫网
+            if !priorityIPs.isEmpty {
+                LanDeviceSnifferEngine.probeHostsViaICMP(
+                    ips: priorityIPs,
+                    interfaceName: targetIface,
+                    batchSize: priorityIPs.count,
+                    batchDelayUs: 0
+                )
+                LanDeviceSnifferEngine.probeHostsViaTCP(
+                    ips: priorityIPs,
+                    ports: [9295, 443, 80],
+                    interfaceName: targetIface,
+                    batchSize: priorityIPs.count,
+                    batchDelayUs: 12_000
+                )
+                LanDeviceSnifferEngine.probeHostsViaUDP(
+                    ips: priorityIPs,
+                    ports: [5353, 9302],
+                    interfaceName: targetIface,
+                    batchSize: priorityIPs.count,
+                    batchDelayUs: 0
+                )
+            }
+
+            if !targetHosts.isEmpty {
+                LanDeviceSnifferEngine.probeHostsViaUDP(
+                    ips: targetHosts,
+                    ports: [5353, 137],
+                    interfaceName: targetIface,
+                    batchSize: 32,
+                    batchDelayUs: 6_000
+                )
+                LanDeviceSnifferEngine.probeHostsViaICMP(
+                    ips: targetHosts,
+                    interfaceName: targetIface,
+                    batchSize: 32,
+                    batchDelayUs: 6_000
+                )
+            }
+            usleep(450_000)
+
+            var arpByIP = Self.collectPortalScanArpSnapshot(
+                targetIface: targetIface,
+                localIP: localIP,
+                gatewayIP: gatewayIP
+            )
+
+            // 第 2 阶段：若待机 Portal 仍未从无线省电态（约 900ms DTIM 周期）唤醒入表，则补发 ICMP + TCP SYN 9295/443 再等 500ms
+            let hasSavedPortalInArp = currentPortal.isEmpty || arpByIP[currentPortal] != nil
+            let hasPortalCandidateInArp = arpByIP.values.contains {
+                LanDeviceSnifferEngine.isPortalOUI($0.mac) || LanDeviceSnifferEngine.isSonyInteractiveOUI($0.mac)
+            }
+            if !hasSavedPortalInArp || !hasPortalCandidateInArp {
+                let missingPriority = priorityIPs.filter { arpByIP[$0] == nil }
+                let missingHosts = targetHosts.filter { arpByIP[$0] == nil }
+                let wakeupIPs = missingPriority.isEmpty ? missingHosts : Array(Set(missingPriority + missingHosts))
+                if !wakeupIPs.isEmpty {
+                    DispatchQueue.main.async {
+                        self?.appendLog("[SysPulse] 正在针对深度待机无线设备执行二次唤醒探活...")
+                    }
+                    LanDeviceSnifferEngine.probeHostsViaICMP(
+                        ips: wakeupIPs,
+                        interfaceName: targetIface,
+                        batchSize: 32,
+                        batchDelayUs: 8_000
+                    )
+                    LanDeviceSnifferEngine.probeHostsViaTCP(
+                        ips: priorityIPs.isEmpty ? missingHosts : priorityIPs,
+                        ports: [9295, 443],
+                        interfaceName: targetIface,
+                        batchSize: 24,
+                        batchDelayUs: 15_000
+                    )
+                    usleep(500_000)
+                    let refreshed = Self.collectPortalScanArpSnapshot(
+                        targetIface: targetIface,
+                        localIP: localIP,
+                        gatewayIP: gatewayIP
+                    )
+                    for (ip, item) in refreshed where arpByIP[ip] == nil {
+                        arpByIP[ip] = item
+                    }
+                }
+            }
+
+            // 第 3 阶段：并行执行 PlayStation DDP (UDP 9302) 与 多协议设备自报探测 (DNS PTR / mDNS / SSDP / NetBIOS)
+            DispatchQueue.main.async {
+                self?.appendLog("[SysPulse] 正在通过 DDP (9302) + 多协议自报 + SIE OUI 综合识别主机与 Portal...")
+            }
+
+            let ddpTargets = Array(Set(arpByIP.values.filter {
+                LanDeviceSnifferEngine.isSonyOUI($0.mac) || LanOuiDatabase.isLocallyAdministeredMAC($0.mac)
+            }.map(\.ip) + priorityIPs))
+            let reportTargets = Array(arpByIP.keys)
+
+            let ddpBox = ProbeResultBox<[String: PlayStationDDPInfo]>([:])
+            let reportBox = ProbeResultBox<[String: LanPeerSelfReport]>([:])
+            let probeGroup = DispatchGroup()
+
+            probeGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let map = LanDeviceSnifferEngine.probePlayStationDDP(
+                    targetIPs: ddpTargets,
+                    broadcastIPs: broadcastTargets,
+                    interfaceName: targetIface,
+                    timeoutMs: 340
+                )
+                ddpBox.set(map)
+                probeGroup.leave()
+            }
+
+            if !reportTargets.isEmpty {
+                probeGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let reports = LanDeviceSnifferEngine.probePeerSelfReports(
+                        targetIPs: reportTargets,
+                        gatewayIP: gatewayIP,
+                        localIP: localIP,
+                        interfaceName: targetIface,
+                        timeoutMs: 400
+                    )
+                    reportBox.set(reports)
+                    probeGroup.leave()
+                }
+            }
+
+            _ = probeGroup.wait(timeout: .now() + .milliseconds(550))
+            let ddpMap = ddpBox.get()
+            let selfReports = reportBox.get()
 
             var results: [DiscoveredDevice] = []
             for entry in arpByIP.values {
                 let ip = entry.ip
                 let mac = entry.mac
                 let ddp = ddpMap[ip]
+                let report = selfReports[ip]
                 let isSonyOUI = LanDeviceSnifferEngine.isSonyOUI(mac)
                 let isPortalOUI = LanDeviceSnifferEngine.isPortalOUI(mac)
-                let isSony = (ddp != nil) || isSonyOUI
+                let isSIEOUI = LanDeviceSnifferEngine.isSonyInteractiveOUI(mac)
+                let isLocalAdminMAC = LanOuiDatabase.isLocallyAdministeredMAC(mac)
+
+                let selfReportName = [report?.friendlyName, report?.model, report?.hostname]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first(where: { !$0.isEmpty })
+                let combinedText = [report?.friendlyName, report?.model, report?.hostname, report?.manufacturer]
+                    .compactMap { $0?.lowercased() }
+                    .joined(separator: " ")
+
+                let isNonHandheldSonyDevice = !combinedText.contains("portal") && (
+                    combinedText.contains("bravia") ||
+                    combinedText.contains("xperia") ||
+                    combinedText.contains("soundbar") ||
+                    combinedText.contains("speaker") ||
+                    combinedText.contains("ht-") ||
+                    combinedText.contains("srs-") ||
+                    combinedText.contains("vpl-") ||
+                    (combinedText.contains("tv") && !combinedText.contains("ps"))
+                )
+
+                let matchesPortalName = combinedText.contains("portal")
+                let matchesSavedPortal = !currentPortal.isEmpty && ip == currentPortal && (isSonyOUI || isLocalAdminMAC)
+                let isPortalCandidate = !isNonHandheldSonyDevice && (isPortalOUI || matchesPortalName || isSIEOUI || matchesSavedPortal)
 
                 let role: SonyDeviceRole
                 let label: String
+                let resolvedHostName: String?
+                let isSony: Bool
+
                 if let ddp {
                     role = .ps5Host
+                    resolvedHostName = ddp.hostName.isEmpty ? selfReportName : ddp.hostName
                     label = ddp.hostName.isEmpty ? ddp.hostType : "\(ddp.hostType) (\(ddp.hostName))"
-                } else if isPortalOUI {
+                    isSony = true
+                } else if isPortalCandidate {
                     role = .portalClient
-                    label = "PS Portal"
+                    resolvedHostName = selfReportName
+                    if let selfReportName, !selfReportName.lowercased().contains("portal") {
+                        label = "PS Portal (\(selfReportName))"
+                    } else if let selfReportName {
+                        label = selfReportName
+                    } else if isPortalOUI {
+                        label = "PS Portal"
+                    } else if isSIEOUI {
+                        label = "PS Portal (SIE 硬件)"
+                    } else {
+                        label = "PS Portal (已配置)"
+                    }
+                    isSony = true
                 } else if isSonyOUI {
                     role = .unknownSony
-                    label = "Sony PlayStation 设备"
+                    resolvedHostName = selfReportName
+                    label = selfReportName.map { "Sony \($0)" } ?? "Sony PlayStation / 影音设备"
+                    isSony = true
                 } else {
                     role = .other
-                    label = "局域网终端"
+                    resolvedHostName = selfReportName
+                    label = selfReportName ?? LanOuiDatabase.shared.lookup(mac)?.displayName ?? "局域网终端"
+                    isSony = false
                 }
 
                 results.append(DiscoveredDevice(
@@ -580,7 +774,7 @@ public final class PSPortalPluginManager {
                     mac: mac,
                     isLikelySony: isSony,
                     role: role,
-                    hostName: ddp?.hostName,
+                    hostName: resolvedHostName,
                     label: label
                 ))
             }
@@ -635,9 +829,16 @@ public final class PSPortalPluginManager {
                 }
 
                 let ps5Dev = results.first(where: { $0.role == .ps5Host })
-                // 两级优先匹配 Portal：优先精准 Portal OUI，未命中时再回退未响应 DDP 的 Sony OUI
-                let portalDev = results.first(where: { $0.role == .portalClient && $0.ip != ps5Dev?.ip })
-                    ?? results.first(where: { $0.role == .unknownSony && $0.ip != ps5Dev?.ip })
+                // 三级优先匹配 Portal：精准 Portal OUI / 自报含 Portal / 已保存 Portal IP > 其他 SIE 互动娱乐硬件 > 回退其他 Sony 设备
+                let portalDev = results.first(where: {
+                    $0.role == .portalClient && $0.ip != ps5Dev?.ip && (
+                        LanDeviceSnifferEngine.isPortalOUI($0.mac) ||
+                        ($0.hostName?.lowercased().contains("portal") == true) ||
+                        (!currentPortal.isEmpty && $0.ip == currentPortal)
+                    )
+                })
+                ?? results.first(where: { $0.role == .portalClient && $0.ip != ps5Dev?.ip })
+                ?? results.first(where: { $0.role == .unknownSony && $0.ip != ps5Dev?.ip })
 
                 if let ps5 = ps5Dev {
                     self.appendLog("[识别] PS5 -> \(ps5.ip)")
@@ -649,7 +850,7 @@ public final class PSPortalPluginManager {
                     }
                 }
                 if let portal = portalDev {
-                    self.appendLog("[识别] Portal -> \(portal.ip)")
+                    self.appendLog("[识别] Portal -> \(portal.ip) (\(portal.label))")
                     let curPortal = self.portalIP.trimmingCharacters(in: .whitespacesAndNewlines)
                     if curPortal.isEmpty || curPortal == ps5Dev?.ip || !isInActiveSubnet(curPortal) {
                         self.portalIP = portal.ip
@@ -747,90 +948,146 @@ public final class PSPortalPluginManager {
         }
     }
 
+    nonisolated private static func isPrivilegedEngineReady(stagedPath: String) -> Bool {
+        let fm = FileManager.default
+        guard let dirAttr = try? fm.attributesOfItem(atPath: privilegedEngineDirectory),
+              let dirType = dirAttr[.type] as? FileAttributeType,
+              dirType == .typeDirectory,
+              let dirOwner = (dirAttr[.ownerAccountID] as? NSNumber)?.uint32Value,
+              dirOwner == 0,
+              let dirPerm = (dirAttr[.posixPermissions] as? NSNumber)?.intValue,
+              (dirPerm & 0o022) == 0 else {
+            return false
+        }
+        guard fm.isExecutableFile(atPath: privilegedEnginePath),
+              let privAttr = try? fm.attributesOfItem(atPath: privilegedEnginePath),
+              let privType = privAttr[.type] as? FileAttributeType,
+              privType == .typeRegular,
+              let privOwner = (privAttr[.ownerAccountID] as? NSNumber)?.uint32Value,
+              privOwner == 0,
+              let privPerm = (privAttr[.posixPermissions] as? NSNumber)?.intValue,
+              (privPerm & 0o022) == 0 else {
+            return false
+        }
+        if let stagedData = try? Data(contentsOf: URL(fileURLWithPath: stagedPath)),
+           let privData = try? Data(contentsOf: URL(fileURLWithPath: privilegedEnginePath)),
+           stagedData != privData {
+            return false
+        }
+        return true
+    }
+
+    nonisolated private static func checkPasswordlessSudo() -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        proc.arguments = ["-n", privilegedEnginePath, "--check-privilege"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return false }
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
+    }
+
+    private func launchPasswordlessRelay(sessionID: UInt64) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        var args = [
+            "-n",
+            Self.privilegedEnginePath,
+            "--interface", selectedInterface,
+            "--bitrate", targetBitrate.shortTag,
+            "--mode", relayMode.rawValue
+        ]
+        if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
+        if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
+        proc.arguments = args
+
+        let currentLogPath = logFilePath
+        FileManager.default.createFile(atPath: currentLogPath, contents: nil)
+        let logHandle = FileHandle(forWritingAtPath: currentLogPath)
+        if let logHandle {
+            proc.standardOutput = logHandle
+            proc.standardError = logHandle
+        } else {
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+        }
+        self.relayProcess = proc
+
+        proc.terminationHandler = { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, self.relaySessionID == sessionID else { return }
+                self.pollLogFile(sessionID: sessionID)
+                self.flushRemainingLogBuffer(sessionID: sessionID)
+                self.resetWorkItem?.cancel()
+                self.resetWorkItem = nil
+                self.isRunning = false
+                self.isListening = false
+                self.isStreamActive = false
+                self.stopListenCountdown()
+                self.logWatchTimer?.invalidate()
+                self.logWatchTimer = nil
+                self.relayProcess = nil
+            }
+        }
+
+        do {
+            try proc.run()
+            try? logHandle?.close()
+            let pid = proc.processIdentifier
+            self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (免密模式 · sudo PID: \(pid))。")
+            self.startTailingLogFile(sessionID: sessionID)
+            return true
+        } catch {
+            try? logHandle?.close()
+            self.relayProcess = nil
+            return false
+        }
+    }
+
     private func startPrivilegedRelay(engine: String, sessionID: UInt64) {
         try? "".write(toFile: logFilePath, atomically: true, encoding: .utf8)
         lastLogOffset = 0
         logLineBuffer.removeAll()
 
-        // 智能检测是否已具备 sudo 免密特权 (异步检测，不阻塞主线程)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, selectedInterface, targetBitrate, relayMode, ps5IP, portalIP, logFilePath, pidFilePath] in
-            let checkProcess = Process()
-            checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            checkProcess.arguments = ["-n", engine, "--check-privilege"]
-            checkProcess.standardOutput = FileHandle.nullDevice
-            checkProcess.standardError = FileHandle.nullDevice
-            let isPasswordless: Bool = (try? checkProcess.run()) != nil && {
-                checkProcess.waitUntilExit()
-                return checkProcess.terminationStatus == 0
-            }()
+        // 检测系统目录 /Library/Application Support/SysPulse/portal_engine 是否已就绪且具备 sudo 免密特权
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let isReady = Self.isPrivilegedEngineReady(stagedPath: engine) && Self.checkPasswordlessSudo()
 
             DispatchQueue.main.async {
                 guard let self = self, self.relaySessionID == sessionID else { return }
 
-                if isPasswordless {
+                if isReady {
                     self.appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在启动原生 BPF 注入引擎...")
-                    let proc = Process()
-                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-                    var args = [
-                        "-n",
-                        engine,
-                        "--interface", selectedInterface,
-                        "--bitrate", targetBitrate.shortTag,
-                        "--mode", relayMode.rawValue
-                    ]
-                    if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
-                    if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
-                    proc.arguments = args
-
-                    FileManager.default.createFile(atPath: logFilePath, contents: nil)
-                    if let logHandle = FileHandle(forWritingAtPath: logFilePath) {
-                        proc.standardOutput = logHandle
-                        proc.standardError = logHandle
-                    }
-                    self.relayProcess = proc
-
-                    proc.terminationHandler = { [weak self] _ in
-                        Task { @MainActor in
-                            guard let self = self, self.relaySessionID == sessionID else { return }
-                            self.pollLogFile(sessionID: sessionID)
-                            self.flushRemainingLogBuffer(sessionID: sessionID)
-                            self.resetWorkItem?.cancel()
-                            self.resetWorkItem = nil
-                            self.isRunning = false
-                            self.isListening = false
-                            self.isStreamActive = false
-                            self.stopListenCountdown()
-                            self.logWatchTimer?.invalidate()
-                            self.logWatchTimer = nil
-                            self.relayProcess = nil
-                        }
-                    }
-
-                    do {
-                        try proc.run()
-                        let pid = proc.processIdentifier
-                        self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (免密模式 · sudo PID: \(pid))。")
-                        self.startTailingLogFile(sessionID: sessionID)
+                    if self.launchPasswordlessRelay(sessionID: sessionID) {
                         return
-                    } catch {
-                        self.appendLog("[提示] 免密进程启动受限，尝试常规特权引导...")
                     }
+                    self.appendLog("[提示] 免密进程启动受限，尝试重新安装特权组件...")
                 }
 
-                // 常规 AppleScript 提权（在提权同时由引擎自身校验并写入 sudoers.d 绝对路径免密规则，从下次起永久免密）
-                self.appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以执行原生 ARP 注入与数据包修改...")
+                // 首次安装或升级引擎：通过 AppleScript 将原生引擎安装至 root 专属目录并写入 sudoers
+                self.appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以安装原生 BPF 引擎并建立免密通道...")
 
-                var cmd = "\(Self.shellSingleQuoted(engine)) --install-sudoers >/dev/null 2>&1 || true; \(Self.shellSingleQuoted(engine)) --interface \(Self.shellSingleQuoted(selectedInterface)) --bitrate \(Self.shellSingleQuoted(targetBitrate.shortTag)) --mode \(Self.shellSingleQuoted(relayMode.rawValue))"
-                if !ps5IP.isEmpty { cmd += " --ps5 \(Self.shellSingleQuoted(ps5IP))" }
-                if !portalIP.isEmpty { cmd += " --portal \(Self.shellSingleQuoted(portalIP))" }
-                cmd += " > \(Self.shellSingleQuoted(logFilePath)) 2>&1 & echo $! > \(Self.shellSingleQuoted(pidFilePath))"
+                let privDir = Self.shellSingleQuoted(Self.privilegedEngineDirectory)
+                let privEngine = Self.shellSingleQuoted(Self.privilegedEnginePath)
+                let stagedEngine = Self.shellSingleQuoted(engine)
+                let installCmd = [
+                    "mkdir -p \(privDir)",
+                    "chown root:wheel \(privDir)",
+                    "chmod 755 \(privDir)",
+                    "cp -f \(stagedEngine) \(privEngine)",
+                    "chown root:wheel \(privEngine)",
+                    "chmod 755 \(privEngine)",
+                    "\(privEngine) --install-sudoers"
+                ].joined(separator: " && ")
 
-                let appleScript = "do shell script \"\(Self.appleScriptEscaped(cmd))\" with administrator privileges"
+                let appleScript = "do shell script \"\(Self.appleScriptEscaped(installCmd))\" with administrator privileges"
 
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     var errorDict: NSDictionary?
                     let scriptObj = NSAppleScript(source: appleScript)
                     scriptObj?.executeAndReturnError(&errorDict)
+                    let sudoReady = (errorDict == nil) && Self.checkPasswordlessSudo()
 
                     DispatchQueue.main.async {
                         guard let self = self, self.relaySessionID == sessionID else { return }
@@ -845,9 +1102,17 @@ public final class PSPortalPluginManager {
                             self.isListening = false
                             self.isStreamActive = false
                             self.stopListenCountdown()
+                        } else if sudoReady && self.launchPasswordlessRelay(sessionID: sessionID) {
+                            self.appendLog("[SysPulse] ✅ 已完成系统级特权安装并建立免密通道。")
                         } else {
-                            self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (已建立免密通道)。")
-                            self.startTailingLogFile(sessionID: sessionID)
+                            self.lastError = "免密特权通道未生效，请确认当前账户属于管理员组后重试。"
+                            self.appendLog("[错误] \(self.lastError!)")
+                            self.resetWorkItem?.cancel()
+                            self.resetWorkItem = nil
+                            self.isRunning = false
+                            self.isListening = false
+                            self.isStreamActive = false
+                            self.stopListenCountdown()
                         }
                     }
                 }
@@ -979,7 +1244,9 @@ public final class PSPortalPluginManager {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
 
-        let engine = engineFileURL.path
+        let engine = FileManager.default.isExecutableFile(atPath: Self.privilegedEnginePath)
+            ? Self.privilegedEnginePath
+            : engineFileURL.path
         let activeProc = relayProcess
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -988,8 +1255,8 @@ public final class PSPortalPluginManager {
                 let stopProc = Process()
                 stopProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
                 stopProc.arguments = ["-n", engine, "--stop"]
-                stopProc.standardOutput = Pipe()
-                stopProc.standardError = Pipe()
+                stopProc.standardOutput = FileHandle.nullDevice
+                stopProc.standardError = FileHandle.nullDevice
                 if (try? stopProc.run()) != nil {
                     stopProc.waitUntilExit()
                     stoppedViaSudo = (stopProc.terminationStatus == 0)
@@ -1035,7 +1302,9 @@ public final class PSPortalPluginManager {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
 
-        let engine = engineFileURL.path
+        let engine = FileManager.default.isExecutableFile(atPath: Self.privilegedEnginePath)
+            ? Self.privilegedEnginePath
+            : engineFileURL.path
         var stoppedViaSudo = false
         if FileManager.default.isExecutableFile(atPath: engine) {
             let stopProc = Process()
@@ -1064,7 +1333,9 @@ public final class PSPortalPluginManager {
 
     public func restoreNetworkDirect() {
         bootstrapPluginDirectory()
-        let engine = engineFileURL.path
+        let engine = FileManager.default.isExecutableFile(atPath: Self.privilegedEnginePath)
+            ? Self.privilegedEnginePath
+            : engineFileURL.path
         guard FileManager.default.isExecutableFile(atPath: engine) else {
             appendLog("[错误] 未找到原生引擎，无法执行网络复原。")
             return
@@ -1085,13 +1356,16 @@ public final class PSPortalPluginManager {
             let pipe = Pipe()
             proc.standardOutput = pipe
             proc.standardError = pipe
-            let ok: Bool = (try? proc.run()) != nil && {
+            var ok = false
+            var outputData = Data()
+            if (try? proc.run()) != nil {
+                outputData = pipe.fileHandleForReading.readDataToEndOfFile()
                 proc.waitUntilExit()
-                return proc.terminationStatus == 0
-            }()
+                ok = (proc.terminationStatus == 0)
+            }
 
             if ok {
-                let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let text = String(data: outputData, encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
                     for line in text.components(separatedBy: .newlines) where !line.isEmpty {
                         self?.appendLog(line)

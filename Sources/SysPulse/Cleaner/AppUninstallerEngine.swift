@@ -749,6 +749,7 @@ public final class AppUninstallerEngine {
     // MARK: - Safe Uninstallation Execution
 
     public func executeUninstall() {
+        guard !isUninstalling && !isScanning else { return }
         let activeSelectedIDs = selectedItemIDs.union(selectedAppIDs).union(selectedResidueIDs)
         guard !activeSelectedIDs.isEmpty else { return }
 

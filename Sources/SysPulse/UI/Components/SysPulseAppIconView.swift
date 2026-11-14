@@ -181,13 +181,7 @@ public final class AppIconManager {
         let name = isDark ? "AppIcon-Dark-1024" : "AppIcon-Light-1024"
         let fallbackPaths: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png",
-            "/tmp/\(name).png",
-            isDark
-                ? "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_rabbit_dark_icon_1793861549186.jpg"
-                : "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/.user_uploaded/media_1793861192679_1b4297a8.jpg"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
 
         for path in fallbackPaths.compactMap({ $0 }) {
@@ -365,13 +359,7 @@ public struct CleanerArtworkIconView: View {
         let name = isDark ? "CleanerIcon-Dark-1024" : "CleanerIcon-Light-1024"
         let fallbackPaths: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png",
-            "/tmp/\(name).png",
-            isDark
-                ? "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_cleaner_icon_dark_1793849341374.jpg"
-                : "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_cleaner_icon_light_1793849308615.jpg"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
 
         for path in fallbackPaths.compactMap({ $0 }) {
@@ -435,16 +423,7 @@ public struct UninstallerArtworkIconView: View {
         let name = isDark ? "UninstallerIcon-Dark-1024" : "UninstallerIcon-Light-1024"
         let fallbackPaths: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png",
-            "/tmp/\(name).png",
-            isDark
-                ? "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_uninstaller_icon_dark.png"
-                : "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_uninstaller_icon_light.png",
-            isDark
-                ? "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_uninstaller_icon_dark_1793936655170.jpg"
-                : "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/syspulse_uninstaller_icon_light_v2_1793936622704.jpg"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
 
         for path in fallbackPaths.compactMap({ $0 }) {
@@ -508,10 +487,7 @@ public struct SpaceAnalysisArtworkIconView: View {
         let name = isDark ? "SpaceAnalysisIcon-Dark-1024" : "SpaceAnalysisIcon-Light-1024"
         let fallbackPaths: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png",
-            "/tmp/\(name).png"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
 
         for path in fallbackPaths.compactMap({ $0 }) {
@@ -527,7 +503,7 @@ public struct SpaceAnalysisArtworkIconView: View {
 
 // MARK: - 实时微动效组件 (Micro-Motion Components)
 
-/// 根据真实风扇 RPM 转速无级旋转的风扇图标视图
+/// 根据真实风扇 RPM 转速无级旋转的风扇图标视图 (RPM <= 0 时完全静止零重绘)
 public struct SpinningFanIconView: View {
     public var rpm: Int
     public var size: CGFloat = 14
@@ -540,20 +516,26 @@ public struct SpinningFanIconView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let degPerSec = rpm <= 0 ? 0.0 : max(110.0, min(720.0, Double(rpm) / 1000.0 * 145.0))
-            let angle = (t * degPerSec).truncatingRemainder(dividingBy: 360.0)
-
+        if rpm <= 0 {
             Image(systemName: "fan.fill")
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(color)
-                .rotationEffect(.degrees(angle))
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: false)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                let degPerSec = max(110.0, min(720.0, Double(rpm) / 1000.0 * 145.0))
+                let angle = (t * degPerSec).truncatingRemainder(dividingBy: 360.0)
+
+                Image(systemName: "fan.fill")
+                    .font(.system(size: size, weight: .bold))
+                    .foregroundStyle(color)
+                    .rotationEffect(.degrees(angle))
+            }
         }
     }
 }
 
-/// 带有柔和呼吸脉动（及可选慢速旋转）的卡片头部符号视图
+/// 带有可选慢速旋转的卡片头部符号视图 (非旋转模式完全静止零重绘)
 public struct PulsingHeaderSymbolView: View {
     public var systemName: String
     public var size: CGFloat = 13
@@ -568,23 +550,27 @@ public struct PulsingHeaderSymbolView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let breath = (sin(t * 2.4) + 1.0) * 0.5
-            let scale = 0.94 + 0.10 * breath
-            let angle = isRotating ? (t * 24.0).truncatingRemainder(dividingBy: 360.0) : 0.0
-
+        if !isRotating {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(color)
-                .scaleEffect(scale)
-                .rotationEffect(.degrees(angle))
-                .shadow(color: color.opacity(0.25 + 0.30 * breath), radius: 3.5)
+                .shadow(color: color.opacity(0.32), radius: 3.5)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: false)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                let angle = (t * 24.0).truncatingRemainder(dividingBy: 360.0)
+
+                Image(systemName: systemName)
+                    .font(.system(size: size, weight: .bold))
+                    .foregroundStyle(color)
+                    .rotationEffect(.degrees(angle))
+                    .shadow(color: color.opacity(0.35), radius: 3.5)
+            }
         }
     }
 }
 
-/// 3D 模块图标悬浮呼吸与扫描声呐波纹容器视图
+/// 3D 模块图标悬浮呼吸与扫描声呐波纹容器视图 (!isActive 时完全静止零重绘)
 public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
     public var size: CGFloat = 50
     public var isActive: Bool = false
@@ -604,37 +590,38 @@ public struct AnimatedModuleArtworkBadgeView<Content: View>: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let floatSpeed = isActive ? 3.6 : 2.1
-            let floatY = CGFloat(sin(t * floatSpeed)) * (isActive ? 2.6 : 1.8)
-            let tilt = sin(t * (floatSpeed * 0.7)) * (isActive ? 2.2 : 1.2)
-            let cornerRadius = size * 0.23
+        let cornerRadius = size * 0.23
 
+        if !isActive {
+            content
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .shadow(color: accentColor.opacity(0.16), radius: 4, y: 2)
+                .frame(width: size, height: size)
+        } else {
             ZStack {
-                if isActive {
-                    ForEach(0..<2, id: \.self) { idx in
-                        let phase = ((t * 0.85) + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
-                        let ringScale = 1.0 + CGFloat(phase) * 0.42
-                        let ringAlpha = max(0.0, (1.0 - phase) * 0.65)
-
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(accentColor.opacity(ringAlpha), lineWidth: 1.5)
-                            .frame(width: size, height: size)
-                            .scaleEffect(ringScale)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(accentColor.opacity(0.55), lineWidth: 1.5)
+                    .frame(width: size, height: size)
+                    .phaseAnimator([false, true]) { ring, phase in
+                        ring
+                            .scaleEffect(phase ? 1.32 : 1.0)
+                            .opacity(phase ? 0.08 : 0.65)
+                    } animation: { _ in
+                        .easeOut(duration: 1.5)
                     }
-                }
 
                 content
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .shadow(
-                        color: accentColor.opacity(isActive ? 0.38 : 0.16),
-                        radius: isActive ? 7 : 4,
-                        y: 2 - floatY * 0.3
-                    )
-                    .offset(y: floatY)
-                    .rotationEffect(.degrees(tilt))
+                    .shadow(color: accentColor.opacity(0.38), radius: 7, y: 2)
+                    .phaseAnimator([false, true]) { badge, phase in
+                        badge
+                            .offset(y: phase ? -2.0 : 1.5)
+                            .rotationEffect(.degrees(phase ? 1.5 : -1.5))
+                    } animation: { _ in
+                        .easeInOut(duration: 1.8)
+                    }
             }
             .frame(width: size, height: size)
         }

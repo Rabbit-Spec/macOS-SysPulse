@@ -5,8 +5,26 @@ import Observation
 
 // MARK: - 磁盘空间分析引擎
 
+private final class ScanCancellationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag: Bool = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        flag = value
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+}
+
 @Observable
-public final class StorageAnalysisEngine: @unchecked Sendable {
+@MainActor
+public final class StorageAnalysisEngine {
     public static let shared = StorageAnalysisEngine()
 
     // MARK: - Observable State
@@ -29,20 +47,14 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
     // Internal concurrency control
     private var scanTask: Task<Void, Never>? = nil
-    private var isCancelledFlag: Bool = false
-    private let stateLock = NSLock()
+    private nonisolated let cancellationBox = ScanCancellationBox()
 
     private nonisolated func setCancelled(_ cancelled: Bool) {
-        stateLock.lock()
-        isCancelledFlag = cancelled
-        stateLock.unlock()
+        cancellationBox.set(cancelled)
     }
 
     private nonisolated var isScanCancelled: Bool {
-        stateLock.lock()
-        let val = isCancelledFlag
-        stateLock.unlock()
-        return val
+        cancellationBox.isCancelled
     }
 
     private init() {
@@ -93,27 +105,34 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         setCancelled(false)
 
         let startTime = Date()
-        let hasFDA = Task { @MainActor in
-            SystemPermissionManager.shared.fullDiskAccessStatus == .authorized
+        let hasFullDiskAccess = SystemPermissionManager.shared.fullDiskAccessStatus == .authorized
+        let rootDisplayName = selectedLocation.displayName
+        let cancellationBox = self.cancellationBox
+        let progressCallback: @Sendable (Int, Int64, String) -> Void = { [weak self] currentFiles, currentBytes, currentPath in
+            Task { @MainActor [weak self] in
+                guard let self, self.isScanning else { return }
+                self.status = .scanning(scannedFiles: currentFiles, scannedBytes: currentBytes, currentPath: currentPath)
+            }
         }
 
-        scanTask = Task.detached(priority: .userInitiated) { [weak self, targetURL] in
-            guard let self else { return }
-
-            let hasFullDiskAccess = await hasFDA.value
+        scanTask = Task.detached(priority: .userInitiated) { [weak self, cancellationBox, targetURL, rootDisplayName, hasFullDiskAccess, startTime, progressCallback] in
             var fileCount = 0
             var byteCount: Int64 = 0
             var largeFilesList: [AnalysisLargeFileItem] = []
             var lastUpdate = Date()
 
-            // Build hierarchical tree
-            let root = self.scanDirectory(
+            // Build hierarchical tree off the MainActor
+            let root = Self.scanDirectory(
                 url: targetURL,
+                rootPath: targetURL.path,
+                rootDisplayName: rootDisplayName,
                 fileCount: &fileCount,
                 byteCount: &byteCount,
                 largeFilesList: &largeFilesList,
                 lastUpdate: &lastUpdate,
-                hasFullDiskAccess: hasFullDiskAccess
+                hasFullDiskAccess: hasFullDiskAccess,
+                isCancelled: { cancellationBox.isCancelled },
+                onProgress: progressCallback
             )
 
             let duration = Date().timeIntervalSince(startTime)
@@ -123,6 +142,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
             let cappedLargeFiles = Array(largeFilesList.prefix(100))
 
             await MainActor.run {
+                guard let self else { return }
                 if self.isScanCancelled {
                     self.status = .cancelled
                     self.isScanning = false
@@ -158,21 +178,25 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
     // MARK: - Recursive Directory Tree Builder
 
-    private static let tccProtectedDirectoryNames: Set<String> = [
+    nonisolated private static let tccProtectedDirectoryNames: Set<String> = [
         "Safari", "Mail", "Messages", "Suggestions", "Calendars", "Reminders",
         "HomeKit", "IdentityServices", "PersonalizationPortrait", "AddressBook",
         "com.apple.TCC", "Photos Library.photoslibrary", "Photos Library"
     ]
 
-    private func scanDirectory(
+    private nonisolated static func scanDirectory(
         url: URL,
+        rootPath: String,
+        rootDisplayName: String,
         fileCount: inout Int,
         byteCount: inout Int64,
         largeFilesList: inout [AnalysisLargeFileItem],
         lastUpdate: inout Date,
-        hasFullDiskAccess: Bool
+        hasFullDiskAccess: Bool,
+        isCancelled: () -> Bool,
+        onProgress: @Sendable (Int, Int64, String) -> Void
     ) -> AnalysisNode? {
-        if isScanCancelled || Task.isCancelled { return nil }
+        if isCancelled() || Task.isCancelled { return nil }
 
         let fileManager = FileManager.default
         let resourceKeys: Set<URLResourceKey> = [
@@ -187,8 +211,8 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
 
         let nodeName: String
-        if url.path == selectedLocation.url.path {
-            nodeName = selectedLocation.displayName
+        if url.path == rootPath {
+            nodeName = rootDisplayName
         } else {
             nodeName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
         }
@@ -216,12 +240,12 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         var totalDirSize: Int64 = 0
 
         for itemURL in contents {
-            if isScanCancelled || Task.isCancelled { return nil }
+            if isCancelled() || Task.isCancelled { return nil }
 
             // 未开启完全磁盘访问权限时，严格跳过 macOS 隐私保护敏感目录，防止反复向用户弹出一堆系统授权请求
             let name = itemURL.lastPathComponent
             if !hasFullDiskAccess {
-                if Self.tccProtectedDirectoryNames.contains(name) {
+                if tccProtectedDirectoryNames.contains(name) {
                     continue
                 }
                 // 若处于个人主目录且未授权完全磁盘访问，跳过会触发系统单个授权弹窗的桌面/文稿/下载文件夹
@@ -240,7 +264,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
             if isPackage {
                 // Treat packages (e.g., .app, .framework) as a single composite node
-                let packageSize = calculatePackageSize(url: itemURL)
+                let packageSize = calculatePackageSize(url: itemURL, isCancelled: isCancelled)
                 let childNode = AnalysisNode(
                     url: itemURL,
                     sizeBytes: packageSize,
@@ -260,11 +284,15 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
             } else if isDirectory {
                 if let subDirNode = scanDirectory(
                     url: itemURL,
+                    rootPath: rootPath,
+                    rootDisplayName: rootDisplayName,
                     fileCount: &fileCount,
                     byteCount: &byteCount,
                     largeFilesList: &largeFilesList,
                     lastUpdate: &lastUpdate,
-                    hasFullDiskAccess: hasFullDiskAccess
+                    hasFullDiskAccess: hasFullDiskAccess,
+                    isCancelled: isCancelled,
+                    onProgress: onProgress
                 ) {
                     subDirNode.parent = node
                     children.append(subDirNode)
@@ -290,17 +318,11 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
                 }
             }
 
-            // Periodic UI throttling update (every 100ms)
+            // Periodic UI throttling update (every 120ms)
             let now = Date()
             if now.timeIntervalSince(lastUpdate) > 0.12 {
                 lastUpdate = now
-                let currentPath = itemURL.path
-                let currentFiles = fileCount
-                let currentBytes = byteCount
-                Task { @MainActor [weak self] in
-                    guard let self, self.isScanning else { return }
-                    self.status = .scanning(scannedFiles: currentFiles, scannedBytes: currentBytes, currentPath: currentPath)
-                }
+                onProgress(fileCount, byteCount, itemURL.path)
             }
         }
 
@@ -313,7 +335,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
         return node
     }
 
-    private func calculatePackageSize(url: URL) -> Int64 {
+    private nonisolated static func calculatePackageSize(url: URL, isCancelled: () -> Bool) -> Int64 {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
             at: url,
@@ -323,7 +345,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            if isScanCancelled || Task.isCancelled { return total }
+            if isCancelled() || Task.isCancelled { return total }
             if let values = try? fileURL.resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey]) {
                 total += Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
             }
@@ -471,7 +493,7 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
 
     public func refreshHiddenInsights() {
         // Query system purgeable space (CacheDelete) and APFS snapshots off the MainActor
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
             let fileManager = FileManager.default
             let homeURL = fileManager.homeDirectoryForCurrentUser
             var purgeableStr: String? = nil
@@ -489,12 +511,14 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
             process.arguments = ["listlocalsnapshots", "/"]
             let pipe = Pipe()
             process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
 
             var snapshotText: String? = nil
             do {
                 try process.run()
-                process.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                try? pipe.fileHandleForReading.close()
+                process.waitUntilExit()
                 if let output = String(data: data, encoding: .utf8) {
                     let lines = output.components(separatedBy: .newlines).filter { $0.contains("com.apple.TimeMachine") }
                     let count = lines.count
@@ -504,15 +528,17 @@ public final class StorageAnalysisEngine: @unchecked Sendable {
                 // Ignore silent failure
             }
 
-            DispatchQueue.main.async { [weak self] in
+            let finalPurgeable = purgeableStr
+            let finalSnapshot = snapshotText
+            await MainActor.run { [weak self] in
                 guard let self else { return }
-                if let formatted = purgeableStr,
+                if let formatted = finalPurgeable,
                    let idx = self.hiddenInsights.firstIndex(where: { $0.id == "purgeable" }) {
                     self.hiddenInsights[idx].detectedSize = formatted
                 }
-                if let snapshotText,
+                if let finalSnapshot,
                    let idx = self.hiddenInsights.firstIndex(where: { $0.id == "apfs_snapshots" }) {
-                    self.hiddenInsights[idx].detectedSize = snapshotText
+                    self.hiddenInsights[idx].detectedSize = finalSnapshot
                 }
             }
         }

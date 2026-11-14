@@ -8,6 +8,13 @@ public struct MacHardwareInfo: Sendable {
     public let platformName: String
     public let modelIdentifier: String
     public let chipBrand: String
+    public let osVersion: String
+    public let osBuild: String
+
+    /// Full macOS display string (e.g. "macOS 27.2.1").
+    public var macOSDisplayString: String {
+        "macOS \(osVersion)"
+    }
 
     public var currentPlatformName: String {
         if UserDefaults.standard.bool(forKey: "SP_Mod_MacBookDemoMode") {
@@ -45,9 +52,12 @@ public struct MacHardwareInfo: Sendable {
         let modelID = Self.readModelIdentifier() ?? "Mac"
         let chip = Self.readChipBrand() ?? "Apple Silicon"
         let productName = Self.readProductName()
+        let sysPlist = Self.readSystemVersionPlist()
 
         self.modelIdentifier = modelID
         self.chipBrand = chip
+        self.osVersion = Self.readOSVersion(systemPlist: sysPlist)
+        self.osBuild = Self.readOSBuild(systemPlist: sysPlist)
 
         if let prod = productName, !prod.isEmpty {
             if prod.contains("(") {
@@ -62,6 +72,49 @@ public struct MacHardwareInfo: Sendable {
         } else {
             self.platformName = modelID
         }
+    }
+
+    /// Reads the full macOS version string from SystemVersion.plist / sysctl / ProcessInfo (e.g. "27.2.1").
+    private static func readOSVersion(systemPlist: [String: Any]?) -> String {
+        let procVer = ProcessInfo.processInfo.operatingSystemVersion
+        let procString = procVer.patchVersion > 0
+            ? "\(procVer.majorVersion).\(procVer.minorVersion).\(procVer.patchVersion)"
+            : "\(procVer.majorVersion).\(procVer.minorVersion)"
+
+        let plistVersion = ["ProductUserVisibleVersion", "ProductVersion"]
+            .compactMap { systemPlist?[$0] as? String }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+
+        if let raw = plistVersion ?? readSysctlString("kern.osproductversion") {
+            let parts = raw.split(separator: ".")
+            if parts.count < 3 && procVer.patchVersion > 0 && raw == "\(procVer.majorVersion).\(procVer.minorVersion)" {
+                return procString
+            }
+            return raw
+        }
+
+        return procString
+    }
+
+    /// Reads the macOS build string from SystemVersion.plist or sysctl (e.g. "26B131").
+    private static func readOSBuild(systemPlist: [String: Any]?) -> String {
+        if let build = systemPlist?["ProductBuildVersion"] as? String {
+            let trimmed = build.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return readSysctlString("kern.osversion") ?? "Unknown"
+    }
+
+    private static func readSystemVersionPlist() -> [String: Any]? {
+        let url = URL(fileURLWithPath: "/System/Library/CoreServices/SystemVersion.plist")
+        guard let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+            return nil
+        }
+        return plist
     }
 
     /// Reads the marketing product name from IORegistry `product` entry (e.g. "Mac Studio (M5 Max)").

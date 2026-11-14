@@ -23,8 +23,10 @@
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 
-#define PID_FILE "/tmp/syspulse_psportal.pid"
-#define STATE_FILE "/tmp/syspulse_psportal_state.txt"
+#define SYS_SUPPORT_DIR "/Library/Application Support/SysPulse"
+#define PRIVILEGED_ENGINE_PREFIX "/Library/Application Support/SysPulse/"
+#define PID_FILE "/Library/Application Support/SysPulse/syspulse_psportal.pid"
+#define STATE_FILE "/Library/Application Support/SysPulse/syspulse_psportal_state.txt"
 #define BPF_BUF_LEN 65536
 #define OFFSET 334
 #define MAX_SEEN_SEQS 128
@@ -352,7 +354,14 @@ static int is_safe_interface_name(const char *s) {
     return 1;
 }
 
+static void ensure_sys_support_dir(void) {
+    mkdir(SYS_SUPPORT_DIR, 0755);
+    chown(SYS_SUPPORT_DIR, 0, 0);
+    chmod(SYS_SUPPORT_DIR, 0755);
+}
+
 static FILE *fopen_write_nofollow(const char *path, mode_t mode) {
+    ensure_sys_support_dir();
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, mode);
     if (fd < 0) return NULL;
     FILE *f = fdopen(fd, "w");
@@ -907,6 +916,25 @@ static void observe_ps5_message(const uint8_t *data, size_t len, ConfirmationSta
 
 static int install_sudoers_rule(const char *self_exe) {
     if (geteuid() != 0 || !self_exe || self_exe[0] != '/') return 1;
+    if (strncmp(self_exe, PRIVILEGED_ENGINE_PREFIX, strlen(PRIVILEGED_ENGINE_PREFIX)) != 0) return 1;
+    if (strstr(self_exe, "..") != NULL) return 1;
+
+    struct stat dir_st;
+    if (lstat(SYS_SUPPORT_DIR, &dir_st) != 0 ||
+        !S_ISDIR(dir_st.st_mode) ||
+        dir_st.st_uid != 0 ||
+        (dir_st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return 1;
+    }
+
+    struct stat exe_st;
+    if (lstat(self_exe, &exe_st) != 0 ||
+        !S_ISREG(exe_st.st_mode) ||
+        exe_st.st_uid != 0 ||
+        (exe_st.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+        (exe_st.st_mode & S_IXUSR) == 0) {
+        return 1;
+    }
 
     char escaped[2048];
     size_t j = 0;
@@ -999,13 +1027,23 @@ int main(int argc, char *argv[]) {
 
     if (stop_existing) {
         if (geteuid() != 0) return 1;
-        FILE *f = fopen(PID_FILE, "r");
         long pid = 0;
-        if (f) {
-            if (fscanf(f, "%ld", &pid) != 1 || pid <= 1) {
-                pid = 0;
+        int pfd = open(PID_FILE, O_RDONLY | O_NOFOLLOW);
+        if (pfd >= 0) {
+            struct stat pst;
+            if (fstat(pfd, &pst) == 0 && S_ISREG(pst.st_mode) && pst.st_uid == 0) {
+                FILE *f = fdopen(pfd, "r");
+                if (f) {
+                    if (fscanf(f, "%ld", &pid) != 1 || pid <= 1) {
+                        pid = 0;
+                    }
+                    fclose(f);
+                } else {
+                    close(pfd);
+                }
+            } else {
+                close(pfd);
             }
-            fclose(f);
         }
         if (pid > 1) {
             if (kill((pid_t)pid, SIGINT) == 0) {

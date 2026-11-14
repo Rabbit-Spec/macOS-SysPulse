@@ -158,12 +158,12 @@ public final class SystemPermissionManager {
         proc.arguments = ["--version"]
         let pipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = Pipe()
+        proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
             guard proc.terminationStatus == 0 else { return .notDetermined }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if let ver = Int(output), ver >= requiredHelperVersion {
                 return .authorized
@@ -174,19 +174,32 @@ public final class SystemPermissionManager {
         return .notDetermined
     }
 
+    public nonisolated static func shellSingleQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    public nonisolated static func appleScriptEscaped(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
     public nonisolated static func installPrivilegedHelper(additionalFanPercent: Int? = nil) -> Bool {
         let bundledPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
-        let fallbackPath = "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
-        let sourceHelper = FileManager.default.isExecutableFile(atPath: bundledPath) ? bundledPath : fallbackPath
+        let appFallbackPath = "/Applications/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
+        let sourceHelper = FileManager.default.isExecutableFile(atPath: bundledPath) ? bundledPath : appFallbackPath
         guard FileManager.default.isExecutableFile(atPath: sourceHelper) else {
             return false
         }
         let installedDir = "/Library/Application Support/SysPulse"
-        var shellCmd = "mkdir -p '\(installedDir)' && cp -f '\(sourceHelper)' '\(installedHelperPath)' && chown root:wheel '\(installedHelperPath)' && chmod 4755 '\(installedHelperPath)'"
+        let qDir = shellSingleQuoted(installedDir)
+        let qSrc = shellSingleQuoted(sourceHelper)
+        let qDst = shellSingleQuoted(installedHelperPath)
+        var shellCmd = "mkdir -p \(qDir) && chown root:wheel \(qDir) && chmod 755 \(qDir) && cp -f \(qSrc) \(qDst) && chown root:wheel \(qDst) && chmod 4755 \(qDst)"
         if let pct = additionalFanPercent {
-            shellCmd += " && '\(installedHelperPath)' --fan \(pct)"
+            let clamped = max(0, min(100, pct))
+            shellCmd += " && \(qDst) --fan \(clamped)"
         }
-        let script = "do shell script \"\(shellCmd)\" with administrator privileges"
+        let script = "do shell script \"\(appleScriptEscaped(shellCmd))\" with administrator privileges"
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

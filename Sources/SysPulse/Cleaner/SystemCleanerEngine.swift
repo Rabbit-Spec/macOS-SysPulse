@@ -199,8 +199,6 @@ public final class SystemCleanerEngine {
         scannedItems = []
         selectedItemIDs = []
 
-        let scanStartTime = Date()
-
         currentTask = Task.detached(priority: .userInitiated) { [weak self] in
             let fm = FileManager.default
             let home = fm.homeDirectoryForCurrentUser
@@ -402,19 +400,7 @@ public final class SystemCleanerEngine {
             // Sort largest to smallest
             discovered.sort { $0.sizeBytes > $1.sizeBytes }
 
-            let elapsed = Date().timeIntervalSince(scanStartTime)
-            if elapsed < 2.5 {
-                let remaining = 2.5 - elapsed
-                let steps = 8
-                let stepDelay = remaining / Double(steps)
-                for step in 1...steps {
-                    if Task.isCancelled { return }
-                    try? await Task.sleep(nanoseconds: UInt64(stepDelay * 1_000_000_000))
-                    let smoothP = 0.85 + 0.15 * (Double(step) / Double(steps))
-                    await self?.updateScanStatus(progress: smoothP, path: "白名单规则过滤与安全计划生成…")
-                }
-            }
-
+            if Task.isCancelled { return }
             await self?.finishScan(items: discovered)
         }
     }
@@ -483,7 +469,7 @@ public final class SystemCleanerEngine {
                     }
                 } else {
                     // 系统与应用缓存、运行日志、Xcode/Homebrew/npm 开发产物：纯临时衍生垃圾，直接安全物理释放，绝不污染倒灌废纸篓
-                    if let subs = try? fm.contentsOfDirectory(at: item.path, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: []) {
+                    if let subs = try? fm.contentsOfDirectory(at: item.path, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey], options: []) {
                         var folderFreed: Int64 = 0
                         var allRemoved = !subs.isEmpty
                         for sub in subs {
@@ -491,7 +477,9 @@ public final class SystemCleanerEngine {
                                 allRemoved = false
                                 continue
                             }
-                            let subSize = Self.calculateItemOrDirectorySize(url: sub)
+                            let isSymlink = (try? sub.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
+                            // 符号链接仅删除链接本身，严禁通过链接计算或递归目标目录
+                            let subSize: Int64 = isSymlink ? 0 : Self.calculateItemOrDirectorySize(url: sub)
                             if (try? fm.removeItem(at: sub)) != nil {
                                 count += 1
                                 folderFreed += subSize
@@ -568,29 +556,38 @@ public final class SystemCleanerEngine {
     // MARK: - Utilities
 
     nonisolated public static func calculateItemOrDirectorySize(url: URL) -> Int64 {
-        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileAllocatedSizeKey, .fileSizeKey]) {
+        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]
+        if let values = try? url.resourceValues(forKeys: keys) {
+            if values.isSymbolicLink == true {
+                return 0
+            }
             if values.isDirectory == true {
                 return calculateDirectorySize(url: url)
             } else {
-                return Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
+                return Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
             }
         }
         return calculateDirectorySize(url: url)
     }
 
     nonisolated public static func calculateDirectorySize(url: URL) -> Int64 {
+        if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            return 0
+        }
         let fm = FileManager.default
         var totalSize: Int64 = 0
+        let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
         guard let enumerator = fm.enumerator(
             at: url,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsPackageDescendants]
+            includingPropertiesForKeys: keys,
+            options: []
         ) else { return 0 }
 
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let size = values.fileSize else { continue }
+            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+                  values.isSymbolicLink != true,
+                  values.isRegularFile == true else { continue }
+            let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
             totalSize += Int64(size)
         }
         return totalSize

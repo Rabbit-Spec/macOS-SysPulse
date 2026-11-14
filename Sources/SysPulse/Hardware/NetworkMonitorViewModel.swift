@@ -54,19 +54,19 @@ public final class NetworkMonitorViewModel {
     }
 
     // Ping / Latency Metrics
-    public var internetPingMs: Int = 11
-    public var routerPingMs: Int = 1
-    public var dnsPingMs: Int = 8
-    public var routerPingText: String = "0.8"
-    public var dnsPingText: String = "8.5"
-    public var pingStatusText: String = "极低抖动"
+    public var internetPingMs: Int = 0
+    public var routerPingMs: Int = 0
+    public var dnsPingMs: Int = 0
+    public var routerPingText: String = "--"
+    public var dnsPingText: String = "--"
+    public var pingStatusText: String = "测量中…"
     public var isMeasuringLatency: Bool = false
     public var isSpeedTestCardActive: Bool = false
 
     // Socket Connections & Network Hardware (系统真实内核动态遥测)
-    public var activeSocketCount: Int = 125
-    public var activeProcessCount: Int = 18
-    public var activeInterfaceCount: Int = 2
+    public var activeSocketCount: Int = 0
+    public var activeProcessCount: Int = 0
+    public var activeInterfaceCount: Int = 1
     public var packetLossPercent: Double = 0.0
 
     // 动态评估连接健康度（通常桌面级活跃连接在 50~350 之间，超过 500 连接视为偏高/异常）
@@ -168,20 +168,29 @@ public final class NetworkMonitorViewModel {
         Task.detached(priority: .userInitiated) {
             // 1. 路由网关 Ping (优先通过 ICMP 实测网关物理时延与丢包率，备用 TCP RTT)
             let pingRes = Self.measureICMPPing(host: targetGW)
-            let gwSec = pingRes.avg
-                ?? (Double(Self.measureTCPRTT(host: targetGW, port: 53, timeoutSec: 0.5) ?? 1))
-            let formattedGW = gwSec < 10.0 ? String(format: "%.1f", max(0.5, gwSec)) : String(format: "%.0f", gwSec)
+            let gwMeasured: Double? = pingRes.avg ?? Self.measureTCPRTT(host: targetGW, port: 53, timeoutSec: 0.5).map(Double.init)
+            let formattedGW: String = {
+                guard let gwVal = gwMeasured, gwVal > 0 else { return "--" }
+                return gwVal < 10.0 ? String(format: "%.1f", max(0.5, gwVal)) : String(format: "%.0f", gwVal)
+            }()
+            let gwRoundedMs = gwMeasured.map { max(1, Int(round($0))) } ?? 0
             let loss = pingRes.loss ?? 0.0
 
             // 2. DNS 解析时延 (发送真实 UDP 53 数据包探测 DNS 服务器响应耗时，绕过本地 mDNS 内存缓存)
-            let dnsSec = Self.measureRealUDPResolutionTime(servers: dnsServers)
-            let formattedDNS = dnsSec < 10.0 ? String(format: "%.1f", max(1.0, dnsSec)) : String(format: "%.0f", dnsSec)
+            let dnsMeasured = Self.measureRealUDPResolutionTime(servers: dnsServers)
+            let formattedDNS: String = {
+                guard let dnsVal = dnsMeasured, dnsVal > 0 else { return "--" }
+                return dnsVal < 10.0 ? String(format: "%.1f", max(1.0, dnsVal)) : String(format: "%.0f", dnsVal)
+            }()
+            let dnsRoundedMs = dnsMeasured.map { max(1, Int(round($0))) } ?? 0
 
-            // 3. 互联网延迟 (测试 URL: http://connectivitycheck.platform.hicloud.com/generate_204)
-            let httpRTT = await Self.measureHTTPLatency(urlString: "http://connectivitycheck.platform.hicloud.com/generate_204")
+            // 3. 互联网延迟 (测试 URL: https://connectivitycheck.platform.hicloud.com/generate_204)
+            let httpRTT = await Self.measureHTTPLatency(urlString: "https://connectivitycheck.platform.hicloud.com/generate_204")
 
             let status: String
-            if httpRTT <= 25 {
+            if httpRTT <= 0 {
+                status = "未连接"
+            } else if httpRTT <= 25 {
                 status = "极低抖动 · 毫秒响应"
             } else if httpRTT <= 60 {
                 status = "链路通畅 · 良好"
@@ -192,8 +201,8 @@ public final class NetworkMonitorViewModel {
             }
 
             await MainActor.run {
-                self.routerPingMs = max(1, Int(round(gwSec)))
-                self.dnsPingMs = max(1, Int(round(dnsSec)))
+                self.routerPingMs = gwRoundedMs
+                self.dnsPingMs = dnsRoundedMs
                 self.routerPingText = formattedGW
                 self.dnsPingText = formattedDNS
                 self.internetPingMs = httpRTT
@@ -211,11 +220,11 @@ public final class NetworkMonitorViewModel {
         task.arguments = ["-c", "2", "-W", "800", host]
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe()
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
-            task.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
             var avgMs: Double? = nil
             var lossVal: Double? = nil
             if let output = String(data: data, encoding: .utf8) {
@@ -252,7 +261,7 @@ public final class NetworkMonitorViewModel {
         }
     }
 
-    nonisolated private static func measureRealUDPResolutionTime(servers: [String]) -> Double {
+    nonisolated private static func measureRealUDPResolutionTime(servers: [String]) -> Double? {
         // 排除局域网路由网关(192.168.*, 10.*, 172.16-31.*)与 Fake-IP(198.18.*)，优先实测互联网公网递归 DNS 节点
         let externalServers = servers.filter {
             !$0.hasPrefix("198.18.") &&
@@ -309,7 +318,7 @@ public final class NetworkMonitorViewModel {
                 }
             }
         }
-        return 8.5
+        return nil
     }
 
     private nonisolated static let latencySession: URLSession = {
@@ -320,11 +329,11 @@ public final class NetworkMonitorViewModel {
         return URLSession(configuration: config)
     }()
 
-    nonisolated private static func measureHTTPLatency(urlString: String = "http://connectivitycheck.platform.hicloud.com/generate_204", timeoutSec: Double = 3.0) async -> Int {
+    nonisolated private static func measureHTTPLatency(urlString: String = "https://connectivitycheck.platform.hicloud.com/generate_204", timeoutSec: Double = 3.0) async -> Int {
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
         let sep = urlString.contains("?") ? "&" : "?"
         let uniqueUrlString = "\(urlString)\(sep)_t=\(timestamp)"
-        guard let url = URL(string: uniqueUrlString) else { return 25 }
+        guard let url = URL(string: uniqueUrlString) else { return 0 }
 
         var request = URLRequest(url: url, timeoutInterval: timeoutSec)
         request.httpMethod = "GET"
@@ -336,17 +345,17 @@ public final class NetworkMonitorViewModel {
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
             return max(1, Int(round(elapsed)))
         }
-        if let tcpRTT = measureTCPRTT(host: url.host ?? "connectivitycheck.platform.hicloud.com", port: 80, timeoutSec: 1.0) {
+        if let tcpRTT = measureTCPRTT(host: url.host ?? "connectivitycheck.platform.hicloud.com", port: 443, timeoutSec: 1.0) {
             return tcpRTT
         }
-        return 25
+        return 0
     }
 
     nonisolated private static func measureTCPRTT(host: String, port: UInt16, timeoutSec: Double = 0.6) -> Int? {
         guard !host.isEmpty && host != "127.0.0.1" else { return nil }
         let start = CFAbsoluteTimeGetCurrent()
         var hints = addrinfo(
-            ai_flags: AI_NUMERICHOST,
+            ai_flags: 0,
             ai_family: AF_INET,
             ai_socktype: SOCK_STREAM,
             ai_protocol: IPPROTO_TCP,

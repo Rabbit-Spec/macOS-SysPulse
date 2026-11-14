@@ -18,49 +18,62 @@ public struct SysPulsePromoPosterView: View {
 
             HStack(spacing: 24) {
                 leftMenuBarCard
-                    .frame(width: 468, height: 716)
+                    .frame(width: 450, height: 856)
 
                 VStack(spacing: 24) {
-                    rightTopCleanerBannerCard
-                        .frame(width: 960, height: 346)
+                    HStack(spacing: 24) {
+                        featureScreenshotSubCard(
+                            imagePath: "/tmp/poster_user_cleaner.jpg",
+                            title: "智能清理",
+                            subtitle: "系统缓存 · 日志与废纸篓"
+                        )
+                        .frame(width: 477, height: 416)
+
+                        featureScreenshotSubCard(
+                            imagePath: "/tmp/poster_user_software.jpg",
+                            title: "应用卸载",
+                            subtitle: "App 本体与 12 类残留清理"
+                        )
+                        .frame(width: 477, height: 416)
+                    }
 
                     HStack(spacing: 24) {
-                        rightBottomSubCard(
-                            imagePath: "/tmp/poster_network_light.png",
-                            fallbackTitle: "网络监控与测速诊断",
-                            caption: "网络监控与测速诊断"
+                        featureScreenshotSubCard(
+                            imagePath: "/tmp/poster_user_space.jpg",
+                            title: "空间分析",
+                            subtitle: "目录体积分布 · 大文件定位"
                         )
-                        .frame(width: 468, height: 346)
+                        .frame(width: 477, height: 416)
 
-                        rightBottomSubCard(
-                            imagePath: "/tmp/poster_diagnostics_light.png",
-                            fallbackTitle: "系统诊断与更新检查",
-                            caption: "系统诊断与更新检查"
+                        featureScreenshotSubCard(
+                            imagePath: "/tmp/poster_user_plugins.jpg",
+                            title: "模块中心",
+                            subtitle: "串流画质 · Wi-Fi 低延迟 · ARP · UPS"
                         )
-                        .frame(width: 468, height: 346)
+                        .frame(width: 477, height: 416)
                     }
                 }
-                .frame(width: 960, height: 716)
+                .frame(width: 978, height: 856)
             }
-            .frame(width: 1452, height: 716)
+            .frame(width: 1452, height: 856)
 
             HStack(spacing: 24) {
                 bottomPeripheralsCard
-                    .frame(width: 584, height: 228)
+                    .frame(width: 560, height: 228)
 
                 bottomFanModeCard
                     .frame(width: 220, height: 228)
 
                 bottomNativeArchCard
-                    .frame(width: 396, height: 228)
+                    .frame(width: 416, height: 228)
 
                 bottomOpenSourceCard
-                    .frame(width: 180, height: 228)
+                    .frame(width: 184, height: 228)
             }
             .frame(width: 1452, height: 228)
         }
         .padding(24)
-        .frame(width: 1500, height: 2000)
+        .frame(width: 1500, height: 2140)
         .background(Color.white)
         .environment(\.colorScheme, .light)
     }
@@ -98,7 +111,7 @@ public struct SysPulsePromoPosterView: View {
                         .foregroundStyle(.white)
                         .shadow(color: Color.black.opacity(0.12), radius: 8, y: 3)
 
-                    Text("v0.1.7")
+                    Text("v\(AppMetadata.version)")
                         .font(.system(size: 28, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16)
@@ -111,8 +124,8 @@ public struct SysPulsePromoPosterView: View {
                         .offset(y: 4)
                 }
 
-                Text("macOS (Apple Silicon) 原生系统监测、清理与扩展模块管理工具")
-                    .font(.system(size: 31, weight: .semibold, design: .rounded))
+                Text("轻于颜表，深于内在 · 让系统状态如玻璃般清透，让运行空间如初次开箱")
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.97))
                     .shadow(color: Color.black.opacity(0.10), radius: 4, y: 2)
             }
@@ -175,6 +188,12 @@ public struct SysPulsePromoPosterView: View {
                         Text("清理")
                             .font(.system(size: 14, weight: .medium))
                             .opacity(0.75)
+                        Text("软件")
+                            .font(.system(size: 14, weight: .medium))
+                            .opacity(0.75)
+                        Text("空间")
+                            .font(.system(size: 14, weight: .medium))
+                            .opacity(0.75)
                         Text("模块")
                             .font(.system(size: 14, weight: .medium))
                             .opacity(0.75)
@@ -218,7 +237,7 @@ public struct SysPulsePromoPosterView: View {
                 Spacer(minLength: 10)
 
                 HStack(alignment: .center, spacing: 20) {
-                    if let heroImg = Self.loadImage(at: "/tmp/poster_overview_dark.png") {
+                    if let heroImg = Self.loadImage(at: "/tmp/poster_user_status.jpg", stripTrafficLights: true) {
                         Image(nsImage: heroImg)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
@@ -231,8 +250,8 @@ public struct SysPulsePromoPosterView: View {
                             .shadow(color: Color.black.opacity(0.45), radius: 22, y: 10)
                     }
 
-                    if let pluginsImg = Self.loadImage(at: "/tmp/poster_plugins_dark.png") {
-                        Image(nsImage: pluginsImg)
+                    if let networkImg = Self.loadImage(at: "/tmp/poster_user_network.jpg", stripTrafficLights: true) {
+                        Image(nsImage: networkImg)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: 696, height: 477)
@@ -336,30 +355,30 @@ public struct SysPulsePromoPosterView: View {
     // MARK: - Row 3 Left: Menu Bar Popover Card
 
     private var leftMenuBarCard: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Text("菜单栏悬浮窗")
-                .font(.system(size: 38, weight: .bold, design: .rounded))
+                .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundStyle(primaryText)
-                .padding(.top, 26)
+                .padding(.top, 22)
 
-            if let popImg = Self.loadImage(at: "/tmp/poster_popover_light.png") {
+            if let popImg = Self.loadImage(at: "/tmp/poster_user_popover.jpg") {
                 Image(nsImage: popImg)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 392, height: 470)
+                    .frame(width: 280, height: 644)
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .shadow(color: Color.black.opacity(0.12), radius: 16, y: 6)
+                    .shadow(color: Color.black.opacity(0.16), radius: 16, y: 6)
             }
 
-            VStack(spacing: 6) {
+            VStack(spacing: 4) {
                 Text("双行等宽实时遥测")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .font(.system(size: 31, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
                 Text("快捷操控与状态查看")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .font(.system(size: 31, weight: .bold, design: .rounded))
                     .foregroundStyle(primaryText)
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 22)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -368,103 +387,39 @@ public struct SysPulsePromoPosterView: View {
         )
     }
 
-    // MARK: - Row 3 Right Top: 3-in-1 Deep Cleaner Banner Card
+    // MARK: - Row 3 Right: 2x2 Core Feature Subcards
 
-    private var rightTopCleanerBannerCard: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.09, green: 0.45, blue: 0.42),
-                            Color(red: 0.14, green: 0.62, blue: 0.52),
-                            Color(red: 0.18, green: 0.52, blue: 0.78)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-
-            HStack(spacing: 76) {
-                if let img1 = Self.loadResourceImage(named: "CleanerIcon-Light-1024") {
-                    Image(nsImage: img1)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 220, height: 220)
-                        .clipShape(Circle())
-                        .opacity(0.38)
-                }
-                if let img2 = Self.loadResourceImage(named: "UninstallerIcon-Light-1024") {
-                    Image(nsImage: img2)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 240, height: 240)
-                        .clipShape(Circle())
-                        .opacity(0.35)
-                }
-                if let img3 = Self.loadResourceImage(named: "SpaceAnalysisIcon-Light-1024") {
-                    Image(nsImage: img3)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 220, height: 220)
-                        .clipShape(Circle())
-                        .opacity(0.38)
-                }
-            }
-
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(
-                    RadialGradient(
-                        colors: [Color.black.opacity(0.28), Color.black.opacity(0.10)],
-                        center: .center,
-                        startRadius: 30,
-                        endRadius: 480
-                    )
-                )
-
-            VStack(spacing: 14) {
-                Text("3 合 1 清理分析")
-                    .font(.system(size: 82, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .shadow(color: Color.black.opacity(0.28), radius: 10, y: 4)
-
-                Text("智能清理 · 应用卸载 · 空间分析")
-                    .font(.system(size: 36, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.96))
-                    .shadow(color: Color.black.opacity(0.25), radius: 6, y: 2)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-    }
-
-    // MARK: - Row 3 Right Bottom: Two Feature Subcards
-
-    private func rightBottomSubCard(imagePath: String, fallbackTitle: String, caption: String) -> some View {
-        VStack(spacing: 18) {
-            if let img = Self.loadImage(at: imagePath) {
+    private func featureScreenshotSubCard(imagePath: String, title: String, subtitle: String) -> some View {
+        VStack(spacing: 14) {
+            if let img = Self.loadImage(at: imagePath, stripTrafficLights: true) {
                 Image(nsImage: img)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 416, height: 230, alignment: .top)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 438, height: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(Color.black.opacity(0.08), lineWidth: 0.8)
                     )
-                    .shadow(color: Color.black.opacity(0.10), radius: 10, y: 4)
-                    .padding(.top, 22)
+                    .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
+                    .padding(.top, 20)
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.white)
-                    .frame(width: 416, height: 230)
-                    .overlay(Text(fallbackTitle).font(.system(size: 24, weight: .bold)))
-                    .padding(.top, 22)
+                    .frame(width: 438, height: 300)
+                    .overlay(Text(title).font(.system(size: 24, weight: .bold)))
+                    .padding(.top, 20)
             }
 
-            Text(caption)
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .foregroundStyle(primaryText)
-                .padding(.bottom, 18)
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .foregroundStyle(primaryText)
+                Text(subtitle)
+                    .font(.system(size: 17, weight: .medium, design: .rounded))
+                    .foregroundStyle(secondaryText)
+            }
+            .padding(.bottom, 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -476,7 +431,7 @@ public struct SysPulsePromoPosterView: View {
     // MARK: - Row 4: Bottom 4-Tile Strip
 
     private var bottomPeripheralsCard: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 18) {
             peripheralBadge(
                 icon: "airpods.pro",
                 label: "AirPods",
@@ -503,7 +458,7 @@ public struct SysPulsePromoPosterView: View {
                 colors: [Color(red: 0.34, green: 0.88, blue: 0.62), Color(red: 0.14, green: 0.68, blue: 0.44)]
             )
         }
-        .padding(.horizontal, 26)
+        .padding(.horizontal, 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
@@ -629,17 +584,58 @@ public struct SysPulsePromoPosterView: View {
 
     // MARK: - Image Loading Helpers
 
-    private static func loadImage(at path: String) -> NSImage? {
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        return NSImage(contentsOfFile: path)
+    static func loadImage(at path: String, stripTrafficLights: Bool = false) -> NSImage? {
+        guard FileManager.default.fileExists(atPath: path),
+              let image = NSImage(contentsOfFile: path) else { return nil }
+        guard stripTrafficLights,
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return image
+        }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 100, height > 60 else { return image }
+
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return image
+        }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let clearW = min(width - 1, Int(Double(width) * 0.08))
+        let clearH = min(height, Int(Double(height) * 0.055))
+        let sampleX = min(width - 1, Int(Double(width) * 0.085))
+        for y in 0..<clearH {
+            let sampleOffset = y * bytesPerRow + sampleX * 4
+            let r = pixels[sampleOffset]
+            let g = pixels[sampleOffset + 1]
+            let b = pixels[sampleOffset + 2]
+            let a = pixels[sampleOffset + 3]
+            for x in 0..<clearW {
+                let dst = y * bytesPerRow + x * 4
+                pixels[dst] = r
+                pixels[dst + 1] = g
+                pixels[dst + 2] = b
+                pixels[dst + 3] = a
+            }
+        }
+        guard let cleanedCG = ctx.makeImage() else { return image }
+        return NSImage(cgImage: cleanedCG, size: image.size)
     }
 
     private static func loadResourceImage(named name: String) -> NSImage? {
         let candidates: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            "/Volumes/巨无霸/SPEC/v0.1.7/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
         for path in candidates.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),

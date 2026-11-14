@@ -191,16 +191,17 @@ public final class AccessoryBatteryManager {
         p.arguments = ["SPBluetoothDataType", "-json"]
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
-        
+        p.standardError = FileHandle.nullDevice
+
+        let data: Data
         do {
             try p.run()
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
             p.waitUntilExit()
         } catch {
             return []
         }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = root["SPBluetoothDataType"] as? [[String: Any]] else {
             return []

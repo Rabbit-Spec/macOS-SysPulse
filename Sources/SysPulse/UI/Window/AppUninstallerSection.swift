@@ -475,6 +475,7 @@ public struct AppUninstallerSection: View {
 
     // MARK: - Row Rendering for Card 3
 
+    @ViewBuilder
     private func uninstallerRow(item: UninstallerRowItem) -> some View {
         let isSelected = uninstaller.isItemSelected(item.id)
         let isHovered = (uninstaller.hoveredItemID == item.id)
@@ -483,8 +484,7 @@ public struct AppUninstallerSection: View {
         case .app(let app):
             let isExpanded = uninstaller.expandedAppIDs.contains(app.id)
 
-            return AnyView(
-                VStack(spacing: 0) {
+            VStack(spacing: 0) {
                     HStack(spacing: 14) {
                         if !app.isSystemApp {
                             Button {
@@ -666,11 +666,9 @@ public struct AppUninstallerSection: View {
                     uninstaller.hoveredItemID = hovering ? app.id : nil
                 }
                 .contentShape(Rectangle())
-            )
 
         case .residue(let res):
-            return AnyView(
-                HStack(spacing: 14) {
+            HStack(spacing: 14) {
                     Button {
                         uninstaller.toggleSelection(for: res.id)
                     } label: {
@@ -760,7 +758,6 @@ public struct AppUninstallerSection: View {
                     uninstaller.hoveredItemID = hovering ? res.id : nil
                 }
                 .contentShape(Rectangle())
-            )
         }
     }
 

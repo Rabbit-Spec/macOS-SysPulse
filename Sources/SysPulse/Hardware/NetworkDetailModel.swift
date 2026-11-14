@@ -104,6 +104,10 @@ public final class NetworkDetailModel {
     public var copiedRowKey: String? = nil
 
     private var geoIPFetched: Bool = false
+    private var isRefreshingAppUsage: Bool = false
+    private var lastAppUsageRefreshAt: Date = .distantPast
+    private var isRefreshingActiveSockets: Bool = false
+    private var lastActiveSocketsRefreshAt: Date = .distantPast
 
     private init() {
         loadPersistedApps()
@@ -408,6 +412,10 @@ public final class NetworkDetailModel {
     }
 
     nonisolated public static func detectDNSServers() -> [String] {
+        let physicalDNS = resolvePhysicalInterface().serviceDNSServers
+        if !physicalDNS.isEmpty {
+            return physicalDNS
+        }
         if let store = SCDynamicStoreCreate(nil, "SysPulse.DNSDetect" as CFString, nil, nil),
            let dict = SCDynamicStoreCopyValue(store, "State:/Network/Global/DNS" as CFString) as? [String: Any],
            let addrs = dict["ServerAddresses"] as? [String] {
@@ -419,10 +427,6 @@ public final class NetworkDetailModel {
             if !cleaned.isEmpty {
                 return cleaned
             }
-        }
-        let physicalDNS = resolvePhysicalInterface().serviceDNSServers
-        if !physicalDNS.isEmpty {
-            return physicalDNS
         }
         return ["223.5.5.5", "114.114.114.114"]
     }
@@ -588,13 +592,12 @@ public final class NetworkDetailModel {
         isLoadingGeoIP = true
 
         Task.detached(priority: .utility) { [weak self] in
-            // 优先尝试国内直连反射节点（直接获取真实物理宽带出口 IP），备用国际节点
+            // 优先尝试国内直连反射节点（HTTPS 加密），备用国际节点
             let endpoints = [
                 "https://myip.ipip.net",
-                "http://ip.3322.net",
+                "https://ip.3322.net",
                 "https://whois.pconline.com.cn/ipJson.jsp",
-                "http://myip.ipip.net",
-                "http://cip.cc",
+                "https://cip.cc",
                 "https://api.ipify.org",
                 "https://icanhazip.com"
             ]
@@ -701,227 +704,258 @@ public final class NetworkDetailModel {
     }
 
     public func refreshAppNetworkUsage() {
-        Task.detached(priority: .utility) {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-            task.arguments = ["-P", "-L", "1", "-n", "-J", "bytes_in,bytes_out"]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            guard (try? task.run()) != nil else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return }
+        let now = Date()
+        guard !isRefreshingAppUsage,
+              now.timeIntervalSince(lastAppUsageRefreshAt) >= 2.0 else {
+            return
+        }
+        isRefreshingAppUsage = true
+        lastAppUsageRefreshAt = now
 
-            let now = Date()
-            var rawItems: [(pid: Int32, rawName: String, inB: UInt64, outB: UInt64, total: UInt64)] = []
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRefreshingAppUsage = false }
 
-            for line in output.components(separatedBy: .newlines).dropFirst() {
-                let cols = line.split(separator: ",").map { String($0) }
-                guard cols.count >= 3 else { continue }
-                let spec = cols[0]
-                guard let inB = UInt64(cols[1]), let outB = UInt64(cols[2]), (inB > 0 || outB > 0) else { continue }
+            let result: (today: [AppNetworkItem], month: [AppNetworkItem])? = await Task.detached(priority: .utility) {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
+                task.arguments = ["-P", "-L", "1", "-n", "-J", "bytes_in,bytes_out"]
+                let pipe = Pipe()
+                task.standardOutput = pipe
+                task.standardError = FileHandle.nullDevice
+                guard (try? task.run()) != nil else { return nil }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                task.waitUntilExit()
+                guard let output = String(data: data, encoding: .utf8) else { return nil }
 
-                if let dotIdx = spec.lastIndex(of: ".") {
-                    let pidStr = String(spec[spec.index(after: dotIdx)...])
-                    let nameStr = String(spec[..<dotIdx])
-                    if let pid = Int32(pidStr) {
-                        rawItems.append((pid: pid, rawName: nameStr, inB: inB, outB: outB, total: inB + outB))
+                let now = Date()
+                var rawItems: [(pid: Int32, rawName: String, inB: UInt64, outB: UInt64, total: UInt64)] = []
+
+                for line in output.components(separatedBy: .newlines).dropFirst() {
+                    let cols = line.split(separator: ",").map { String($0) }
+                    guard cols.count >= 3 else { continue }
+                    let spec = cols[0]
+                    guard let inB = UInt64(cols[1]), let outB = UInt64(cols[2]), (inB > 0 || outB > 0) else { continue }
+
+                    if let dotIdx = spec.lastIndex(of: ".") {
+                        let pidStr = String(spec[spec.index(after: dotIdx)...])
+                        let nameStr = String(spec[..<dotIdx])
+                        if let pid = Int32(pidStr) {
+                            rawItems.append((pid: pid, rawName: nameStr, inB: inB, outB: outB, total: inB + outB))
+                        }
                     }
                 }
-            }
 
-            // Sort by total bytes descending
-            rawItems.sort(by: { $0.total > $1.total })
+                // Sort by total bytes descending
+                rawItems.sort(by: { $0.total > $1.total })
 
-            var nextSnapshot: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] = [:]
-            for raw in rawItems.prefix(80) {
-                nextSnapshot[raw.pid] = (raw.inB, raw.outB, now)
-            }
-            let prevSnapshot = UsageAndIconCache.shared.swapPrevAppBytes(with: nextSnapshot)
+                var nextSnapshot: [Int32: (inBytes: UInt64, outBytes: UInt64, time: Date)] = [:]
+                for raw in rawItems.prefix(80) {
+                    nextSnapshot[raw.pid] = (raw.inB, raw.outB, now)
+                }
+                let prevSnapshot = UsageAndIconCache.shared.swapPrevAppBytes(with: nextSnapshot)
 
-            var items: [AppNetworkItem] = []
-            for raw in rawItems {
-                let pid = raw.pid
-                let runningApp = NSRunningApplication(processIdentifier: pid)
-                let displayName = runningApp?.localizedName ?? Self.cleanProcessName(raw.rawName)
+                var items: [AppNetworkItem] = []
+                for raw in rawItems {
+                    let pid = raw.pid
+                    let runningApp = NSRunningApplication(processIdentifier: pid)
+                    let displayName = runningApp?.localizedName ?? Self.cleanProcessName(raw.rawName)
 
-                // 严格过滤微小无意义系统噪音（< 10KB）与系统 NTP 守护进程 timed
-                guard raw.total >= 10240, raw.rawName != "timed", displayName != "timed" else { continue }
+                    // 严格过滤微小无意义系统噪音（< 10KB）与系统 NTP 守护进程 timed
+                    guard raw.total >= 10240, raw.rawName != "timed", displayName != "timed" else { continue }
 
-                var downSpeed: Double = 0
-                var upSpeed: Double = 0
-                if let prev = prevSnapshot[pid] {
-                    let dt = max(0.5, now.timeIntervalSince(prev.time))
-                    if raw.inB >= prev.inBytes { downSpeed = Double(raw.inB - prev.inBytes) / dt }
-                    if raw.outB >= prev.outBytes { upSpeed = Double(raw.outB - prev.outBytes) / dt }
+                    var downSpeed: Double = 0
+                    var upSpeed: Double = 0
+                    if let prev = prevSnapshot[pid] {
+                        let dt = max(0.5, now.timeIntervalSince(prev.time))
+                        if raw.inB >= prev.inBytes { downSpeed = Double(raw.inB - prev.inBytes) / dt }
+                        if raw.outB >= prev.outBytes { upSpeed = Double(raw.outB - prev.outBytes) / dt }
+                    }
+
+                    let bundleID = runningApp?.bundleIdentifier
+                    let icon = Self.cachedAppIcon(bundleID: bundleID, pid: pid, runningApp: runningApp)
+
+                    NetworkTrafficPersistenceManager.shared.recordAppTraffic(
+                        name: displayName,
+                        bundleID: bundleID,
+                        bytes: raw.total
+                    )
+
+                    items.append(AppNetworkItem(
+                        pid: pid,
+                        name: displayName,
+                        bundleIdentifier: bundleID,
+                        icon: icon,
+                        downloadSpeedFormatted: Self.formatSpeed(downSpeed),
+                        uploadSpeedFormatted: Self.formatSpeed(upSpeed),
+                        totalTrafficFormatted: Self.formatBytes(raw.total),
+                        totalBytes: raw.total
+                    ))
+
+                    if items.count >= 50 { break }
                 }
 
-                let bundleID = runningApp?.bundleIdentifier
-                let icon = Self.cachedAppIcon(bundleID: bundleID, pid: pid, runningApp: runningApp)
+                // 合并今日已记录但在当前采样瞬间未活跃通信的应用（确保应用流量排行跨启动/全天记忆不丢失）
+                let existingNames = Set(items.map { $0.name })
+                let saved = NetworkTrafficPersistenceManager.shared.getPersistedAppTraffic()
+                for entry in saved where !existingNames.contains(entry.name) {
+                    guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
+                    let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
+                    let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
+                    items.append(AppNetworkItem(
+                        pid: running?.processIdentifier ?? 0,
+                        name: entry.name,
+                        bundleIdentifier: entry.bundleIdentifier,
+                        icon: icon,
+                        downloadSpeedFormatted: "< 1 KB/s",
+                        uploadSpeedFormatted: "< 1 KB/s",
+                        totalTrafficFormatted: Self.formatBytes(entry.totalBytes),
+                        totalBytes: entry.totalBytes
+                    ))
+                }
+                items.sort(by: { $0.totalBytes > $1.totalBytes })
+                if items.count > 50 { items = Array(items.prefix(50)) }
 
-                NetworkTrafficPersistenceManager.shared.recordAppTraffic(
-                    name: displayName,
-                    bundleID: bundleID,
-                    bytes: raw.total
-                )
+                // 同样构建并排序当月累计流量数据
+                let savedMonth = NetworkTrafficPersistenceManager.shared.getPersistedMonthAppTraffic()
+                var monthItems: [AppNetworkItem] = []
+                for entry in savedMonth {
+                    guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
+                    let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
+                    let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
+                    monthItems.append(AppNetworkItem(
+                        pid: running?.processIdentifier ?? 0,
+                        name: entry.name,
+                        bundleIdentifier: entry.bundleIdentifier,
+                        icon: icon,
+                        downloadSpeedFormatted: "< 1 KB/s",
+                        uploadSpeedFormatted: "< 1 KB/s",
+                        totalTrafficFormatted: Self.formatBytes(entry.totalBytes),
+                        totalBytes: entry.totalBytes
+                    ))
+                }
+                monthItems.sort(by: { $0.totalBytes > $1.totalBytes })
+                if monthItems.count > 50 { monthItems = Array(monthItems.prefix(50)) }
 
-                items.append(AppNetworkItem(
-                    pid: pid,
-                    name: displayName,
-                    bundleIdentifier: bundleID,
-                    icon: icon,
-                    downloadSpeedFormatted: Self.formatSpeed(downSpeed),
-                    uploadSpeedFormatted: Self.formatSpeed(upSpeed),
-                    totalTrafficFormatted: Self.formatBytes(raw.total),
-                    totalBytes: raw.total
-                ))
+                return (items, monthItems)
+            }.value
 
-                if items.count >= 50 { break }
-            }
-
-            // 合并今日已记录但在当前采样瞬间未活跃通信的应用（确保应用流量排行跨启动/全天记忆不丢失）
-            let existingNames = Set(items.map { $0.name })
-            let saved = NetworkTrafficPersistenceManager.shared.getPersistedAppTraffic()
-            for entry in saved where !existingNames.contains(entry.name) {
-                guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
-                let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
-                items.append(AppNetworkItem(
-                    pid: running?.processIdentifier ?? 0,
-                    name: entry.name,
-                    bundleIdentifier: entry.bundleIdentifier,
-                    icon: icon,
-                    downloadSpeedFormatted: "< 1 KB/s",
-                    uploadSpeedFormatted: "< 1 KB/s",
-                    totalTrafficFormatted: Self.formatBytes(entry.totalBytes),
-                    totalBytes: entry.totalBytes
-                ))
-            }
-            items.sort(by: { $0.totalBytes > $1.totalBytes })
-            if items.count > 50 { items = Array(items.prefix(50)) }
-
-            // 同样构建并排序当月累计流量数据
-            let savedMonth = NetworkTrafficPersistenceManager.shared.getPersistedMonthAppTraffic()
-            var monthItems: [AppNetworkItem] = []
-            for entry in savedMonth {
-                guard entry.totalBytes >= 10240, entry.name != "timed" else { continue }
-                let running = NSRunningApplication.runningApplications(withBundleIdentifier: entry.bundleIdentifier ?? "").first
-                let icon = Self.cachedAppIcon(bundleID: entry.bundleIdentifier, pid: running?.processIdentifier ?? 0, runningApp: running)
-                monthItems.append(AppNetworkItem(
-                    pid: running?.processIdentifier ?? 0,
-                    name: entry.name,
-                    bundleIdentifier: entry.bundleIdentifier,
-                    icon: icon,
-                    downloadSpeedFormatted: "< 1 KB/s",
-                    uploadSpeedFormatted: "< 1 KB/s",
-                    totalTrafficFormatted: Self.formatBytes(entry.totalBytes),
-                    totalBytes: entry.totalBytes
-                ))
-            }
-            monthItems.sort(by: { $0.totalBytes > $1.totalBytes })
-            if monthItems.count > 50 { monthItems = Array(monthItems.prefix(50)) }
-
-            await MainActor.run {
-                self.appNetworkItems = items
-                self.monthAppNetworkItems = monthItems
+            if let result {
+                self.appNetworkItems = result.today
+                self.monthAppNetworkItems = result.month
             }
         }
     }
 
     public func refreshActiveSockets(syncSummaryTo vm: NetworkMonitorViewModel? = nil) {
-        Task.detached(priority: .utility) {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-            task.arguments = ["-iTCP", "-iUDP", "-n", "-P"]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = FileHandle.nullDevice
-            guard (try? task.run()) != nil else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return }
+        let now = Date()
+        guard !isRefreshingActiveSockets,
+              now.timeIntervalSince(lastActiveSocketsRefreshAt) >= 2.0 else {
+            return
+        }
+        isRefreshingActiveSockets = true
+        lastActiveSocketsRefreshAt = now
 
-            var sockets: [ActiveSocketItem] = []
-            var tcpEstablished = 0
-            var udpCount = 0
-            var activePids = Set<Int32>()
+        let needInterfaces = (vm != nil)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isRefreshingActiveSockets = false }
 
-            for line in output.components(separatedBy: .newlines).dropFirst() {
-                let parts = line.split(whereSeparator: { $0.isWhitespace })
-                guard parts.count >= 9 else { continue }
-                let cmd = String(parts[0])
-                guard let pid = Int32(parts[1]) else { continue }
-                let proto = String(parts[7]) // TCP or UDP
-                let rest = parts[8...].joined(separator: " ")
+            let result: (sockets: [ActiveSocketItem], summarySockets: Int, summaryProcs: Int, ifCount: Int)? = await Task.detached(priority: .utility) {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+                task.arguments = ["-iTCP", "-iUDP", "-n", "-P"]
+                let pipe = Pipe()
+                task.standardOutput = pipe
+                task.standardError = FileHandle.nullDevice
+                guard (try? task.run()) != nil else { return nil }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                task.waitUntilExit()
+                guard let output = String(data: data, encoding: .utf8) else { return nil }
 
-                activePids.insert(pid)
-                var state = "ACTIVE"
-                if rest.contains("ESTABLISHED") {
-                    state = "ESTABLISHED"
-                    tcpEstablished += 1
-                } else if rest.contains("LISTEN") {
-                    state = "LISTEN"
-                } else if rest.contains("SYN_SENT") {
-                    state = "SYN_SENT"
-                } else if rest.contains("CLOSE_WAIT") {
-                    state = "CLOSE_WAIT"
-                } else if rest.contains("TIME_WAIT") {
-                    state = "TIME_WAIT"
-                } else if proto == "UDP" {
-                    state = "ACTIVE"
-                    udpCount += 1
-                }
+                var sockets: [ActiveSocketItem] = []
+                var tcpEstablished = 0
+                var udpCount = 0
+                var activePids = Set<Int32>()
 
-                let addressPart = String(rest.split(whereSeparator: { $0.isWhitespace }).first ?? "")
-                var local = addressPart
-                var remote = ""
-                if addressPart.contains("->") {
-                    let ends = addressPart.components(separatedBy: "->")
-                    local = ends[0]
-                    remote = ends.count > 1 ? ends[1] : ""
-                }
+                for line in output.components(separatedBy: .newlines).dropFirst() {
+                    let parts = line.split(whereSeparator: { $0.isWhitespace })
+                    guard parts.count >= 9 else { continue }
+                    let cmd = String(parts[0])
+                    guard let pid = Int32(parts[1]) else { continue }
+                    let proto = String(parts[7]) // TCP or UDP
+                    let rest = parts[8...].joined(separator: " ")
 
-                let runningApp = NSRunningApplication(processIdentifier: pid)
-                let displayName = runningApp?.localizedName ?? Self.cleanProcessName(cmd)
-
-                let item = ActiveSocketItem(
-                    pid: pid,
-                    processName: displayName,
-                    proto: proto,
-                    localAddress: local,
-                    remoteAddress: remote,
-                    state: state
-                )
-                sockets.append(item)
-            }
-
-            // Prioritize ESTABLISHED, then ACTIVE/UDP, then LISTEN
-            sockets.sort { (a, b) -> Bool in
-                let priority: (String) -> Int = {
-                    switch $0 {
-                    case "ESTABLISHED": return 0
-                    case "ACTIVE": return 1
-                    case "LISTEN": return 2
-                    default: return 3
+                    activePids.insert(pid)
+                    var state = "ACTIVE"
+                    if rest.contains("ESTABLISHED") {
+                        state = "ESTABLISHED"
+                        tcpEstablished += 1
+                    } else if rest.contains("LISTEN") {
+                        state = "LISTEN"
+                    } else if rest.contains("SYN_SENT") {
+                        state = "SYN_SENT"
+                    } else if rest.contains("CLOSE_WAIT") {
+                        state = "CLOSE_WAIT"
+                    } else if rest.contains("TIME_WAIT") {
+                        state = "TIME_WAIT"
+                    } else if proto == "UDP" {
+                        state = "ACTIVE"
+                        udpCount += 1
                     }
-                }
-                return priority(a.state) < priority(b.state)
-            }
 
-            let allSockets = sockets
-            let summarySockets = tcpEstablished + udpCount
-            let summaryProcs = activePids.count
-            let ifCount = vm != nil ? NetworkMonitorViewModel.countActiveInterfaces() : 0
+                    let addressPart = String(rest.split(whereSeparator: { $0.isWhitespace }).first ?? "")
+                    var local = addressPart
+                    var remote = ""
+                    if addressPart.contains("->") {
+                        let ends = addressPart.components(separatedBy: "->")
+                        local = ends[0]
+                        remote = ends.count > 1 ? ends[1] : ""
+                    }
 
-            await MainActor.run {
-                if !allSockets.isEmpty {
-                    self.activeSockets = allSockets
-                }
-                if let vm {
-                    vm.applySocketSummary(
-                        socketCount: summarySockets,
-                        processCount: summaryProcs,
-                        interfaceCount: ifCount
+                    let runningApp = NSRunningApplication(processIdentifier: pid)
+                    let displayName = runningApp?.localizedName ?? Self.cleanProcessName(cmd)
+
+                    let item = ActiveSocketItem(
+                        pid: pid,
+                        processName: displayName,
+                        proto: proto,
+                        localAddress: local,
+                        remoteAddress: remote,
+                        state: state
                     )
+                    sockets.append(item)
                 }
+
+                // Prioritize ESTABLISHED, then ACTIVE/UDP, then LISTEN
+                sockets.sort { (a, b) -> Bool in
+                    let priority: (String) -> Int = {
+                        switch $0 {
+                        case "ESTABLISHED": return 0
+                        case "ACTIVE": return 1
+                        case "LISTEN": return 2
+                        default: return 3
+                        }
+                    }
+                    return priority(a.state) < priority(b.state)
+                }
+
+                let summarySockets = tcpEstablished + udpCount
+                let summaryProcs = activePids.count
+                let ifCount = needInterfaces ? NetworkMonitorViewModel.countActiveInterfaces() : 0
+                return (sockets, summarySockets, summaryProcs, ifCount)
+            }.value
+
+            guard let result else { return }
+            if !result.sockets.isEmpty {
+                self.activeSockets = result.sockets
+            }
+            if let vm {
+                vm.applySocketSummary(
+                    socketCount: result.summarySockets,
+                    processCount: result.summaryProcs,
+                    interfaceCount: result.ifCount
+                )
             }
         }
     }

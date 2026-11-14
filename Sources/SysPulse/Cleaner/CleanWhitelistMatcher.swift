@@ -29,65 +29,95 @@ public struct CleanWhitelistMatcher: Sendable {
 
     public init() {}
 
+    private static func matchesPrefix(_ path: String, prefix: String) -> Bool {
+        path == prefix || path.hasPrefix(prefix + "/")
+    }
+
+    public static func defaultAllowedPrefixes(home: String = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path) -> [String] {
+        [
+            "\(home)/Library/Caches",
+            "/Library/Caches",
+            "\(home)/Library/Containers/com.apple.Safari/Data/Library/Caches",
+            "\(home)/Library/Logs",
+            "/Library/Logs",
+            "\(home)/Library/Saved Application State",
+            "\(home)/.Trash",
+            "\(home)/Library/Developer/Xcode/DerivedData",
+            "\(home)/Library/Developer/Xcode/Archives",
+            "\(home)/Library/Developer/CoreSimulator/Caches",
+            "\(home)/.cocoapods/cache",
+            "\(home)/.npm/_cacache",
+            "\(home)/.gradle/caches",
+            "\(home)/Library/Caches/Homebrew",
+            "\(home)/Downloads"
+        ]
+    }
+
     /// Verifies if a given path is legally in the safe clean target zone.
     public func isSafeToClean(url: URL) -> Bool {
-        let path = url.standardized.path
+        let fm = FileManager.default
+        let standardizedURL = url.standardizedFileURL
+        let rawPath = standardizedURL.path
+
+        let isSymbolicLink = (try? standardizedURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false
+        let resolvedURL = isSymbolicLink
+            ? standardizedURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+            : standardizedURL.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedPath = resolvedURL.path
 
         // 1. Guard against system root paths
         for forbidden in Self.forbiddenPrefixes {
-            if path.hasPrefix(forbidden) {
+            if Self.matchesPrefix(rawPath, prefix: forbidden) || Self.matchesPrefix(resolvedPath, prefix: forbidden) {
                 return false
             }
         }
 
         // 2. Guard against user documents / personal data
-        let fm = FileManager.default
         for dir in Self.forbiddenUserDirectories {
             if let userDir = fm.urls(for: dir, in: .userDomainMask).first {
-                let userDirPath = userDir.standardized.path
-                if path.hasPrefix(userDirPath) {
+                let rawDirPath = userDir.standardizedFileURL.path
+                let resolvedDirPath = userDir.resolvingSymlinksInPath().standardizedFileURL.path
+                if Self.matchesPrefix(rawPath, prefix: rawDirPath)
+                    || Self.matchesPrefix(resolvedPath, prefix: rawDirPath)
+                    || Self.matchesPrefix(resolvedPath, prefix: resolvedDirPath) {
                     return false
                 }
             }
         }
 
         // 3. Guard against source code git repositories and credentials
-        if path.contains("/.git/") || path.hasSuffix("/.git") || path.contains("/.ssh/") || path.contains("/.gnupg/") {
-            return false
+        for candidate in [rawPath, resolvedPath] {
+            if candidate.contains("/.git/") || candidate.hasSuffix("/.git")
+                || candidate.contains("/.ssh/") || candidate.hasSuffix("/.ssh")
+                || candidate.contains("/.gnupg/") || candidate.hasSuffix("/.gnupg") {
+                return false
+            }
         }
 
         // 4. Guard against custom & default CleanProtectionStore whitelist rules
-        if CleanProtectionStore.shared.isProtected(path: path) {
+        if CleanProtectionStore.shared.isProtected(path: rawPath) || CleanProtectionStore.shared.isProtected(path: resolvedPath) {
             return false
         }
 
         // 4.1 Explicitly allow Trash folders on all volumes (Internal ~/.Trash and External /.Trashes)
-        if path.contains("/.Trashes/") || path.hasSuffix("/.Trashes") || path.contains("/.Trash/") || path.hasSuffix("/.Trash") {
+        if resolvedPath.contains("/.Trashes/") || resolvedPath.hasSuffix("/.Trashes")
+            || resolvedPath.contains("/.Trash/") || resolvedPath.hasSuffix("/.Trash") {
             return true
         }
 
         // 5. Must match one of our designated safe cleanup zones
-        let home = fm.homeDirectoryForCurrentUser.standardized.path
-        let allowedZones = [
-            "\(home)/Library/Caches",
-            "/Library/Caches",
-            "\(home)/Library/Logs",
-            "/Library/Logs",
-            "\(home)/Library/Saved Application State",
-            "\(home)/.Trash",
-            "\(home)/Library/Developer/Xcode/DerivedData",
-            "\(home)/Library/Developer/CoreSimulator/Caches",
-            "\(home)/.npm/_cacache",
-            "\(home)/Library/Caches/Homebrew",
-            "\(home)/Downloads"
-        ]
+        let resolvedHome = fm.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL.path
+        let rawHome = fm.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let allowedZones = Self.defaultAllowedPrefixes(home: resolvedHome)
+            + (rawHome == resolvedHome ? [] : Self.defaultAllowedPrefixes(home: rawHome))
 
-        let isInAllowedZone = allowedZones.contains { path.hasPrefix($0) }
+        let isInAllowedZone = allowedZones.contains { Self.matchesPrefix(resolvedPath, prefix: $0) }
         guard isInAllowedZone else { return false }
 
         // If in Downloads, ONLY allow .dmg, .pkg, or .iso installation media leftovers
-        if path.hasPrefix("\(home)/Downloads") {
-            let ext = url.pathExtension.lowercased()
+        if Self.matchesPrefix(resolvedPath, prefix: "\(resolvedHome)/Downloads")
+            || Self.matchesPrefix(resolvedPath, prefix: "\(rawHome)/Downloads") {
+            let ext = standardizedURL.pathExtension.lowercased()
             return ext == "dmg" || ext == "pkg" || ext == "iso"
         }
 

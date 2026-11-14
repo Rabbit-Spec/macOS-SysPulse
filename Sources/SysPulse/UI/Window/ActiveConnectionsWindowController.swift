@@ -5,7 +5,7 @@ import Observation
 // MARK: - 活动网络连接窗口控制器
 
 @MainActor
-public final class ActiveConnectionsWindowController: NSWindowController {
+public final class ActiveConnectionsWindowController: NSWindowController, NSWindowDelegate {
     public static let shared = ActiveConnectionsWindowController()
 
     private var localEventMonitor: Any?
@@ -25,6 +25,7 @@ public final class ActiveConnectionsWindowController: NSWindowController {
         window.center()
 
         super.init(window: window)
+        window.delegate = self
 
         let rootView = ActiveConnectionsWindowView(onClose: { [weak self] in
             self?.closeWindow()
@@ -58,7 +59,16 @@ public final class ActiveConnectionsWindowController: NSWindowController {
             NSEvent.removeMonitor(monitor)
             localEventMonitor = nil
         }
+        ActiveConnectionsViewModel.shared.stopAutoRefresh()
         window?.orderOut(nil)
+    }
+
+    public func windowWillClose(_ notification: Notification) {
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            localEventMonitor = nil
+        }
+        ActiveConnectionsViewModel.shared.stopAutoRefresh()
     }
 }
 

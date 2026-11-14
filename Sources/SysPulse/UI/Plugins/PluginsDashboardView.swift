@@ -405,7 +405,7 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("v1.0.0")
+                        Text("v0.1.2")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundStyle(enabled ? Color.purple : theme.secondaryText)
                             .padding(.horizontal, 5)
@@ -1015,7 +1015,7 @@ public struct PluginsDashboardView: View {
         VStack(spacing: 12) {
             // 顶部工具栏与状态卡片
             VStack(spacing: 12) {
-                HStack(alignment: .center, spacing: 14) {
+                HStack(alignment: .center, spacing: 10) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(
@@ -1042,7 +1042,7 @@ public struct PluginsDashboardView: View {
                                 .font(.system(size: 16, weight: .bold, design: .rounded))
                                 .foregroundStyle(theme.primaryText)
 
-                            Text("v1.0.0")
+                            Text("v0.1.2")
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .foregroundStyle(Color.purple)
                                 .padding(.horizontal, 6)
@@ -1103,6 +1103,49 @@ public struct PluginsDashboardView: View {
                     .buttonStyle(.plain)
                     .pointingHandOnHover()
                     .help("选择路由器导出的 DHCP 备份表 (.csv)，按 MAC 地址批量匹配修改设备名称")
+
+                    // 厂商名称映射规则管理按钮
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            lanSniffer.showVendorRulesPanel.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "tag.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(lanSniffer.showVendorRulesPanel ? Color.white : Color.purple)
+                            Text("厂商规则")
+                                .font(.system(size: 12, weight: .medium))
+                            if !metadataManager.vendorRules.isEmpty {
+                                Text("\(metadataManager.vendorRules.count)")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        Capsule().fill(
+                                            lanSniffer.showVendorRulesPanel
+                                                ? Color.white.opacity(0.22)
+                                                : Color.purple.opacity(0.16)
+                                        )
+                                    )
+                                    .foregroundStyle(lanSniffer.showVendorRulesPanel ? Color.white : Color.purple)
+                            }
+                        }
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(lanSniffer.showVendorRulesPanel ? Color.purple : theme.cardFill)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(lanSniffer.showVendorRulesPanel ? Color.purple : theme.cardBorder, lineWidth: 0.8)
+                                )
+                        )
+                        .foregroundStyle(lanSniffer.showVendorRulesPanel ? Color.white : theme.primaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .help("管理全局厂商名称 / MAC 前缀映射规则（如 Shenzhen Zhangyue → iReader）")
 
                     // 重新探测按钮 (触发全网段极速轻量探活)
                     Button {
@@ -1181,6 +1224,10 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(theme.secondaryText.opacity(0.7))
                     }
+                }
+
+                if lanSniffer.showVendorRulesPanel {
+                    vendorRulesManagementPanel
                 }
             }
             .padding(14)
@@ -1309,15 +1356,6 @@ public struct PluginsDashboardView: View {
                 .foregroundStyle(theme.primaryText)
                 .lineLimit(1)
 
-            if dev.isCustomized {
-                Text("自定义")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.purple)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.purple.opacity(0.15)))
-            }
-
             if dev.isGateway {
                 Text("网关")
                     .font(.system(size: 9, weight: .bold))
@@ -1366,7 +1404,7 @@ public struct PluginsDashboardView: View {
             }
             .buttonStyle(.plain)
             .pointingHandOnHover()
-            .help("更改设备名字与自定义图标")
+            .help("更改设备名称、厂商与自定义图标")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1423,22 +1461,8 @@ public struct PluginsDashboardView: View {
             .frame(width: 187, alignment: .leading)
 
             // 设备厂商与接口
-            HStack(spacing: 6) {
-                Text(dev.vendor)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(pillFill))
-
-                Text(dev.interface)
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(theme.secondaryText.opacity(0.75))
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(pillFill))
-            }
-            .frame(width: 142, alignment: .leading)
+            lanDeviceVendorInterfaceView(dev: dev, pillFill: pillFill)
+                .frame(width: 142, alignment: .leading)
 
             // 网络在线状态指示
             HStack(spacing: 6) {
@@ -1455,6 +1479,206 @@ public struct PluginsDashboardView: View {
         .padding(.vertical, 8)
     }
 
+    @ViewBuilder
+    private func lanDeviceVendorInterfaceView(dev: LanDeviceItem, pillFill: Color) -> some View {
+        let ifaceFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
+        let vendorFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let ifaceTextW = ceil((dev.interface as NSString).size(withAttributes: [.font: ifaceFont]).width)
+        let vendorTextW = ceil((dev.vendor as NSString).size(withAttributes: [.font: vendorFont]).width)
+        let colWidth: CGFloat = 142
+        let ifaceBoxW = ifaceTextW + 10
+        let maxVendorCapsuleW = max(56, colWidth - 6 - ifaceBoxW)
+        let maxInnerVendorW = max(44, maxVendorCapsuleW - 12)
+        let overflow = max(0, vendorTextW - maxInnerVendorW)
+        let totalNeededW = min(vendorTextW, maxInnerVendorW) + 12 + 6 + ifaceBoxW
+
+        let row = HStack(spacing: 6) {
+            Group {
+                if overflow > 1 {
+                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                        Text(dev.vendor)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(theme.secondaryText)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .offset(x: vendorMarqueeOffset(overflow: overflow, date: context.date))
+                            .frame(width: maxInnerVendorW, alignment: .leading)
+                            .clipped()
+                    }
+                } else {
+                    Text(dev.vendor)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.secondaryText)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(pillFill))
+            .help(dev.vendor)
+
+            Text(dev.interface)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(theme.secondaryText.opacity(0.75))
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(RoundedRectangle(cornerRadius: 4).fill(pillFill))
+        }
+
+        if totalNeededW > colWidth {
+            ScrollView(.horizontal, showsIndicators: false) {
+                row
+            }
+        } else {
+            row
+        }
+    }
+
+    private func vendorMarqueeOffset(overflow: CGFloat, date: Date) -> CGFloat {
+        guard overflow > 0 else { return 0 }
+        let pause: Double = 1.1
+        let speed: Double = 26.0
+        let travel = Double(overflow) / speed
+        let halfCycle = pause + travel
+        let cycle = halfCycle * 2.0
+        let phase = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle)
+        if phase < pause { return 0 }
+        if phase < halfCycle {
+            return -overflow * CGFloat((phase - pause) / max(0.01, travel))
+        }
+        if phase < halfCycle + pause { return -overflow }
+        return -overflow * CGFloat(1.0 - (phase - halfCycle - pause) / max(0.01, travel))
+    }
+
+    @ViewBuilder
+    private var vendorRulesManagementPanel: some View {
+        let controlFill = colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.045)
+        let inputFill = colorScheme == .dark ? Color.black.opacity(0.22) : Color.white.opacity(0.8)
+
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().opacity(0.2)
+
+            HStack(spacing: 8) {
+                Image(systemName: "tag.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.purple)
+                Text("全局厂商名称 / MAC 前缀映射规则")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(theme.primaryText)
+                Text("优先级低于单设备自定义，高于内置 IEEE OUI 识别结果")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(theme.secondaryText)
+
+                Spacer()
+
+                Button("收起") {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        lanSniffer.showVendorRulesPanel = false
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(theme.secondaryText)
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+            }
+
+            HStack(spacing: 10) {
+                TextField("原厂商名或 MAC 前缀（如 Shenzhen Zhangyue / d0:da:24:5）", text: $lanSniffer.ruleMatchInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(theme.primaryText)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(inputFill)
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.8))
+                    )
+                    .frame(minWidth: 280, maxWidth: 360)
+
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.secondaryText)
+
+                TextField("目标显示厂商（如 iReader）", text: $lanSniffer.ruleTargetInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(theme.primaryText)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(inputFill)
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.8))
+                    )
+                    .frame(width: 190)
+
+                Button {
+                    lanSniffer.addVendorRuleFromInputs()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 11))
+                        Text("添加规则")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.purple))
+                    .foregroundStyle(Color.white)
+                }
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+
+                Spacer()
+            }
+
+            if metadataManager.vendorRules.isEmpty {
+                Text("暂无自定义全局映射规则。你可以在上方输入映射关系，或在设备编辑框中勾选「同步将所有同类厂商映射为此厂商」。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText.opacity(0.85))
+                    .padding(.vertical, 2)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(metadataManager.vendorRules) { rule in
+                            HStack(spacing: 6) {
+                                Text(rule.matchKey)
+                                    .font(.system(size: 11, weight: .medium, design: LanDeviceMetadataManager.normalizeMACPrefix(rule.matchKey) != nil ? .monospaced : .default))
+                                    .foregroundStyle(theme.secondaryText)
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(Color.purple)
+                                Text(rule.targetVendor)
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(theme.primaryText)
+
+                                Button {
+                                    lanSniffer.removeVendorRule(rule)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(theme.secondaryText.opacity(0.75))
+                                }
+                                .buttonStyle(.plain)
+                                .pointingHandOnHover()
+                                .help("删除此厂商映射规则")
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule()
+                                    .fill(controlFill)
+                                    .overlay(Capsule().strokeBorder(Color.purple.opacity(0.35), lineWidth: 0.7))
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
     private func lanDeviceEditingDrawer(_ dev: LanDeviceItem) -> some View {
         let controlFill = colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
         let inputFill = colorScheme == .dark ? Color.black.opacity(0.2) : Color.white.opacity(0.75)
@@ -1462,8 +1686,8 @@ public struct PluginsDashboardView: View {
         return VStack(alignment: .leading, spacing: 10) {
             Divider().opacity(0.2)
 
-            HStack(spacing: 12) {
-                Text("自定义设备名称:")
+            HStack(spacing: 10) {
+                Text("自定义名称:")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(theme.primaryText)
 
@@ -1478,9 +1702,26 @@ public struct PluginsDashboardView: View {
                             .fill(inputFill)
                             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.purple.opacity(0.5), lineWidth: 1))
                     )
-                    .frame(width: 220)
+                    .frame(width: 175)
 
-                Button("保存名称") {
+                Text("自定义厂商:")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.primaryText)
+
+                TextField("输入厂商名称...", text: $lanSniffer.editingVendorInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.primaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(inputFill)
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.purple.opacity(0.5), lineWidth: 1))
+                    )
+                    .frame(width: 155)
+
+                Button("保存修改") {
                     lanSniffer.saveEditingName()
                 }
                 .font(.system(size: 11, weight: .bold))
@@ -1489,6 +1730,7 @@ public struct PluginsDashboardView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.purple))
                 .foregroundStyle(Color.white)
                 .buttonStyle(.plain)
+                .pointingHandOnHover()
 
                 Button("上传图片图标...") {
                     lanSniffer.promptUploadIconFile()
@@ -1522,6 +1764,34 @@ public struct PluginsDashboardView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(theme.secondaryText)
                 .buttonStyle(.plain)
+            }
+
+            if !dev.defaultVendor.isEmpty && dev.defaultVendor != "未知厂商" {
+                HStack(spacing: 8) {
+                    Button {
+                        lanSniffer.applyVendorRuleToAll.toggle()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: lanSniffer.applyVendorRuleToAll ? "checkmark.square.fill" : "square")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(lanSniffer.applyVendorRuleToAll ? Color.purple : theme.secondaryText)
+                            Text("同步将所有「\(dev.defaultVendor)」厂商设备统一映射为此厂商名称")
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.secondaryText)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+
+                    if dev.vendor != dev.defaultVendor {
+                        Text("原始识别: \(dev.defaultVendor)")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(theme.secondaryText.opacity(0.75))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(controlFill))
+                    }
+                }
             }
 
             // 预设图标快捷选择栏

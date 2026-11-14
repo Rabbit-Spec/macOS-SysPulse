@@ -38,16 +38,16 @@
 ### 4. 模块中心（按需启用）
 首次安装后四个功能模块均处于未启用状态，未启用时不启动后台定时任务与硬件轮询；用户可在顶部导航栏 **「模块」**（`⌘6`）按需开启或停用：
 
-- **PS Portal 串流画质增强（v0.1.2）**
+- **PS Portal 串流画质增强（v0.1.3）**
   - 原生 C BPF 注入引擎，支持 **方案 A：单向视频直连**（默认，仅劫持 Portal 上行握手，下行视频流全程直连不经过 Mac 限速）与 **方案 B：双向遥测验证**（捕获 PS5 确认与码率回报后自动切回直连）。
   - 兼容 Takion 分片 `LaunchSpec` 协议载荷，支持 `65 Mbps`、`100 Mbps`、`200 Mbps` 目标码率档位。
-  - 集成 PlayStation DDP（UDP 9302）主动探测与 OUI 分级识别，精准区分 PS5 主机与 PS Portal 掌机并自动填入 IP，提供 120 秒握手等待实时倒计时与异常直连一键复原。
+  - 集成两段式 DTIM 待机唤醒与 **PlayStation DDP（UDP 9302）+ 多协议自报 + 全量 SIE 硬件 OUI** 融合识别，支持多网卡 `IP_BOUND_IF` 绑定与待机状态下的 Portal 自动发现，提供 120 秒握手等待实时倒计时与异常直连一键复原。
 - **Wi-Fi 低延迟**
   - 控制 macOS `awdl0` 接口开关，暂停后台隔空扫描与信道切换。
   - 停用模块或退出应用时自动恢复 `awdl0` 状态。
-- **局域网活动设备**
-  - 读取系统内核 ARP 缓存表，展示设备名称、IP 地址、物理 MAC 地址、厂商及物理网卡接口。
-  - 列表按 IPv4 地址升序排序，支持点击复制 IP / MAC 地址、关键字过滤、单台设备改名及上传本地图片作为图标。
+- **局域网活动设备（v0.1.2）**
+  - 内置权威 **54,000+ 条 IEEE OUI（MA-L / MA-M / MA-S）硬件厂商数据库**，结合 **UPnP XML / mDNS / NetBIOS / 路由器 DNS PTR** 多协议设备主动自报，精准还原设备型号、名称与厂商。
+  - 列表按 IPv4 地址升序排序，支持点击复制 IP / MAC 地址、关键字过滤、单台设备改名、自定义厂商与全局 **「厂商名称 / MAC 前缀」映射规则**、超长厂商名称自动滚动显示及上传本地图片作为图标。
   - 支持导入路由器导出的 DHCP 静态分配备份文件（`.csv`），按 MAC 地址批量匹配设备名称。
 - **UPS 电源管理**
   - 通过 IOKit USB-HID 接入 APC、Santak（山特）、CyberPower、Eaton 等 USB UPS 设备，同步显示电压、负载功耗、电池电量与预计续航。
@@ -63,7 +63,7 @@
 
 ## 下载与安装
 
-1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.11.dmg`。
+1. 前往 [**GitHub Releases**](https://github.com/Rabbit-Spec/macOS-SysPulse/releases) 页面下载 `SysPulse-v0.1.13.dmg`。
 2. 双击打开 DMG 镜像，将 **`SysPulse.app`** 拖入 **`Applications`（应用程序）** 文件夹。
 3. 首次打开如果遇到 macOS 未签名开发者提示，可在终端运行以下命令放行：
    ```bash

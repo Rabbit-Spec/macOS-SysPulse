@@ -20,7 +20,7 @@ CONTENTS_DIR="$BUNDLE_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-CONFIGURATION="${1:-debug}"
+CONFIGURATION="${1:-release}"
 CONFIG_FLAG=""
 if [ "$CONFIGURATION" = "release" ]; then
     CONFIG_FLAG="-c release"
@@ -62,6 +62,7 @@ cp "$HERE/Resources/AppIcon-Dark-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/CleanerIcon-Light-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/CleanerIcon-Dark-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/MenuBarRabbit"*.png "$RESOURCES_DIR/" 2>/dev/null || true
+cp "$HERE/Resources/ieee_oui.tsv" "$RESOURCES_DIR/" 2>/dev/null || true
 if [ -f "$HERE/Resources/UninstallerIcon-Light-1024.png" ]; then
     cp "$HERE/Resources/UninstallerIcon-Light-1024.png" "$RESOURCES_DIR/"
 fi
@@ -126,7 +127,7 @@ cat << EOF > "$CONTENTS_DIR/Info.plist"
     <true/>
     <key>NSAppTransportSecurity</key>
     <dict>
-        <key>NSAllowsArbitraryLoads</key>
+        <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
     <key>NSBluetoothAlwaysUsageDescription</key>

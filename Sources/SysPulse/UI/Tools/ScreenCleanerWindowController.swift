@@ -40,6 +40,11 @@ public final class ScreenCleanerWindowController: NSWindowController {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        if let existingMonitor = localEventMonitor {
+            NSEvent.removeMonitor(existingMonitor)
+            localEventMonitor = nil
+        }
+
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
             if event.keyCode == 53 { // Escape key
                 self?.closeCleaner()

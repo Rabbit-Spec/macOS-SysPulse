@@ -503,6 +503,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         }
         PanelCoordinator.shared.activeScreen = .dashboard
         PanelCoordinator.shared.isEventsExpanded = false
+        StudioWindowNavigationState.shared.isNetworkDetailPresented = false
 
         // Completely detach _NSPopoverWindow from NSStatusBarWindow so Full Screen menu bar is never pinned
         popover?.contentViewController = nil

@@ -81,45 +81,50 @@ public struct LiquidGlassPanel: View {
 
     private var healthHeaderCard: some View {
         let snapshot = SystemHealthEvaluator.shared.evaluate()
-        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let totalCores = max(1, ProcessInfo.processInfo.activeProcessorCount)
 
         return Button {
             MainStudioWindowController.shared.showWindow(section: .overview)
         } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 6) {
-                    PulsingHeaderSymbolView(
-                        systemName: "sun.max.fill",
-                        size: 15,
-                        color: Color(red: 0.35, green: 0.85, blue: 0.55),
-                        isRotating: true
-                    )
+            HStack(alignment: .center, spacing: 11) {
+                MenuBarHealthRabbitView(rating: snapshot.rating, size: 72)
+                    .frame(width: 72, height: 72)
 
-                    Text("\(snapshot.score)")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(snapshot.score)")
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(theme.primaryText)
 
-                    Text(snapshot.rating.rawValue)
-                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
+                        Text(snapshot.rating.rawValue)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.secondaryText)
 
-                    Spacer()
+                        Spacer()
 
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(theme.secondaryText.opacity(0.45))
-                }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.secondaryText.opacity(0.45))
+                    }
 
-                HStack(spacing: 5) {
-                    headerPill(MacHardwareInfo.shared.chipBrand.replacingOccurrences(of: "Apple ", with: ""))
-                    headerPill("\(Int(monitor.memory.totalGB)) GB")
-                    headerPill("macOS \(os.majorVersion).\(os.minorVersion)")
-                    headerPill(snapshot.formattedUptime)
+                    VStack(spacing: 5) {
+                        HStack(spacing: 5) {
+                            headerPill(MacHardwareInfo.shared.chipBrand.replacingOccurrences(of: "Apple ", with: ""))
+                            headerPill("\(totalCores) 核")
+                            headerPill("\(Int(monitor.memory.totalGB)) GB")
+                        }
+
+                        HStack(spacing: 5) {
+                            headerPill(MacHardwareInfo.shared.macOSDisplayString)
+                            headerPill(snapshot.formattedUptime)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -136,14 +141,18 @@ public struct LiquidGlassPanel: View {
 
     private func headerPill(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
             .foregroundStyle(theme.secondaryText)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 6)
-            .padding(.vertical, 2.5)
+            .padding(.vertical, 3)
             .background(
-                Capsule()
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-                    .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(theme.cardBorder, lineWidth: 0.5))
             )
     }
 
@@ -834,13 +843,24 @@ public struct LiquidGlassPanel: View {
                 .overlay(theme.dividerColor.opacity(0.4))
 
             let topApps = monitor.topEnergyApps.isEmpty ? defaultFallbackTopApps() : Array(monitor.topEnergyApps.prefix(5))
-            VStack(spacing: 2) {
-                ForEach(topApps) { app in
-                    popoverProcessRow(app: app)
+            if topApps.isEmpty {
+                HStack(spacing: 6) {
+                    Spacer()
+                    Text("正在采集进程资源占用…")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.secondaryText.opacity(0.75))
+                    Spacer()
                 }
+                .padding(.vertical, 16)
+            } else {
+                VStack(spacing: 2) {
+                    ForEach(topApps) { app in
+                        popoverProcessRow(app: app)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
         }
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -875,30 +895,7 @@ public struct LiquidGlassPanel: View {
     }
 
     private func defaultFallbackTopApps() -> [EnergyAppItem] {
-        let running = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular && $0.localizedName != nil }
-        var result: [EnergyAppItem] = []
-        for app in running.prefix(5) {
-            result.append(EnergyAppItem(
-                pid: app.processIdentifier,
-                name: app.localizedName ?? "App",
-                bundleIdentifier: app.bundleIdentifier,
-                cpuPercent: max(0.1, Double.random(in: 0.4...6.5)),
-                energyImpact: 1.5,
-                estimatedWatts: 0.4,
-                memoryBytes: UInt64.random(in: 450_000_000...2_200_000_000)
-            ))
-        }
-        if result.isEmpty {
-            result = [
-                EnergyAppItem(pid: 101, name: "Finder", bundleIdentifier: "com.apple.finder", cpuPercent: 0.4, energyImpact: 0.5, estimatedWatts: 0.2, memoryBytes: 210 * 1048576),
-                EnergyAppItem(pid: 102, name: "Safari浏览器", bundleIdentifier: "com.apple.Safari", cpuPercent: 2.3, energyImpact: 2.6, estimatedWatts: 1.1, memoryBytes: 940 * 1048576),
-                EnergyAppItem(pid: 103, name: "WindowServer", bundleIdentifier: nil, cpuPercent: 9.2, energyImpact: 10.0, estimatedWatts: 3.2, memoryBytes: 1350 * 1048576),
-                EnergyAppItem(pid: 104, name: "终端", bundleIdentifier: "com.apple.Terminal", cpuPercent: 0.6, energyImpact: 0.8, estimatedWatts: 0.3, memoryBytes: 150 * 1048576),
-                EnergyAppItem(pid: 105, name: "微信", bundleIdentifier: "com.tencent.xinWeChat", cpuPercent: 1.1, energyImpact: 1.4, estimatedWatts: 0.5, memoryBytes: 680 * 1048576)
-            ]
-        }
-        return result
+        return []
     }
 
     private func popoverProcessRow(app: EnergyAppItem) -> some View {
@@ -930,19 +927,64 @@ public struct LiquidGlassPanel: View {
 
 // MARK: - App Small Icon View
 
+public final class AppIconLookupCache: @unchecked Sendable {
+    public static let shared = AppIconLookupCache()
+    private let fileIconCache = NSCache<NSString, NSImage>()
+    private let appIconCache = NSCache<NSString, NSImage>()
+
+    private init() {
+        fileIconCache.countLimit = 256
+        appIconCache.countLimit = 128
+    }
+
+    public func icon(forFilePath path: String) -> NSImage {
+        let key = path as NSString
+        if let cached = fileIconCache.object(forKey: key) {
+            return cached
+        }
+        let img = NSWorkspace.shared.icon(forFile: path)
+        fileIconCache.setObject(img, forKey: key)
+        return img
+    }
+
+    public func icon(forPID pid: pid_t) -> NSImage {
+        let key = "pid:\(pid)" as NSString
+        if let cached = appIconCache.object(forKey: key) {
+            return cached
+        }
+        if let running = NSRunningApplication(processIdentifier: pid), let img = running.icon {
+            appIconCache.setObject(img, forKey: key)
+            return img
+        }
+        return NSWorkspace.shared.icon(for: .applicationBundle)
+    }
+
+    public func icon(forBundleIdentifier bundleIdentifier: String?) -> NSImage? {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return nil }
+        let key = "bid:\(bundleIdentifier)" as NSString
+        if let cached = appIconCache.object(forKey: key) {
+            return cached
+        }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            let img = NSWorkspace.shared.icon(forFile: url.path)
+            appIconCache.setObject(img, forKey: key)
+            return img
+        }
+        if let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first,
+           let icon = runningApp.icon {
+            appIconCache.setObject(icon, forKey: key)
+            return icon
+        }
+        return nil
+    }
+}
+
 private struct AppSmallIconView: View {
     let bundleIdentifier: String?
     let appName: String
 
     var body: some View {
-        if let bundleIdentifier,
-           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else if let bundleIdentifier,
-                  let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first,
-                  let icon = runningApp.icon {
+        if let icon = AppIconLookupCache.shared.icon(forBundleIdentifier: bundleIdentifier) {
             Image(nsImage: icon)
                 .resizable()
                 .aspectRatio(contentMode: .fit)

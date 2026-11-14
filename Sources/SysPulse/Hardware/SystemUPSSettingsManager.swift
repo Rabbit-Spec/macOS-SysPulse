@@ -213,7 +213,7 @@ public final class SystemUPSSettingsManager {
         let args = currentHelperArguments()
         let shouldAuthorize = forceAuthorize || self.hasPendingChanges
         let bundledPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
-        let fallbackPath = "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
+        let fallbackPath = "/Applications/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
         let bundledHelper = FileManager.default.isExecutableFile(atPath: bundledPath) ? bundledPath : fallbackPath
 
         syncQueue.async { [weak self] in
@@ -230,12 +230,15 @@ public final class SystemUPSSettingsManager {
             }
 
             // 2. If user made changes and helper needs one-time root installation, run via osascript
-            if shouldAuthorize {
+            if shouldAuthorize && FileManager.default.isExecutableFile(atPath: bundledHelper) {
                 let installedDir = "/Library/Application Support/SysPulse"
                 let installedHelper = "\(installedDir)/SysPulseUPSHelper"
-                let argString = args.joined(separator: " ")
-                let shellCmd = "mkdir -p '\(installedDir)' && cp -f '\(bundledHelper)' '\(installedHelper)' && chown root:wheel '\(installedHelper)' && chmod 4755 '\(installedHelper)' && '\(installedHelper)' \(argString)"
-                let appleScript = "do shell script \"\(shellCmd)\" with administrator privileges"
+                let qDir = SystemPermissionManager.shellSingleQuoted(installedDir)
+                let qSrc = SystemPermissionManager.shellSingleQuoted(bundledHelper)
+                let qDst = SystemPermissionManager.shellSingleQuoted(installedHelper)
+                let argString = args.map { SystemPermissionManager.shellSingleQuoted($0) }.joined(separator: " ")
+                let shellCmd = "mkdir -p \(qDir) && chown root:wheel \(qDir) && chmod 755 \(qDir) && cp -f \(qSrc) \(qDst) && chown root:wheel \(qDst) && chmod 4755 \(qDst) && \(qDst) \(argString)"
+                let appleScript = "do shell script \"\(SystemPermissionManager.appleScriptEscaped(shellCmd))\" with administrator privileges"
 
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

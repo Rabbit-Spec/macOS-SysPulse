@@ -58,7 +58,19 @@ public final class AppUpdateManager {
     public var availableRelease: GitHubReleaseInfo? = nil
     private var downloadTask: Task<Void, Never>? = nil
     private var currentDownloadTask: URLSessionDownloadTask? = nil
+    private var currentURLSession: URLSession? = nil
     private var activeDownloadId = UUID()
+
+    private static func otaStagingDirectory() throws -> URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/com.rabbit.syspulse/OTAUpdate", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        } else {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        }
+        return dir
+    }
 
     public var hasUpdateAvailable: Bool {
         availableRelease != nil
@@ -112,6 +124,8 @@ public final class AppUpdateManager {
         downloadTask = nil
         currentDownloadTask?.cancel()
         currentDownloadTask = nil
+        currentURLSession?.invalidateAndCancel()
+        currentURLSession = nil
         if let rel = availableRelease {
             state = .updateAvailable(rel)
         } else {
@@ -127,6 +141,8 @@ public final class AppUpdateManager {
         downloadTask = nil
         currentDownloadTask?.cancel()
         currentDownloadTask = nil
+        currentURLSession?.invalidateAndCancel()
+        currentURLSession = nil
 
         let fallbackURLString = "https://github.com/\(Self.repoOwner)/\(Self.repoName)/releases/download/\(release.tagName)/SysPulse-v\(release.version).dmg"
         guard let targetURL = release.dmgAssetURL ?? URL(string: fallbackURLString) else {
@@ -141,16 +157,19 @@ public final class AppUpdateManager {
         downloadTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
+                let stagingDir = try Self.otaStagingDirectory()
+                let safeVersionFile = release.version.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "..", with: "_")
+                let destDMGPath = stagingDir.appendingPathComponent("SysPulse-Update-v\(safeVersionFile).dmg").path
+
                 var request = URLRequest(url: targetURL)
                 request.setValue("SysPulse/\(AppMetadata.version)", forHTTPHeaderField: "User-Agent")
                 request.timeoutInterval = 120
-
-                let destDMGPath = "/tmp/SysPulse-Update-v\(release.version).dmg"
 
                 let tempDownloadedURL: URL = try await withTaskCancellationHandler {
                     try await withCheckedThrowingContinuation { continuation in
                         let coordinator = DownloadCoordinator(
                             expectedBytes: expectedBytes,
+                            stagingDirectory: stagingDir,
                             onProgress: { [weak self] prog, dlMB, totMB in
                                 DispatchQueue.main.async { [weak self] in
                                     guard let self = self, self.activeDownloadId == newDownloadId else { return }
@@ -163,6 +182,7 @@ public final class AppUpdateManager {
                         let sessionConfig = URLSessionConfiguration.default
                         let session = URLSession(configuration: sessionConfig, delegate: coordinator, delegateQueue: nil)
                         let task = session.downloadTask(with: request)
+                        self.currentURLSession = session
                         self.currentDownloadTask = task
                         task.resume()
                     }
@@ -171,11 +191,14 @@ public final class AppUpdateManager {
                         guard let self = self, self.activeDownloadId == newDownloadId else { return }
                         self.currentDownloadTask?.cancel()
                         self.currentDownloadTask = nil
+                        self.currentURLSession?.invalidateAndCancel()
+                        self.currentURLSession = nil
                     }
                 }
 
                 guard self.activeDownloadId == newDownloadId else { return }
                 self.currentDownloadTask = nil
+                self.currentURLSession = nil
 
                 try? FileManager.default.removeItem(atPath: destDMGPath)
                 try FileManager.default.moveItem(at: tempDownloadedURL, to: URL(fileURLWithPath: destDMGPath))
@@ -188,7 +211,7 @@ public final class AppUpdateManager {
 
                 guard self.activeDownloadId == newDownloadId else { return }
                 self.state = .installing(release, statusMessage: "正在挂载更新镜像并校验签名…")
-                try await Self.mountAndReplaceApp(dmgPath: destDMGPath, release: release)
+                try await Self.mountAndReplaceApp(dmgPath: destDMGPath, release: release, stagingDir: stagingDir)
             } catch is CancellationError {
                 if self.activeDownloadId == newDownloadId {
                     self.state = .updateAvailable(release)
@@ -323,8 +346,12 @@ public final class AppUpdateManager {
 
     // MARK: - In-Place DMG Mounting & App Replacement
 
-    private static func mountAndReplaceApp(dmgPath: String, release: GitHubReleaseInfo) async throws {
-        let mountPoint = "/tmp/syspulse-ota-mount"
+    private static func shellSingleQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func mountAndReplaceApp(dmgPath: String, release: GitHubReleaseInfo, stagingDir: URL) async throws {
+        let mountPoint = stagingDir.appendingPathComponent("mount", isDirectory: true).path
         let mountedAppPath = "\(mountPoint)/SysPulse.app"
 
         try await Task.detached(priority: .userInitiated) {
@@ -332,17 +359,16 @@ public final class AppUpdateManager {
             let detachOld = Process()
             detachOld.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
             detachOld.arguments = ["detach", mountPoint, "-force"]
-            detachOld.standardOutput = Pipe()
-            detachOld.standardError = Pipe()
+            detachOld.standardOutput = FileHandle.nullDevice
+            detachOld.standardError = FileHandle.nullDevice
             try? detachOld.run()
             detachOld.waitUntilExit()
 
             let attach = Process()
             attach.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
             attach.arguments = ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmgPath]
-            let errPipe = Pipe()
-            attach.standardOutput = Pipe()
-            attach.standardError = errPipe
+            attach.standardOutput = FileHandle.nullDevice
+            attach.standardError = FileHandle.nullDevice
             try attach.run()
             attach.waitUntilExit()
 
@@ -352,6 +378,48 @@ public final class AppUpdateManager {
                     domain: "AppUpdateManager",
                     code: Int(attach.terminationStatus),
                     userInfo: [NSLocalizedDescriptionKey: "挂载更新镜像失败，已为您下载至 \(dmgPath)。"]
+                )
+            }
+
+            // 校验挂载的 SysPulse.app 代码签名与 Bundle Identifier
+            let verifyProc = Process()
+            verifyProc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            verifyProc.arguments = ["--verify", "--deep", "--strict", mountedAppPath]
+            verifyProc.standardOutput = FileHandle.nullDevice
+            verifyProc.standardError = FileHandle.nullDevice
+            try? verifyProc.run()
+            verifyProc.waitUntilExit()
+
+            let infoProc = Process()
+            infoProc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            infoProc.arguments = ["-dv", mountedAppPath]
+            let infoErrPipe = Pipe()
+            infoProc.standardOutput = FileHandle.nullDevice
+            infoProc.standardError = infoErrPipe
+            var signInfoText = ""
+            if (try? infoProc.run()) != nil {
+                let errData = infoErrPipe.fileHandleForReading.readDataToEndOfFile()
+                infoProc.waitUntilExit()
+                signInfoText = String(data: errData, encoding: .utf8) ?? ""
+            }
+
+            let isSignatureValid = (verifyProc.terminationStatus == 0) &&
+                infoProc.terminationStatus == 0 &&
+                signInfoText.contains("Identifier=com.rabbit.syspulse")
+
+            if !isSignatureValid {
+                let detachBad = Process()
+                detachBad.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                detachBad.arguments = ["detach", mountPoint, "-force"]
+                detachBad.standardOutput = FileHandle.nullDevice
+                detachBad.standardError = FileHandle.nullDevice
+                try? detachBad.run()
+                detachBad.waitUntilExit()
+
+                throw NSError(
+                    domain: "AppUpdateManager",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "更新包签名校验失败，已中止安装。"]
                 )
             }
         }.value
@@ -367,22 +435,26 @@ public final class AppUpdateManager {
             return "/Applications/SysPulse.app"
         }()
 
-        let updaterScriptPath = "/tmp/syspulse_ota_updater.sh"
+        let updaterScriptPath = stagingDir.appendingPathComponent("syspulse_ota_updater.sh").path
+        let qTarget = shellSingleQuoted(targetAppPath)
+        let qMounted = shellSingleQuoted(mountedAppPath)
+        let qMount = shellSingleQuoted(mountPoint)
+        let qDmg = shellSingleQuoted(dmgPath)
         let scriptContent = """
         #!/bin/bash
         sleep 0.8
         /usr/bin/killall -TERM SysPulse 2>/dev/null || true
         sleep 0.4
-        rm -rf "\(targetAppPath)"
-        cp -R "\(mountedAppPath)" "\(targetAppPath)"
-        /usr/bin/xattr -cr "\(targetAppPath)" 2>/dev/null || true
-        /usr/bin/hdiutil detach "\(mountPoint)" -force >/dev/null 2>&1 || true
-        rm -f "\(dmgPath)"
-        /usr/bin/open "\(targetAppPath)"
+        rm -rf \(qTarget)
+        cp -R \(qMounted) \(qTarget)
+        /usr/bin/xattr -cr \(qTarget) 2>/dev/null || true
+        /usr/bin/hdiutil detach \(qMount) -force >/dev/null 2>&1 || true
+        rm -f \(qDmg)
+        /usr/bin/open \(qTarget)
         """
 
         try scriptContent.write(toFile: updaterScriptPath, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: updaterScriptPath)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: updaterScriptPath)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -403,8 +475,13 @@ public final class AppUpdateManager {
     }
 
     public static func isVersion(_ candidate: String, newerThan current: String) -> Bool {
-        let cParts = normalizeVersion(candidate).split(separator: ".").map { Int($0) ?? 0 }
-        let curParts = normalizeVersion(current).split(separator: ".").map { Int($0) ?? 0 }
+        let parseParts: (String) -> [Int] = { ver in
+            normalizeVersion(ver).split(separator: ".").map { seg in
+                Int(String(seg.prefix(while: { $0.isNumber }))) ?? 0
+            }
+        }
+        let cParts = parseParts(candidate)
+        let curParts = parseParts(current)
         let maxCount = max(cParts.count, curParts.count)
         for i in 0..<maxCount {
             let v1 = i < cParts.count ? cParts[i] : 0
@@ -438,6 +515,7 @@ public final class AppUpdateManager {
 
 private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let expectedBytes: Double
+    private let stagingDirectory: URL
     private let onProgress: @Sendable (Double, Double, Double) -> Void
     private let continuation: CheckedContinuation<URL, Error>
     private var isResumed = false
@@ -446,10 +524,12 @@ private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @
 
     init(
         expectedBytes: Double,
+        stagingDirectory: URL,
         onProgress: @escaping @Sendable (Double, Double, Double) -> Void,
         continuation: CheckedContinuation<URL, Error>
     ) {
         self.expectedBytes = expectedBytes
+        self.stagingDirectory = stagingDirectory
         self.onProgress = onProgress
         self.continuation = continuation
     }
@@ -479,7 +559,7 @@ private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        let tempTarget = URL(fileURLWithPath: "/tmp/SysPulse-Update-\(UUID().uuidString).dmg")
+        let tempTarget = stagingDirectory.appendingPathComponent("SysPulse-Update-\(UUID().uuidString).dmg")
         do {
             try? FileManager.default.removeItem(at: tempTarget)
             try FileManager.default.copyItem(at: location, to: tempTarget)
@@ -497,6 +577,7 @@ private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @
                 continuation.resume(throwing: error)
             }
         }
+        session.finishTasksAndInvalidate()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -508,5 +589,6 @@ private final class DownloadCoordinator: NSObject, URLSessionDownloadDelegate, @
                 continuation.resume(throwing: error)
             }
         }
+        session.finishTasksAndInvalidate()
     }
 }

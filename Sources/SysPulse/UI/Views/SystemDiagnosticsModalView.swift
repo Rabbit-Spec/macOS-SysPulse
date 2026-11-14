@@ -190,8 +190,7 @@ public final class SystemDiagnosticsCollector {
         let buildNum = ver.split(separator: ".").last.map(String.init) ?? "107"
         let appVersionString = "\(ver) (build \(buildNum))"
 
-        let osVer = ProcessInfo.processInfo.operatingSystemVersion
-        let macOSVersion = "\(osVer.majorVersion).\(osVer.minorVersion).\(osVer.patchVersion)"
+        let macOSVersion = MacHardwareInfo.shared.osVersion
         let chipName = MacHardwareInfo.shared.chipBrand
         let modelIdentifier = MacHardwareInfo.shared.modelIdentifier
         #if arch(arm64)
@@ -544,8 +543,9 @@ public final class SystemDiagnosticsCollector {
         proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
-            proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
+            proc.waitUntilExit()
             let str = String(decoding: data, as: UTF8.self).lowercased()
             if str.contains("disabled") {
                 return "disabled"
@@ -585,10 +585,6 @@ public struct SystemDiagnosticsModalView: View {
     @Bindable var collector = SystemDiagnosticsCollector.shared
     let theme: LiquidGlassTheme
     let onClose: () -> Void
-
-    private var snapshot: SystemDiagnosticsSnapshot {
-        collector.snapshot ?? collector.collect()
-    }
 
     private var mintAccent: Color {
         Color(red: 0.32, green: 0.84, blue: 0.62)
@@ -634,75 +630,87 @@ public struct SystemDiagnosticsModalView: View {
 
             // 2. 诊断详情滚动区
             ScrollView(.vertical, showsIndicators: true) {
-                VStack(spacing: 14) {
-                    if !snapshot.issues.isEmpty {
-                        pendingIssuesCard
-                    }
+                if let snapshot = collector.snapshot {
+                    VStack(spacing: 14) {
+                        if !snapshot.issues.isEmpty {
+                            pendingIssuesCard(snapshot)
+                        }
 
-                    diagnosticSectionCard(icon: "laptopcomputer", title: "环境") {
-                        diagnosticRow("macOS", snapshot.macOSVersion)
-                        diagnosticRow("Chip", snapshot.chipName)
-                        diagnosticRow("Model", snapshot.modelIdentifier)
-                        diagnosticRow("Architecture", snapshot.architecture)
-                        diagnosticRow("Locale", snapshot.localeIdentifier)
-                        diagnosticRow("Bundle", snapshot.bundleIdentifier)
-                        diagnosticRow("Display", snapshot.displaySummary)
-                        diagnosticRow("Install", snapshot.installPath)
-                    }
+                        diagnosticSectionCard(icon: "laptopcomputer", title: "环境") {
+                            diagnosticRow("macOS", snapshot.macOSVersion)
+                            diagnosticRow("Chip", snapshot.chipName)
+                            diagnosticRow("Model", snapshot.modelIdentifier)
+                            diagnosticRow("Architecture", snapshot.architecture)
+                            diagnosticRow("Locale", snapshot.localeIdentifier)
+                            diagnosticRow("Bundle", snapshot.bundleIdentifier)
+                            diagnosticRow("Display", snapshot.displaySummary)
+                            diagnosticRow("Install", snapshot.installPath)
+                        }
 
-                    diagnosticSectionCard(icon: "gauge.with.needle", title: "系统状态") {
-                        diagnosticRow("CPU", snapshot.cpuPercent)
-                        diagnosticRow("Load avg", snapshot.loadAvg)
-                        diagnosticRow("Memory", snapshot.memorySummary)
-                        diagnosticRow("Memory pressure", snapshot.memoryPressure)
-                        diagnosticRow("Thermal state", snapshot.thermalState)
-                        diagnosticRow("Temperature sensors", snapshot.temperatureSensors)
-                        diagnosticRow("Fans", snapshot.fansSummary)
-                        diagnosticRow("Disk /", snapshot.diskRootSummary)
-                        diagnosticRow("Battery / UPS", snapshot.batteryAndUPSSummary)
-                        diagnosticRow("System power", snapshot.systemPowerSummary)
-                        diagnosticRow("Low Power Mode", snapshot.lowPowerMode)
-                        diagnosticRow("Uptime", snapshot.uptimeSummary)
-                        diagnosticRow("Health score", snapshot.healthScore)
-                        diagnosticRow("Health factors", snapshot.healthFactors)
-                        diagnosticRow("Volumes", snapshot.volumesSummary)
-                        diagnosticRow("Network tunnels", snapshot.networkTunnels)
-                    }
+                        diagnosticSectionCard(icon: "gauge.with.needle", title: "系统状态") {
+                            diagnosticRow("CPU", snapshot.cpuPercent)
+                            diagnosticRow("Load avg", snapshot.loadAvg)
+                            diagnosticRow("Memory", snapshot.memorySummary)
+                            diagnosticRow("Memory pressure", snapshot.memoryPressure)
+                            diagnosticRow("Thermal state", snapshot.thermalState)
+                            diagnosticRow("Temperature sensors", snapshot.temperatureSensors)
+                            diagnosticRow("Fans", snapshot.fansSummary)
+                            diagnosticRow("Disk /", snapshot.diskRootSummary)
+                            diagnosticRow("Battery / UPS", snapshot.batteryAndUPSSummary)
+                            diagnosticRow("System power", snapshot.systemPowerSummary)
+                            diagnosticRow("Low Power Mode", snapshot.lowPowerMode)
+                            diagnosticRow("Uptime", snapshot.uptimeSummary)
+                            diagnosticRow("Health score", snapshot.healthScore)
+                            diagnosticRow("Health factors", snapshot.healthFactors)
+                            diagnosticRow("Volumes", snapshot.volumesSummary)
+                            diagnosticRow("Network tunnels", snapshot.networkTunnels)
+                        }
 
-                    diagnosticSectionCard(icon: "lock", title: "权限") {
-                        diagnosticRow("Full Disk Access", snapshot.fullDiskAccess)
-                        diagnosticRow("Notifications", snapshot.notificationsPermission)
-                        diagnosticRow("Apple Events", snapshot.appleEventsPermission)
-                    }
+                        diagnosticSectionCard(icon: "lock", title: "权限") {
+                            diagnosticRow("Full Disk Access", snapshot.fullDiskAccess)
+                            diagnosticRow("Notifications", snapshot.notificationsPermission)
+                            diagnosticRow("Apple Events", snapshot.appleEventsPermission)
+                        }
 
-                    diagnosticSectionCard(icon: "gearshape", title: "配置") {
-                        diagnosticRow("Helper tool", snapshot.helperScriptStatus)
-                        diagnosticRow("Delete mode", snapshot.deleteMode)
-                        diagnosticRow("Menu bar HUD", snapshot.menuBarHUD)
-                        diagnosticRow("Keep Awake", snapshot.keepAwakeStatus)
-                        diagnosticRow("Fan mode", snapshot.fanControlMode)
-                        diagnosticRow("Wi-Fi Low Latency", snapshot.wifiLowLatencyStatus)
-                        diagnosticRow("UPS Protection", snapshot.upsProtectionStatus)
-                        diagnosticRow("Disk Guardian", snapshot.diskGuardianStatus)
-                        diagnosticRow("Proxy", snapshot.proxySummary)
-                    }
+                        diagnosticSectionCard(icon: "gearshape", title: "配置") {
+                            diagnosticRow("Helper tool", snapshot.helperScriptStatus)
+                            diagnosticRow("Delete mode", snapshot.deleteMode)
+                            diagnosticRow("Menu bar HUD", snapshot.menuBarHUD)
+                            diagnosticRow("Keep Awake", snapshot.keepAwakeStatus)
+                            diagnosticRow("Fan mode", snapshot.fanControlMode)
+                            diagnosticRow("Wi-Fi Low Latency", snapshot.wifiLowLatencyStatus)
+                            diagnosticRow("UPS Protection", snapshot.upsProtectionStatus)
+                            diagnosticRow("Disk Guardian", snapshot.diskGuardianStatus)
+                            diagnosticRow("Proxy", snapshot.proxySummary)
+                        }
 
-                    diagnosticSectionCard(icon: "shield", title: "安全") {
-                        diagnosticRow("SIP", snapshot.sipStatus)
-                        diagnosticRow("Architecture mode", snapshot.architectureMode)
-                        diagnosticRow("Sandboxed", snapshot.sandboxed)
-                        diagnosticRow("Update feed", "https://github.com/Rabbit-Spec/macOS-SysPulse/releases")
-                        diagnosticRow("Author", snapshot.authorInfo)
-                    }
+                        diagnosticSectionCard(icon: "shield", title: "安全") {
+                            diagnosticRow("SIP", snapshot.sipStatus)
+                            diagnosticRow("Architecture mode", snapshot.architectureMode)
+                            diagnosticRow("Sandboxed", snapshot.sandboxed)
+                            diagnosticRow("Update feed", "https://github.com/Rabbit-Spec/macOS-SysPulse/releases")
+                            diagnosticRow("Author", snapshot.authorInfo)
+                        }
 
-                    diagnosticSectionCard(icon: "cube", title: "SYSPULSE 运行状态") {
-                        diagnosticRow("App version", snapshot.runtimeAppVersion)
-                        diagnosticRow("Operations log", snapshot.operationsLogStatus)
-                        diagnosticRow("Recent operations", snapshot.recentOperations)
+                        diagnosticSectionCard(icon: "cube", title: "SYSPULSE 运行状态") {
+                            diagnosticRow("App version", snapshot.runtimeAppVersion)
+                            diagnosticRow("Operations log", snapshot.operationsLogStatus)
+                            diagnosticRow("Recent operations", snapshot.recentOperations)
+                        }
                     }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+                } else {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在收集系统诊断数据…")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 16)
             }
 
             Divider()
@@ -750,7 +758,7 @@ public struct SystemDiagnosticsModalView: View {
                 Spacer()
 
                 Button {
-                    let report = snapshot.toMarkdownReport()
+                    guard let report = collector.snapshot?.toMarkdownReport() else { return }
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(report, forType: .string)
                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -788,7 +796,7 @@ public struct SystemDiagnosticsModalView: View {
 
     // MARK: - Pending Issues Card (待处理项)
 
-    private var pendingIssuesCard: some View {
+    private func pendingIssuesCard(_ snapshot: SystemDiagnosticsSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("待处理项")
                 .font(.system(size: 11.5, weight: .bold, design: .rounded))

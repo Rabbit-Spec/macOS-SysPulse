@@ -545,10 +545,9 @@ private struct StatusOverviewSection: View {
                     Spacer()
 
                     HStack(spacing: 4) {
-                        let osVer = ProcessInfo.processInfo.operatingSystemVersion
                         pillBadge(MacHardwareInfo.shared.chipBrand.replacingOccurrences(of: "Apple ", with: ""))
                         pillBadge("\(Int(monitor.memory.totalGB)) GB")
-                        pillBadge("macOS \(osVer.majorVersion).\(osVer.minorVersion)")
+                        pillBadge(MacHardwareInfo.shared.macOSDisplayString)
                     }
                 }
 
@@ -1569,83 +1568,74 @@ public struct HealthPulseAuraBadgeView: View {
     public var body: some View {
         let isDark = (activeScheme == .dark)
         let mainColor = tierColor
-        let waveSpeed: Double = (tierIndex == 1 || tierIndex == 2) ? 0.17 : (tierIndex == 3 ? 0.25 : 0.35)
         let maxWaveSpan: CGFloat = max(14.0, (ringSize - mascotSize) * 1.12)
+        let targetWaveScale: CGFloat = (mascotSize + maxWaveSpan) / max(1.0, mascotSize)
 
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let breath = (sin(t * 1.1) + 1.0) * 0.5
-
-            ZStack {
-                // 1. 紧凑内敛的呼吸基底光晕
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                mainColor.opacity((isDark ? 0.28 : 0.18) + 0.08 * breath),
-                                mainColor.opacity((isDark ? 0.08 : 0.04) + 0.04 * breath),
-                                Color.clear
-                            ],
-                            center: .center,
-                            startRadius: mascotSize * 0.38,
-                            endRadius: (mascotSize + maxWaveSpan) * 0.52
-                        )
+        ZStack {
+            // 1. 紧凑内敛的呼吸基底光晕 + 柔光环（GPU .phaseAnimator 驱动，无 TimelineView / @State）
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            mainColor.opacity(isDark ? 0.34 : 0.22),
+                            mainColor.opacity(isDark ? 0.11 : 0.06),
+                            Color.clear
+                        ],
+                        center: .center,
+                        startRadius: mascotSize * 0.38,
+                        endRadius: (mascotSize + maxWaveSpan) * 0.52
                     )
-                    .frame(width: mascotSize + maxWaveSpan + 6, height: mascotSize + maxWaveSpan + 6)
-                    .blur(radius: 2.0)
-
-                // 2. 双层慢速、小范围向外散发的柔光波纹
-                ForEach(0..<2, id: \.self) { idx in
-                    let phase = ((t * waveSpeed) + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
-                    let eased = 1.0 - pow(1.0 - phase, 1.45)
-                    let waveDiameter = mascotSize + maxWaveSpan * CGFloat(eased)
-                    let fadeEnvelope = sin(phase * .pi) * (1.0 - phase * 0.45)
-                    let waveAlpha = max(0.0, fadeEnvelope * (isDark ? 0.68 : 0.56))
-
-                    ZStack {
-                        // 柔光波晕
-                        Circle()
-                            .stroke(mainColor.opacity(waveAlpha * 0.38), lineWidth: 2.8 * (1.0 - CGFloat(phase) * 0.4))
-                            .frame(width: waveDiameter, height: waveDiameter)
-                            .blur(radius: 1.5)
-
-                        // 细腻波峰光线
-                        Circle()
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        mainColor.opacity(waveAlpha * 0.88),
-                                        mainColor.opacity(waveAlpha * 0.48),
-                                        mainColor.opacity(waveAlpha * 0.82)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: max(0.6, 1.3 - CGFloat(phase) * 0.55)
-                            )
-                            .frame(width: waveDiameter, height: waveDiameter)
-                    }
+                )
+                .frame(width: mascotSize + maxWaveSpan + 6, height: mascotSize + maxWaveSpan + 6)
+                .blur(radius: 2.0)
+                .phaseAnimator([false, true]) { content, phase in
+                    content
+                        .scaleEffect(phase ? 1.06 : 0.96)
+                        .opacity(phase ? 1.0 : 0.72)
+                } animation: { _ in
+                    .easeInOut(duration: 2.8)
                 }
 
-                // 3. 固定不动的中心水彩兔子徽章
-                if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
-                    Image(nsImage: img)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: mascotSize, height: mascotSize)
-                        .clipShape(Circle())
-                        .overlay(
-                            Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
-                        )
-                        .shadow(color: mainColor.opacity(0.30 + 0.12 * breath), radius: 5, y: 2)
-                } else {
-                    Circle()
-                        .fill(mainColor.opacity(0.2))
-                        .frame(width: mascotSize, height: mascotSize)
+            Circle()
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            mainColor.opacity(0.84),
+                            mainColor.opacity(0.45),
+                            mainColor.opacity(0.78)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.2
+                )
+                .frame(width: mascotSize, height: mascotSize)
+                .phaseAnimator([false, true]) { content, phase in
+                    content
+                        .scaleEffect(phase ? targetWaveScale : 1.04)
+                        .opacity(phase ? (isDark ? 0.16 : 0.12) : (isDark ? 0.55 : 0.44))
+                } animation: { _ in
+                    .easeInOut(duration: 2.8)
                 }
+
+            // 2. 固定不动的中心水彩兔子徽章
+            if let img = Self.loadTierImage(tier: tierIndex, isDark: isDark) {
+                Image(nsImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: mascotSize, height: mascotSize)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle().strokeBorder(isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08), lineWidth: 1)
+                    )
+                    .shadow(color: mainColor.opacity(0.32), radius: 5, y: 2)
+            } else {
+                Circle()
+                    .fill(mainColor.opacity(0.2))
+                    .frame(width: mascotSize, height: mascotSize)
             }
-            .frame(width: ringSize, height: ringSize)
         }
+        .frame(width: ringSize, height: ringSize)
     }
 
     public static func loadTierImage(tier: Int, isDark: Bool) -> NSImage? {
@@ -1662,11 +1652,7 @@ public struct HealthPulseAuraBadgeView: View {
         let name = "HealthRabbit-Tier\(tier)-1024"
         let fallbackPaths: [String?] = [
             Bundle.main.url(forResource: name, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(name).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(name).png",
-            "/tmp/\(name).png",
-            "/Users/bunny/.gemini/antigravity/brain/79037a0d-c569-47f3-8e92-c63a306d3e84/health_rabbit_tier\(tier)_\(tier == 1 ? "excellent" : (tier == 2 ? "good" : (tier == 3 ? "busy" : "alert"))).png"
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png").path
         ]
 
         for path in fallbackPaths.compactMap({ $0 }) {
@@ -1686,9 +1672,7 @@ public struct HealthPulseAuraBadgeView: View {
         let iconName = isDark ? "AppIcon-Dark-1024" : "AppIcon-Light-1024"
         let iconFallbacks: [String?] = [
             Bundle.main.url(forResource: iconName, withExtension: "png")?.path,
-            Bundle.main.resourceURL?.appendingPathComponent("\(iconName).png").path,
-            "/Volumes/巨无霸/SPEC/v3.0.0/Resources/\(iconName).png",
-            "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/Resources/\(iconName).png"
+            Bundle.main.resourceURL?.appendingPathComponent("\(iconName).png").path
         ]
         for path in iconFallbacks.compactMap({ $0 }) {
             if FileManager.default.fileExists(atPath: path),
@@ -1778,22 +1762,17 @@ struct MiniWaveformLine: View {
                 }
                 .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
 
-                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
-                    let t = context.date.timeIntervalSinceReferenceDate
-                    let pulse = (t * 0.9).truncatingRemainder(dividingBy: 1.0)
+                ZStack {
+                    Circle()
+                        .stroke(color.opacity(0.32), lineWidth: 1.2)
+                        .frame(width: 9.5, height: 9.5)
 
-                    ZStack {
-                        Circle()
-                            .stroke(color.opacity(max(0.0, (1.0 - pulse) * 0.65)), lineWidth: 1.2)
-                            .frame(width: 5 + CGFloat(pulse) * 9, height: 5 + CGFloat(pulse) * 9)
-
-                        Circle()
-                            .fill(color)
-                            .frame(width: 4.5, height: 4.5)
-                            .shadow(color: color.opacity(0.8), radius: 3)
-                    }
-                    .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
+                    Circle()
+                        .fill(color)
+                        .frame(width: 4.5, height: 4.5)
+                        .shadow(color: color.opacity(0.8), radius: 3)
                 }
+                .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
             }
         }
     }
@@ -1874,22 +1853,17 @@ struct DualSparklineView: View {
                 }
                 .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
 
-                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
-                    let t = context.date.timeIntervalSinceReferenceDate
-                    let pulse = (t * 0.9).truncatingRemainder(dividingBy: 1.0)
+                ZStack {
+                    Circle()
+                        .stroke(color.opacity(0.32), lineWidth: 1.2)
+                        .frame(width: 9.5, height: 9.5)
 
-                    ZStack {
-                        Circle()
-                            .stroke(color.opacity(max(0.0, (1.0 - pulse) * 0.65)), lineWidth: 1.2)
-                            .frame(width: 5 + CGFloat(pulse) * 9, height: 5 + CGFloat(pulse) * 9)
-
-                        Circle()
-                            .fill(color)
-                            .frame(width: 4.5, height: 4.5)
-                            .shadow(color: color.opacity(0.8), radius: 3)
-                    }
-                    .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
+                    Circle()
+                        .fill(color)
+                        .frame(width: 4.5, height: 4.5)
+                        .shadow(color: color.opacity(0.8), radius: 3)
                 }
+                .position(x: max(3, min(w - 3, lastPoint.x)), y: lastPoint.y)
             }
         }
     }
@@ -1959,13 +1933,7 @@ private struct AppIconImageView: View {
     let pid: pid_t
 
     public var body: some View {
-        let icon: NSImage = {
-            if let running = NSRunningApplication(processIdentifier: pid), let img = running.icon {
-                return img
-            }
-            return NSWorkspace.shared.icon(for: .applicationBundle)
-        }()
-        Image(nsImage: icon)
+        Image(nsImage: AppIconLookupCache.shared.icon(forPID: pid))
             .resizable()
             .interpolation(.high)
             .frame(width: 24, height: 24)

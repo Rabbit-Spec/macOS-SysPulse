@@ -81,18 +81,22 @@ public final class WiFiLowLatencyManager {
 
             if !succeeded {
                 let bundledPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
-                let fallbackPath = "/Volumes/巨无霸/SPEC/build/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
+                let fallbackPath = "/Applications/SysPulse.app/Contents/MacOS/SysPulseUPSHelper"
                 let sourceHelper = FileManager.default.isExecutableFile(atPath: bundledPath) ? bundledPath : fallbackPath
                 let installedDir = "/Library/Application Support/SysPulse"
                 let installedHelper = "\(installedDir)/SysPulseUPSHelper"
+                let qDir = SystemPermissionManager.shellSingleQuoted(installedDir)
+                let qSrc = SystemPermissionManager.shellSingleQuoted(sourceHelper)
+                let qDst = SystemPermissionManager.shellSingleQuoted(installedHelper)
+                let qMode = SystemPermissionManager.shellSingleQuoted(modeArg)
 
                 let shellCmd: String
                 if FileManager.default.isExecutableFile(atPath: sourceHelper) {
-                    shellCmd = "mkdir -p '\(installedDir)' && cp -f '\(sourceHelper)' '\(installedHelper)' && chown root:wheel '\(installedHelper)' && chmod 4755 '\(installedHelper)' && '\(installedHelper)' --awdl \(modeArg)"
+                    shellCmd = "mkdir -p \(qDir) && chown root:wheel \(qDir) && chmod 755 \(qDir) && cp -f \(qSrc) \(qDst) && chown root:wheel \(qDst) && chmod 4755 \(qDst) && \(qDst) --awdl \(qMode)"
                 } else {
-                    shellCmd = "/sbin/ifconfig awdl0 \(modeArg)"
+                    shellCmd = "/sbin/ifconfig awdl0 \(qMode)"
                 }
-                let scriptSource = "do shell script \"\(shellCmd)\" with administrator privileges"
+                let scriptSource = "do shell script \"\(SystemPermissionManager.appleScriptEscaped(shellCmd))\" with administrator privileges"
 
                 var error: NSDictionary?
                 let script = NSAppleScript(source: scriptSource)

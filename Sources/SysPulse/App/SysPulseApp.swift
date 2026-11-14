@@ -30,6 +30,7 @@ struct SysPulseApp {
                 let r = monitor.loadRuntime
                 print("=== SysPulse \(AppMetadata.versionDisplay) Self-Test Report ===")
                 print("Hardware Platform: \(MacHardwareInfo.shared.currentPlatformName)")
+                print("macOS Version: \(MacHardwareInfo.shared.macOSDisplayString) (Build \(MacHardwareInfo.shared.osBuild))")
                 print("UPS Connected: \(t.isConnected) | Paired: \(t.pairedUPSDescription) | Battery: \(t.batteryLevel)% | Voltage: \(Int(t.voltageVolts))V")
                 print(String(format: "System Power: Total %.2f W (Load %.2f W + Adapter %.2f W) | CPU Total: %.1f%%", p.totalSystemWatts, p.systemLoadWatts, p.adapterLossWatts, p.cpuTotalPercent))
                 print(String(format: "Memory: %.2f / %.1f GB (%d%%) | App %.2fG | Wired %.2fG | Compressed %.2fG | Pressure: %@", m.usedGB, m.totalGB, m.usedPercent, m.appMemoryGB, m.wiredMemoryGB, m.compressedMemoryGB, m.pressureLabel))
@@ -52,7 +53,7 @@ struct SysPulseApp {
             _ = NSApplication.shared
             PanelCoordinator.shared.selectedTab = (tabType == "cleaner" || tabType == "cleanerScanning") ? .cleaner : .system
             if tabType == "cleanerScanning" {
-                SystemCleanerEngine.shared.status = .scanning(progress: 0.65, currentPath: "/Users/bunny/Library/Caches/com.apple.Safari/Cache.db")
+                SystemCleanerEngine.shared.status = .scanning(progress: 0.65, currentPath: "\(NSHomeDirectory())/Library/Caches/com.apple.Safari/Cache.db")
             }
             SystemResourceMonitor.shared.refreshNow()
             let panelView = LiquidGlassPanel()
@@ -497,74 +498,69 @@ struct SysPulseApp {
                 }
             }
 
-            SystemResourceMonitor.shared.refreshNow()
-            AccessoryBatteryManager.shared.refresh()
-            DiskGuardian.shared.refreshDisks()
-            NetworkDetailModel.shared.refresh()
-            NetworkMonitorViewModel.shared.refreshStats()
-            RunLoop.current.run(until: Date().addingTimeInterval(1.6))
-            SystemResourceMonitor.shared.refreshNow()
+            if !FileManager.default.fileExists(atPath: "/tmp/poster_user_status.jpg") {
+                SystemResourceMonitor.shared.refreshNow()
+                AccessoryBatteryManager.shared.refresh()
+                DiskGuardian.shared.refreshDisks()
+                NetworkDetailModel.shared.refresh()
+                NetworkMonitorViewModel.shared.refreshStats()
+                RunLoop.current.run(until: Date().addingTimeInterval(1.6))
+                SystemResourceMonitor.shared.refreshNow()
 
-            // 1. Overview (Dark)
-            StudioWindowNavigationState.shared.closeModal()
-            StudioWindowNavigationState.shared.selectedTab = .status
-            captureView(
-                MainStudioWindowView().environment(\.colorScheme, .dark).frame(width: 1200, height: 822),
-                width: 1200,
-                height: 822,
-                to: "/tmp/poster_overview_dark.png"
-            )
+                // 1. Overview (Dark)
+                StudioWindowNavigationState.shared.isMainWindowVisible = true
+                StudioWindowNavigationState.shared.closeModal()
+                StudioWindowNavigationState.shared.selectedTab = .status
+                captureView(
+                    MainStudioWindowView().environment(\.colorScheme, .dark).frame(width: 1200, height: 822),
+                    width: 1200,
+                    height: 822,
+                    to: "/tmp/poster_overview_dark.png"
+                )
+            }
 
-            // 1B. Module Center (Dark) for Hero Right Card
-            StudioWindowNavigationState.shared.selectedTab = .plugins
-            PSPortalPluginManager.shared.activePluginType = nil
-            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            // 4. Composite Final Bento Poster (1500 x 2140)
             captureView(
-                MainStudioWindowView().environment(\.colorScheme, .dark).frame(width: 1200, height: 822),
-                width: 1200,
-                height: 822,
-                to: "/tmp/poster_plugins_dark.png"
-            )
-
-            // 2. Popover (Light)
-            captureView(
-                LiquidGlassPanel().environment(\.colorScheme, .light).frame(width: 334, height: 690),
-                width: 334,
-                height: 690,
-                to: "/tmp/poster_popover_light.png"
-            )
-
-            // 3. Network SpeedTest Done (Light)
-            StudioWindowNavigationState.shared.selectedTab = .network
-            NetworkMonitorViewModel.shared.isSpeedTestCardActive = true
-            NetworkSpeedTest.shared.setResults(download: 1593.2, upload: 248.4, latency: 12.0, rpm: 686.0)
-            captureView(
-                MainStudioWindowView().environment(\.colorScheme, .light).frame(width: 1200, height: 822),
-                width: 1200,
-                height: 822,
-                to: "/tmp/poster_network_light.png"
-            )
-
-            // 4. Diagnostics Modal (Light)
-            SystemDiagnosticsCollector.shared.refresh()
-            let diagTheme = LiquidGlassTheme(colorScheme: .light)
-            captureView(
-                SystemDiagnosticsModalView(theme: diagTheme, onClose: {})
-                    .environment(\.colorScheme, .light)
-                    .frame(width: 600, height: 420),
-                width: 600,
-                height: 420,
-                to: "/tmp/poster_diagnostics_light.png"
-            )
-
-            // 5. Composite Final Bento Poster (1500 x 2000)
-            captureView(
-                SysPulsePromoPosterView().frame(width: 1500, height: 2000),
+                SysPulsePromoPosterView().frame(width: 1500, height: 2140),
                 width: 1500,
-                height: 2000,
+                height: 2140,
                 to: destPath
             )
             print("RENDERED_POSTER: \(destPath)")
+            exit(0)
+        }
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-keynote"), idx + 2 < CommandLine.arguments.count {
+            let darkPath = CommandLine.arguments[idx + 1]
+            let lightPath = CommandLine.arguments[idx + 2]
+            _ = NSApplication.shared
+
+            func captureKeynote<V: View>(_ view: V, to path: String) {
+                let hosting = NSHostingView(rootView: view)
+                let offscreen = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offscreen.isOpaque = false
+                offscreen.backgroundColor = .clear
+                offscreen.contentView = hosting
+                hosting.frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: 1920, height: 1080)) {
+                    rep.size = NSSize(width: 1920, height: 1080)
+                    hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: 1920, height: 1080), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+            }
+
+            captureKeynote(SysPulseKeynotePosterView(isDark: true).frame(width: 1920, height: 1080), to: darkPath)
+            captureKeynote(SysPulseKeynotePosterView(isDark: false).frame(width: 1920, height: 1080), to: lightPath)
+            print("RENDERED_KEYNOTE: \(darkPath) | \(lightPath)")
             exit(0)
         }
 
