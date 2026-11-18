@@ -63,13 +63,18 @@ cp "$HERE/Resources/CleanerIcon-Light-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/CleanerIcon-Dark-1024.png" "$RESOURCES_DIR/"
 cp "$HERE/Resources/MenuBarRabbit"*.png "$RESOURCES_DIR/" 2>/dev/null || true
 cp "$HERE/Resources/ieee_oui.tsv" "$RESOURCES_DIR/" 2>/dev/null || true
-for icon_base in UninstallerIcon SpaceAnalysisIcon PSPortalIcon WiFiLatencyIcon LanSnifferIcon UPSPowerIcon AntigravityContextIcon; do
+cp "$HERE/Resources/FolderNotes.json" "$RESOURCES_DIR/" 2>/dev/null || true
+for icon_base in UninstallerIcon SpaceAnalysisIcon PSPortalIcon WiFiLatencyIcon LanSnifferIcon UPSPowerIcon AntigravityContextIcon AIToolCleanerIcon SoftwareUpdaterIcon; do
     for suffix in Light Dark; do
         if [ -f "$HERE/Resources/${icon_base}-${suffix}-1024.png" ]; then
             cp "$HERE/Resources/${icon_base}-${suffix}-1024.png" "$RESOURCES_DIR/"
         fi
     done
 done
+if [ -d "$HERE/Resources/CommandLineToolIcons" ]; then
+    mkdir -p "$RESOURCES_DIR/CommandLineToolIcons"
+    cp -R "$HERE/Resources/CommandLineToolIcons/"* "$RESOURCES_DIR/CommandLineToolIcons/"
+fi
 for t in 1 2 3 4; do
     if [ -f "$HERE/Resources/HealthRabbit-Tier${t}-1024.png" ]; then
         cp "$HERE/Resources/HealthRabbit-Tier${t}-1024.png" "$RESOURCES_DIR/"

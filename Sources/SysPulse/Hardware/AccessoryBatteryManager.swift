@@ -63,25 +63,63 @@ public final class AccessoryBatteryManager {
     private var timer: Timer?
     private var isQueryingBluetooth: Bool = false
     private var lastBTQueryTime: Date = .distantPast
+    private var lastIOBluetoothScanTime: Date = .distantPast
     private var isPausedForSleep: Bool = false
 
     private var btProfilerCache: [String: BluetoothProfilerMetadata] = [:]
     private var spConnectedFallbacks: [AccessoryBatteryItem] = []
+    private var cachedIOBluetoothSnapshot: (
+        connectedItems: [AccessoryBatteryItem],
+        disconnectedAddresses: Set<String>
+    ) = ([], [])
+
+    private var isAccessoryUIVisible: Bool {
+        let sleepCoord = SystemSleepCoordinator.shared
+        guard !isPausedForSleep && !sleepCoord.isSystemAsleep && !sleepCoord.isScreenAsleep else {
+            return false
+        }
+        if MenuBarController.shared?.isPopoverShown == true {
+            return true
+        }
+        let nav = StudioWindowNavigationState.shared
+        return MainStudioWindowController.shared.isWindowActivelyVisible
+            && !nav.isModalPresented
+            && nav.selectedTab == .status
+    }
 
     public init() {
-        startPeriodicCheck()
+        // Perform a one-shot IOKit-only snapshot at launch; never poll IOBluetooth in the background unless UI is visible.
         DispatchQueue.main.async { [weak self] in
-            self?.refresh()
+            self?.updateVisibilityState()
+        }
+    }
+
+    public func updateVisibilityState() {
+        if isAccessoryUIVisible {
+            if timer == nil {
+                startPeriodicCheck()
+            }
+            refresh(forceBluetooth: false)
+        } else {
+            timer?.invalidate()
+            timer = nil
         }
     }
 
     public func startPeriodicCheck() {
         timer?.invalidate()
-        guard !isPausedForSleep else { return }
-        // Fast IOKit & IOBluetooth check every 5s when UI is visible
-        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
+        timer = nil
+        guard isAccessoryUIVisible else { return }
+        // Poll every 15s only while an accessory UI panel is actively visible on an awake screen
+        let timer = Timer(timeInterval: 15.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refresh()
+                guard let self else { return }
+                if self.isAccessoryUIVisible {
+                    self.refresh()
+                } else {
+                    self.timer?.invalidate()
+                    self.timer = nil
+                }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -96,30 +134,27 @@ public final class AccessoryBatteryManager {
 
     public func resumeFromWake() {
         isPausedForSleep = false
-        refresh(forceBluetooth: true)
-        startPeriodicCheck()
+        updateVisibilityState()
     }
 
     public func refresh(forceBluetooth: Bool = false) {
-        guard !isPausedForSleep else { return }
-        let nav = StudioWindowNavigationState.shared
-        let isOverviewVisible = (MainStudioWindowController.shared.isWindowVisible || nav.isMainWindowVisible)
-            && !nav.isModalPresented
-            && nav.selectedTab == .status
-        let isUIVisible = PowerSourceEngine.shared.isPanelVisible
-            || isOverviewVisible
-            || (MenuBarController.shared?.isPopoverShown ?? false)
-
-        // When no UI shows accessories, only do occasional lightweight refresh
-        guard isUIVisible || forceBluetooth || Date().timeIntervalSince(lastBTQueryTime) > 120.0 else {
+        let sleepCoord = SystemSleepCoordinator.shared
+        guard !isPausedForSleep && !sleepCoord.isSystemAsleep && !sleepCoord.isScreenAsleep else { return }
+        let uiVisible = isAccessoryUIVisible
+        guard uiVisible || forceBluetooth else {
             return
         }
 
-        // 1. Instant IOKit scan (Apple HID + 3rd-party IOHIDDevice)
+        // 1. Instant zero-XPC IOKit registry scan (Apple HID + 3rd-party IOHIDDevice)
         let iokitItems = scanIOKitAccessories()
 
-        // 2. Instant IOBluetooth scan (AirPods Max / Pro / Beats / BT Audio & HID)
-        let btSnapshot = scanConnectedIOBluetoothDevices()
+        // 2. Throttle IOBluetoothDevice.pairedDevices() XPC queries to >= 60s intervals (avoid bluetoothd sleep stalls)
+        let btAge = Date().timeIntervalSince(lastIOBluetoothScanTime)
+        if forceBluetooth || lastIOBluetoothScanTime == .distantPast || btAge >= 60.0 {
+            lastIOBluetoothScanTime = Date()
+            cachedIOBluetoothSnapshot = scanConnectedIOBluetoothDevices()
+        }
+        let btSnapshot = cachedIOBluetoothSnapshot
 
         // 3. Publish live merged snapshot immediately (prunes disconnected devices)
         mergeAndPublish(
@@ -128,15 +163,15 @@ public final class AccessoryBatteryManager {
             disconnectedBTAddresses: btSnapshot.disconnectedAddresses
         )
 
-        // 4. Only spawn system_profiler when forced, uncached newly-connected BT devices exist, or >120s stale
-        if isUIVisible || forceBluetooth {
+        // 4. Only spawn system_profiler when forced, uncached newly-connected BT devices exist, or >300s stale
+        if uiVisible || forceBluetooth {
             let hasUncachedBTDevice = btSnapshot.connectedItems.contains { item in
                 let addr = item.address.lowercased()
                 return !addr.isEmpty && btProfilerCache[addr] == nil
             }
             let age = Date().timeIntervalSince(lastBTQueryTime)
-            let shouldEnrichBT = forceBluetooth || lastBTQueryTime == .distantPast || hasUncachedBTDevice || age > 120.0
-            if shouldEnrichBT && !isQueryingBluetooth && age > 5.0 {
+            let shouldEnrichBT = forceBluetooth || lastBTQueryTime == .distantPast || hasUncachedBTDevice || age > 300.0
+            if shouldEnrichBT && !isQueryingBluetooth && age > 30.0 {
                 triggerAsyncBluetoothScan()
             }
         }

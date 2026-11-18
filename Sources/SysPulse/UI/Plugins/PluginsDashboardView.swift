@@ -11,6 +11,8 @@ public struct PluginsDashboardView: View {
     @Bindable var engine = PowerSourceEngine.shared
     @Bindable var diskGuardian = DiskGuardian.shared
     @Bindable var antigravityManager = AntigravityContextManager.shared
+    @Bindable var aiCleanerManager = AIToolCleanerManager.shared
+    @Bindable var updaterManager = SoftwareUpdaterManager.shared
     @Bindable var toggles = FeatureToggleManager.shared
     let theme: LiquidGlassTheme
     var canvasWidth: CGFloat = 1200
@@ -66,11 +68,21 @@ public struct PluginsDashboardView: View {
                 if toggles.enablePluginAntigravityContext {
                     antigravityManager.checkOnEntry()
                 }
+                if toggles.enablePluginAIToolCleaner && aiCleanerManager.lastScanDate == nil && !aiCleanerManager.isScanning {
+                    aiCleanerManager.scanAITools()
+                }
+                if toggles.enablePluginSoftwareUpdater {
+                    updaterManager.scanAllIfNeeded()
+                }
             }
         }
         .onChange(of: pluginManager.activePluginType) { _, newPlugin in
             if newPlugin == .antigravityContext && toggles.enablePluginAntigravityContext {
                 antigravityManager.checkOnEntry()
+            } else if newPlugin == .aiToolCleaner && toggles.enablePluginAIToolCleaner && aiCleanerManager.lastScanDate == nil && !aiCleanerManager.isScanning {
+                aiCleanerManager.scanAITools()
+            } else if newPlugin == .softwareUpdater && toggles.enablePluginSoftwareUpdater {
+                updaterManager.scanAllIfNeeded()
             }
         }
     }
@@ -137,6 +149,8 @@ public struct PluginsDashboardView: View {
             case .arpSniffer: return AnyView(arpSnifferCardContent)
             case .upsManager: return AnyView(upsManagerCardContent)
             case .antigravityContext: return AnyView(antigravityContextCardContent)
+            case .aiToolCleaner: return AnyView(aiToolCleanerCardContent)
+            case .softwareUpdater: return AnyView(softwareUpdaterCardContent)
             }
         }()
         pluginModuleCardShell(for: type, colW: colW) {
@@ -156,6 +170,16 @@ public struct PluginsDashboardView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.05)))
+    }
+
+    private func pluginVersionBadge(for type: PluginModuleType, tint: Color, enabled: Bool = true, fontSize: CGFloat = 10) -> some View {
+        Text("v\(type.version)")
+            .font(.system(size: fontSize, weight: .bold, design: .monospaced))
+            .foregroundStyle(enabled ? tint : theme.secondaryText)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill((enabled ? tint : Color.gray).opacity(0.12)))
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private func pluginCardToggle(for type: PluginModuleType, tint: Color) -> some View {
@@ -275,32 +299,13 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("v\(pluginManager.pluginVersion)")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(enabled ? Color.blue : theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill((enabled ? Color.blue : Color.gray).opacity(0.12)))
+                        pluginVersionBadge(for: .psPortal, tint: .blue, enabled: enabled)
 
                         Spacer()
 
                         HStack(spacing: 8) {
                             if enabled {
-                                if pluginManager.isListening {
-                                    statusBadgeView
-                                } else {
-                                    HStack(spacing: 4) {
-                                        Circle()
-                                            .fill(Color.blue)
-                                            .frame(width: 6, height: 6)
-                                        Text("已启用")
-                                            .font(.system(size: 11, weight: .medium))
-                                            .foregroundStyle(Color.blue)
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(Capsule().fill(Color.blue.opacity(0.12)))
-                                }
+                                statusBadgeView
                             } else {
                                 pluginDisabledBadge
                             }
@@ -325,14 +330,14 @@ public struct PluginsDashboardView: View {
             HStack {
                 if enabled {
                     HStack(spacing: 6) {
-                        Text("目标码率: \(pluginManager.targetBitrate.rawValue)")
+                        Text("目标码率: \(pluginManager.targetBitrate.shortTag)")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Color.blue)
                         Text("·")
                             .foregroundStyle(theme.secondaryText)
-                        Text(pluginManager.relayMode == .oneWayDirect ? "单向直连" : "双向遥测")
+                        Text(pluginManager.autoWatchEnabled ? "自动守望" : (pluginManager.relayMode == .oneWayDirect ? "单向直连" : "双向遥测"))
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(theme.secondaryText)
+                            .foregroundStyle(pluginManager.autoWatchEnabled ? statusBadgeColor : theme.secondaryText)
                         Text("·")
                             .foregroundStyle(theme.secondaryText)
                         Text("网卡: \(pluginManager.selectedInterfaceInfo?.compactDisplayName ?? pluginManager.selectedInterface)")
@@ -378,12 +383,7 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("CoreWLAN")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(enabled ? Color.teal : theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill((enabled ? Color.teal : Color.gray).opacity(0.12)))
+                        pluginVersionBadge(for: .wifiLatency, tint: .teal, enabled: enabled)
 
                         Spacer()
 
@@ -468,12 +468,7 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("v0.1.2")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(enabled ? Color.purple : theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill((enabled ? Color.purple : Color.gray).opacity(0.12)))
+                        pluginVersionBadge(for: .arpSniffer, tint: .purple, enabled: enabled)
 
                         Spacer()
 
@@ -555,12 +550,7 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("IOKit")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(enabled ? Color.orange : theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill((enabled ? Color.orange : Color.gray).opacity(0.12)))
+                        pluginVersionBadge(for: .upsManager, tint: .orange, enabled: enabled)
 
                         Spacer()
 
@@ -662,12 +652,7 @@ public struct PluginsDashboardView: View {
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        Text("ARM64")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(enabled ? Color.indigo : theme.secondaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill((enabled ? Color.indigo : Color.gray).opacity(0.12)))
+                        pluginVersionBadge(for: .antigravityContext, tint: .indigo, enabled: enabled)
 
                         Spacer()
 
@@ -740,6 +725,213 @@ public struct PluginsDashboardView: View {
         }
     }
 
+    private var aiToolCleanerCardContent: some View {
+        let enabled = toggles.enablePluginAIToolCleaner
+        let cleanableText = ByteCountFormatter.string(fromByteCount: aiCleanerManager.totalCleanableBytes, countStyle: .file)
+        let badgeColor: Color = {
+            if aiCleanerManager.isScanning { return .orange }
+            if aiCleanerManager.totalCleanableBytes > 0 { return .mint }
+            return .green
+        }()
+
+        let badgeText: String = {
+            if aiCleanerManager.isScanning { return "扫描中" }
+            if aiCleanerManager.lastScanDate == nil { return "待扫描" }
+            if aiCleanerManager.totalCleanableBytes > 0 { return "可释 \(cleanableText)" }
+            return "已洁净"
+        }()
+
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 14) {
+                PluginArtworkIconView(
+                    kind: .aiToolCleaner,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("AI 工具清理与维护")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+
+                        pluginVersionBadge(for: .aiToolCleaner, tint: .mint, enabled: enabled)
+
+                        Spacer()
+
+                        HStack(spacing: 8) {
+                            if enabled {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(badgeColor)
+                                        .frame(width: 6, height: 6)
+                                    Text(badgeText)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(badgeColor)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(badgeColor.opacity(0.12)))
+                            } else {
+                                pluginDisabledBadge
+                            }
+                            pluginCardToggle(for: .aiToolCleaner, tint: .mint)
+                        }
+                    }
+
+                    Text("Claude / Codex / Cursor / Ollama 缓存治理、对话修剪与 SQLite 压缩")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                }
+            }
+
+            Text("分层治理 AI 客户端缓存、超期对话备份、孤儿项目会话、Worktree 与 SQLite 数据库，与系统清理共享保护白名单。")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 0)
+
+            HStack {
+                if enabled {
+                    let toolsCount = aiCleanerManager.detectedToolNames.count
+                    if aiCleanerManager.isScanning {
+                        Text("正在扫描 AI 工具缓存与本地数据库...")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.orange)
+                    } else if aiCleanerManager.lastScanDate != nil {
+                        Text("已识别 \(toolsCount) 款 AI 工具 · 保护项 \(aiCleanerManager.protectedItemsCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    } else {
+                        Text("点击进入即可扫描 Claude / Codex / Ollama 等")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                } else {
+                    Text("模块未启用 · 零后台资源占用")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText.opacity(0.75))
+                }
+
+                Spacer()
+
+                HStack(spacing: 4) {
+                    Text(enabled ? "进入工作台" : "查看详情")
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(enabled ? Color.mint : theme.secondaryText)
+            }
+        }
+    }
+
+    private var softwareUpdaterCardContent: some View {
+        let enabled = toggles.enablePluginSoftwareUpdater
+        let availCount = updaterManager.totalAvailableUpdatesCount
+        let badgeColor: Color = {
+            if updaterManager.isScanning { return .orange }
+            if availCount > 0 { return .cyan }
+            return .green
+        }()
+
+        let badgeText: String = {
+            if updaterManager.isScanning { return "检查中" }
+            if updaterManager.lastScanDate == nil { return "待检测" }
+            if availCount > 0 { return "\(availCount) 项可更新" }
+            return "均已最新"
+        }()
+
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 14) {
+                PluginArtworkIconView(
+                    kind: .softwareUpdater,
+                    size: 58,
+                    isEnabled: enabled,
+                    forcedColorScheme: colorScheme
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("软件更新中心")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+
+                        pluginVersionBadge(for: .softwareUpdater, tint: .cyan, enabled: enabled)
+
+                        Spacer()
+
+                        HStack(spacing: 8) {
+                            if enabled {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(badgeColor)
+                                        .frame(width: 6, height: 6)
+                                    Text(badgeText)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(badgeColor)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(badgeColor.opacity(0.12)))
+                            } else {
+                                pluginDisabledBadge
+                            }
+                            pluginCardToggle(for: .softwareUpdater, tint: .cyan)
+                        }
+                    }
+
+                    Text("Sparkle / Electron / App Store / Homebrew 多源版本聚合与签名校验更新")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                }
+            }
+
+            Text("并发检测本机桌面应用、MAS 商店及 Homebrew Cask / CLI 公式更新，安装前自动校验代码签名与 Team ID 连续性。")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 0)
+
+            HStack {
+                if enabled {
+                    if updaterManager.isScanning {
+                        Text("正在检查本机应用与 CLI 公式新版本...")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Color.orange)
+                    } else if updaterManager.lastScanDate != nil {
+                        Text("可更新应用 \(updaterManager.visibleAppUpdates.count) 款 · CLI \(updaterManager.visibleFormulaUpdates.count) 项")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    } else {
+                        Text("点击进入即可扫描本机多渠道更新源")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                } else {
+                    Text("模块未启用 · 零后台资源占用")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText.opacity(0.75))
+                }
+
+                Spacer()
+
+                HStack(spacing: 4) {
+                    Text(enabled ? "进入工作台" : "查看详情")
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(enabled ? Color.cyan : theme.secondaryText)
+            }
+        }
+    }
+
     // MARK: - 二级页面分发器
 
     private func accentColor(for plugin: PluginModuleType) -> Color {
@@ -749,6 +941,8 @@ public struct PluginsDashboardView: View {
         case .arpSniffer: return .purple
         case .upsManager: return .orange
         case .antigravityContext: return .indigo
+        case .aiToolCleaner: return .mint
+        case .softwareUpdater: return .cyan
         }
     }
 
@@ -759,6 +953,8 @@ public struct PluginsDashboardView: View {
         case .arpSniffer: return "network"
         case .upsManager: return "battery.100.bolt"
         case .antigravityContext: return "sparkles"
+        case .aiToolCleaner: return "wand.and.sparkles.inverse"
+        case .softwareUpdater: return "arrow.triangle.2.circlepath.circle.fill"
         }
     }
 
@@ -769,6 +965,8 @@ public struct PluginsDashboardView: View {
         case .arpSniffer: return .arpSniffer
         case .upsManager: return .upsManager
         case .antigravityContext: return .antigravityContext
+        case .aiToolCleaner: return .aiToolCleaner
+        case .softwareUpdater: return .softwareUpdater
         }
     }
 
@@ -784,6 +982,10 @@ public struct PluginsDashboardView: View {
             return "按需启用后将开启 USB-HID 外置电源轮询与断电自动保护；未启用时，状态总览与菜单栏将默认显示 AC / 内置电池供电。"
         case .antigravityContext:
             return "按需启用后可使用纯 Swift 原生引擎解析并解除 Antigravity 语言服务的 256K 上下文上限，并自动记忆版本号以便更新后及时提醒重新解锁。"
+        case .aiToolCleaner:
+            return "按需启用后可扫描 Claude、Codex、ChatGPT、Cursor、Antigravity、Ollama 等 AI 工具缓存、超期对话（含备份恢复）与 SQLite 数据库压缩，且共享全盘清理保护白名单。"
+        case .softwareUpdater:
+            return "按需启用后将扫描 Sparkle Appcast、Electron / GitHub 发布源、Mac App Store 与 Homebrew Cask / CLI 公式更新，并在替换前执行代码签名及 Team ID 校验。"
         }
     }
 
@@ -993,6 +1195,10 @@ public struct PluginsDashboardView: View {
                     upsManagerDetailWorkstation
                 case .antigravityContext:
                     antigravityContextDetailWorkstation
+                case .aiToolCleaner:
+                    AIToolCleanerDetailView(theme: theme)
+                case .softwareUpdater:
+                    SoftwareUpdaterDetailView(theme: theme)
                 }
             }
         }
@@ -1091,12 +1297,7 @@ public struct PluginsDashboardView: View {
                                 .font(.system(size: 18, weight: .bold, design: .rounded))
                                 .foregroundStyle(theme.primaryText)
 
-                            Text("CoreWLAN")
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundStyle(Color.teal)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.teal.opacity(0.12)))
+                            pluginVersionBadge(for: .wifiLatency, tint: .teal, fontSize: 11)
                         }
 
                         Text("智能管理 Apple Wireless Direct Link (awdl0) 接口，彻底消除周期性信道漫游跳变")
@@ -1639,15 +1840,12 @@ public struct PluginsDashboardView: View {
         let row = HStack(spacing: 6) {
             Group {
                 if overflow > 1 {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                        Text(dev.vendor)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(theme.secondaryText)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .offset(x: vendorMarqueeOffset(overflow: overflow, date: context.date))
-                            .frame(width: maxInnerVendorW, alignment: .leading)
-                            .clipped()
-                    }
+                    Text(dev.vendor)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: maxInnerVendorW, alignment: .leading)
                 } else {
                     Text(dev.vendor)
                         .font(.system(size: 11, weight: .medium))
@@ -2607,16 +2805,13 @@ public struct PluginsDashboardView: View {
                         Text("PS Portal 串流画质增强")
                             .font(.system(size: 18, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
+                            .lineLimit(1)
 
-                        Text("v\(pluginManager.pluginVersion)")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundStyle(Color.blue)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.blue.opacity(0.12)))
+                        pluginVersionBadge(for: .psPortal, tint: .blue, fontSize: 11)
 
-                        if pluginManager.isListening {
+                        if pluginManager.engineState != .disabled {
                             statusBadgeView
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
 
@@ -2624,6 +2819,7 @@ public struct PluginsDashboardView: View {
                         Text("开源项目:")
                             .font(.system(size: 12))
                             .foregroundStyle(theme.secondaryText)
+                            .fixedSize(horizontal: true, vertical: false)
 
                         Button {
                             if let url = URL(string: pluginManager.pluginRepo) {
@@ -2634,6 +2830,7 @@ public struct PluginsDashboardView: View {
                                 Text("atameric/ps5-portal-high-bitrate")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(Color.cyan)
+                                    .lineLimit(1)
                                 Image(systemName: "arrow.up.right.square")
                                     .font(.system(size: 10))
                                     .foregroundStyle(Color.cyan)
@@ -2645,23 +2842,105 @@ public struct PluginsDashboardView: View {
                         Text("· 无需硬改与越狱，动态协议修改提升比特率")
                             .font(.system(size: 12))
                             .foregroundStyle(theme.secondaryText)
+                            .lineLimit(1)
                     }
 
-                    // 管理员特权注入说明
+                    // 实时运行状态提示语
                     HStack(spacing: 6) {
-                        Image(systemName: "checkmark.shield.fill")
+                        Image(systemName: pluginManager.isStreamActive ? "sparkles" : (pluginManager.autoWatchEnabled ? "eye.fill" : "checkmark.shield.fill"))
                             .font(.system(size: 11))
-                            .foregroundStyle(Color.blue)
-                        Text("管理员特权注入 (真实 ARP 伪装与比特率修改，点击启动需系统授权)")
+                            .foregroundStyle(pluginManager.isStreamActive ? Color.green : Color.blue)
+                        Text(pluginManager.engineState.subtitle(bitrateTag: pluginManager.targetBitrate.shortTag))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(theme.primaryText.opacity(0.9))
+                            .lineLimit(2)
                     }
                     .padding(.top, 2)
                 }
-
-                Spacer()
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 10) {
+                    // Debug 详细诊断开关胶囊
+                    Toggle(isOn: Binding(
+                        get: { pluginManager.debugModeEnabled },
+                        set: { pluginManager.setDebugModeEnabled($0) }
+                    )) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "ladybug.fill")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(pluginManager.debugModeEnabled ? Color.orange : theme.secondaryText)
+                            Text("Debug")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(pluginManager.debugModeEnabled ? Color.orange : theme.primaryText)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(pluginManager.debugModeEnabled ? Color.orange.opacity(0.14) : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)))
+                            .overlay(Capsule().strokeBorder(pluginManager.debugModeEnabled ? Color.orange.opacity(0.42) : theme.studioCardBorder, lineWidth: 0.8))
+                    )
+                    .help("开启后记录完整 ARP 包、分片重组与 UDP/9296 十六进制握手诊断日志，并同步写入 ~/Library/Logs/SysPulse/psportal.log")
+
+                    // 自动增强守望开关胶囊（纯旁路只读 BPF + 触发式按需激活）
+                    Toggle(isOn: Binding(
+                        get: { pluginManager.autoWatchEnabled },
+                        set: { pluginManager.setAutoWatchEnabled($0) }
+                    )) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "bolt.badge.automatic")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(pluginManager.autoWatchEnabled ? Color.blue : theme.secondaryText)
+                            Text("自动增强")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(pluginManager.autoWatchEnabled ? Color.blue : theme.primaryText)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(pluginManager.autoWatchEnabled ? Color.blue.opacity(0.12) : (colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)))
+                            .overlay(Capsule().strokeBorder(pluginManager.autoWatchEnabled ? Color.blue.opacity(0.35) : theme.studioCardBorder, lineWidth: 0.8))
+                    )
+                    .help("开启后采用零干扰只读 BPF 守望，Portal 唤醒连接 PS5 时自动激活高码率增强")
+
+                    if case .enhancingActive = pluginManager.engineState {
+                        Button {
+                            pluginManager.endEnhancementSession(reason: "用户手动重置画质增强会话状态")
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 11.5))
+                                Text("结束会话")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(Color.green.opacity(0.14))
+                                    .overlay(Capsule().strokeBorder(Color.green.opacity(0.35), lineWidth: 0.8))
+                            )
+                            .foregroundStyle(Color.green)
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+                    }
+
                     // 兜底复原网络直连入口
                     Button {
                         pluginManager.restoreNetworkDirect()
@@ -2671,6 +2950,8 @@ public struct PluginsDashboardView: View {
                                 .font(.system(size: 12))
                             Text("恢复直连")
                                 .font(.system(size: 12, weight: .medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 9)
@@ -2689,7 +2970,11 @@ public struct PluginsDashboardView: View {
                     // 一键启停主按钮
                     Button {
                         if pluginManager.isRunning {
-                            pluginManager.stopRelay()
+                            if pluginManager.autoWatchEnabled {
+                                pluginManager.setAutoWatchEnabled(false)
+                            } else {
+                                pluginManager.stopRelay()
+                            }
                         } else {
                             pluginManager.startRelay()
                         }
@@ -2697,8 +2982,10 @@ public struct PluginsDashboardView: View {
                         HStack(spacing: 8) {
                             Image(systemName: pluginManager.isRunning ? "stop.fill" : "play.fill")
                                 .font(.system(size: 13, weight: .bold))
-                            Text(pluginManager.isStopping ? "停止中..." : (pluginManager.isRunning ? "停止增强" : "启动画质增强"))
+                            Text(pluginManager.isStopping ? "停止中..." : (pluginManager.isRunning ? (pluginManager.autoWatchEnabled ? "停止守望" : "停止增强") : "启动画质增强"))
                                 .font(.system(size: 14, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
@@ -2720,6 +3007,8 @@ public struct PluginsDashboardView: View {
                     .pointingHandOnHover()
                     .disabled(pluginManager.isStopping)
                 }
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
             }
 
             if let errorText = pluginManager.lastError {
@@ -2957,52 +3246,61 @@ public struct PluginsDashboardView: View {
 
                     // 扫描到的 Sony 设备快捷填入条
                     let sonyDevices = pluginManager.discoveredDevices.filter { $0.isLikelySony }
-                    Group {
+                    HStack(spacing: 8) {
                         if !sonyDevices.isEmpty {
-                            HStack(spacing: 8) {
-                                Text("检测到 Sony 设备:")
-                                    .font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle(theme.secondaryText)
+                            Text("检测到 Sony 设备:")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(theme.secondaryText)
 
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 6) {
-                                        ForEach(sonyDevices) { dev in
-                                            Menu {
-                                                Button("设为 PS5 IP (\(dev.ip))") {
-                                                    pluginManager.ps5IP = dev.ip
-                                                    pluginManager.saveConfig()
-                                                }
-                                                Button("设为 PS Portal IP (\(dev.ip))") {
-                                                    pluginManager.portalIP = dev.ip
-                                                    pluginManager.saveConfig()
-                                                }
-                                            } label: {
-                                                let isPS5Role = dev.role == .ps5Host
-                                                let roleTag = isPS5Role ? "PS5" : (dev.role == .portalClient ? "Portal" : "Sony")
-                                                let iconName = isPS5Role ? "tv.fill" : "gamecontroller.fill"
-                                                let tintColor: Color = isPS5Role ? .blue : .indigo
-                                                HStack(spacing: 4.5) {
-                                                    Image(systemName: iconName)
-                                                        .font(.system(size: 10.5))
-                                                    Text("\(roleTag) · \(dev.ip)")
-                                                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                                                }
-                                                .foregroundStyle(tintColor)
-                                                .padding(.horizontal, 9)
-                                                .padding(.vertical, 4)
-                                                .background(
-                                                    Capsule()
-                                                        .fill(tintColor.opacity(0.12))
-                                                        .overlay(Capsule().strokeBorder(tintColor.opacity(0.3), lineWidth: 0.8))
-                                                )
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 6) {
+                                    ForEach(sonyDevices) { dev in
+                                        Menu {
+                                            Button("设为 PS5 IP (\(dev.ip))") {
+                                                pluginManager.bindDiscoveredDevice(dev, as: .ps5Host)
                                             }
-                                            .buttonStyle(.plain)
-                                            .pointingHandOnHover()
-                                            .disabled(pluginManager.isRunning || pluginManager.isStopping)
+                                            Button("设为 PS Portal IP (\(dev.ip))") {
+                                                pluginManager.bindDiscoveredDevice(dev, as: .portalClient)
+                                            }
+                                            if let iface = dev.interfaceName, iface != pluginManager.selectedInterface {
+                                                Button("切换至所在网卡 (\(iface))") {
+                                                    pluginManager.selectInterface(iface)
+                                                }
+                                            }
+                                        } label: {
+                                            let isPS5Role = dev.role == .ps5Host
+                                            let roleTag = isPS5Role ? "PS5" : (dev.role == .portalClient ? "Portal" : "Sony")
+                                            let iconName = isPS5Role ? "tv.fill" : "gamecontroller.fill"
+                                            let tintColor: Color = isPS5Role ? .blue : .indigo
+                                            let crossIface = dev.interfaceName != nil && dev.interfaceName != pluginManager.selectedInterface
+                                            HStack(spacing: 4.5) {
+                                                Image(systemName: iconName)
+                                                    .font(.system(size: 10.5))
+                                                Text("\(roleTag) · \(dev.ip)")
+                                                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                                                if crossIface, let iface = dev.interfaceName {
+                                                    Text("(\(iface))")
+                                                        .font(.system(size: 10, design: .monospaced))
+                                                        .foregroundStyle(Color.orange)
+                                                }
+                                            }
+                                            .foregroundStyle(tintColor)
+                                            .padding(.horizontal, 9)
+                                            .padding(.vertical, 4)
+                                            .background(
+                                                Capsule()
+                                                    .fill(tintColor.opacity(0.12))
+                                                    .overlay(Capsule().strokeBorder(tintColor.opacity(0.3), lineWidth: 0.8))
+                                            )
                                         }
+                                        .buttonStyle(.plain)
+                                        .pointingHandOnHover()
+                                        .disabled(pluginManager.isRunning || pluginManager.isStopping)
+                                        .help(dev.matchReasons.isEmpty ? dev.label : "\(dev.label) · 依据: \(dev.matchReasons.joined(separator: ", "))")
                                     }
                                 }
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             HStack(spacing: 6) {
                                 Image(systemName: "info.circle")
@@ -3027,30 +3325,44 @@ public struct PluginsDashboardView: View {
         )
     }
 
-    // MARK: - 状态指示徽章 (仅在实时监听握手阶段展示)
+    // MARK: - 状态指示徽章 (方案 A 全状态周期)
+
+    private var statusBadgeColor: Color {
+        switch pluginManager.engineState {
+        case .disabled:
+            return .gray
+        case .idle:
+            return .blue
+        case .authorizing, .starting, .autoBursting, .manualListening, .stopping:
+            return .orange
+        case .autoWatching:
+            return .cyan
+        case .enhancingActive:
+            return .green
+        case .suspendedOutOfLAN, .needsConfiguration, .deviceOffline, .alreadyStreamingHint:
+            return .yellow
+        case .error:
+            return .red
+        }
+    }
 
     private var statusBadgeView: some View {
-        HStack(spacing: 6) {
+        let tint = statusBadgeColor
+        return HStack(spacing: 6) {
             Circle()
-                .fill(Color.orange)
-                .frame(width: 8, height: 8)
+                .fill(tint)
+                .frame(width: 7, height: 7)
 
-            if let remaining = pluginManager.listenRemainingSeconds {
-                Text("正在监听握手 · \(remaining)s")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(Color.orange)
-            } else {
-                Text("正在准备路径...")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color.orange)
-            }
+            Text(pluginManager.engineState.badgeText)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(tint)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(
             Capsule()
-                .fill(Color.orange.opacity(0.12))
+                .fill(tint.opacity(0.13))
         )
     }
 
@@ -3067,14 +3379,29 @@ public struct PluginsDashboardView: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(theme.primaryText)
 
-                    if pluginManager.isListening {
+                    if pluginManager.engineState != .disabled {
                         statusBadgeView
                     }
                 }
 
                 Spacer()
 
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    Button {
+                        pluginManager.openDebugLogFile()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 11))
+                            Text("定位日志文件")
+                                .font(.system(size: 11))
+                        }
+                        .foregroundStyle(pluginManager.debugModeEnabled ? Color.orange : theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .help("在访达中定位 ~/Library/Logs/SysPulse/psportal.log")
+
                     Button {
                         pluginManager.copyLogs()
                     } label: {
@@ -3106,46 +3433,7 @@ public struct PluginsDashboardView: View {
             }
 
             // 控制台视窗 (顶部对齐，超过视口自动向下滚动)
-            ScrollViewReader { proxy in
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if pluginManager.logs.isEmpty {
-                            Text("等待插件执行，日志输出将实时显示于此...")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(Color.white.opacity(0.55))
-                                .padding(.vertical, 8)
-                        } else {
-                            let activeReadyId = pluginManager.logs.last(where: { $0.text.hasPrefix("[准备] ⚡️ 网络协商就绪") })?.id
-                            ForEach(pluginManager.logs) { entry in
-                                let displayLine: String = {
-                                    if pluginManager.isListening,
-                                       entry.id == activeReadyId,
-                                       let remaining = pluginManager.listenRemainingSeconds {
-                                        return "[准备] ⚡️ 网络协商就绪！请在 \(remaining) 秒内在 Portal 上点击连接 PS5..."
-                                    }
-                                    return entry.text
-                                }()
-                                Text(displayLine)
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .monospacedDigit()
-                                    .foregroundStyle(logColor(for: displayLine))
-                                    .textSelection(.enabled)
-                                    .id(entry.id)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(10)
-                    .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
-                }
-                .onChange(of: pluginManager.logs.last?.id) { _, lastId in
-                    if let lastId {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo(lastId, anchor: .bottom)
-                        }
-                    }
-                }
-            }
+            portalLogConsole
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(colorScheme == .dark ? 0.45 : 0.85))
@@ -3158,6 +3446,100 @@ public struct PluginsDashboardView: View {
                 .fill(theme.studioCardFill)
                 .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
         )
+    }
+
+    private var portalLogConsole: some View {
+        let activeBurstId = pluginManager.logs.last(where: { $0.text.hasPrefix("[指引] 🎮 已检测到 Portal 唤醒并开启增强通道") })?.id
+        let activeReadyId = pluginManager.logs.last(where: {
+            $0.text.hasPrefix("[就绪] 🎮 增强通道已就绪") || $0.text.hasPrefix("[准备] ⚡️ 网络协商就绪")
+        })?.id
+        let activeCooldownId = pluginManager.logs.last(where: { $0.text.hasPrefix("[守望] ⏸ 本轮 120 秒窗口内暂未收到连接握手") })?.id
+
+        return ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if pluginManager.logs.isEmpty {
+                            Text("等待插件执行，日志输出将实时显示于此...")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Color.white.opacity(0.55))
+                                .padding(.vertical, 8)
+                        } else {
+                            ForEach(pluginManager.logs) { entry in
+                                let displayLine = portalLogDisplayLine(
+                                    for: entry,
+                                    activeBurstId: activeBurstId,
+                                    activeReadyId: activeReadyId,
+                                    activeCooldownId: activeCooldownId
+                                )
+                                Text(displayLine)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(logColor(for: displayLine))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .id(entry.id)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding([.horizontal, .top], 10)
+                    .padding(.bottom, 9)
+                    .frame(maxWidth: .infinity, minHeight: 179, alignment: .topLeading)
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("portal_log_bottom")
+                }
+                .onGeometryChange(for: CGFloat.self) { geo in
+                    geo.size.height
+                } action: { _, _ in
+                    guard !pluginManager.logs.isEmpty,
+                          Date().timeIntervalSince(pluginManager.lastLogAppendAt) < 0.6 else { return }
+                    proxy.scrollTo("portal_log_bottom", anchor: .bottom)
+                }
+            }
+            .onAppear {
+                guard !pluginManager.logs.isEmpty else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo("portal_log_bottom", anchor: .bottom)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    proxy.scrollTo("portal_log_bottom", anchor: .bottom)
+                }
+            }
+            .onChange(of: pluginManager.logs.last?.id) { _, lastId in
+                guard lastId != nil else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo("portal_log_bottom", anchor: .bottom)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                    proxy.scrollTo("portal_log_bottom", anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private func portalLogDisplayLine(
+        for entry: PortalLogEntry,
+        activeBurstId: UUID?,
+        activeReadyId: UUID?,
+        activeCooldownId: UUID?
+    ) -> String {
+        if pluginManager.isListening, let remaining = pluginManager.listenRemainingSeconds {
+            if entry.id == activeBurstId {
+                return "[指引] 🎮 已检测到 Portal 唤醒并开启增强通道！请在 \(remaining) 秒内于 Portal 上点击「连接 PS5」。"
+            }
+            if entry.id == activeReadyId {
+                return "[就绪] 🎮 增强通道已就绪！现在请在 \(remaining) 秒内于 PS Portal 上点击连接 PS5。"
+            }
+        }
+        if let cooldown = pluginManager.cooldownRemainingSeconds,
+           cooldown > 0,
+           entry.id == activeCooldownId {
+            return "[守望] ⏸ 本轮 120 秒窗口内暂未收到连接握手，已恢复直连路由。请等待 \(cooldown) 秒冷却结束后再用 Portal 连接。"
+        }
+        return entry.text
     }
 
     private func activeInterfaceSelector(
@@ -3634,13 +4016,16 @@ public struct PluginsDashboardView: View {
     }
 
     private func logColor(for line: String) -> Color {
-        if line.contains("[成功]") || line.contains("[ACCEPTED]") || line.contains("[ACTIVE]") || line.contains("[SUCCESS]") || line.contains("🎉") || line.contains("✅") {
+        if line.contains("[DEBUG") {
+            return Color.orange.opacity(0.92)
+        }
+        if line.contains("[成功]") || line.contains("[就绪]") || line.contains("[ACCEPTED]") || line.contains("[ACTIVE]") || line.contains("[SUCCESS]") || line.contains("🎉") || line.contains("✅") {
             return Color.green
         }
         if line.contains("[注入]") || line.contains("[响应]") || line.contains("[路由]") || line.contains("[识别]") || line.contains("[PATCH]") || line.contains("[FORWARD]") || line.contains("🚀") || line.contains("🎯") {
             return Color.cyan
         }
-        if line.contains("[警告]") || line.contains("[准备]") || line.contains("[诊断]") || line.contains("[WARNING]") || line.contains("[WAITING]") || line.contains("⚡️") || line.contains("⚠️") {
+        if line.contains("[警告]") || line.contains("[准备]") || line.contains("[指引]") || line.contains("[诊断]") || line.contains("[WARNING]") || line.contains("[WAITING]") || line.contains("⚡️") || line.contains("⚠️") {
             return Color.yellow
         }
         if line.contains("[错误]") || line.contains("[失败]") || line.contains("[ERROR]") || line.contains("❌") || line.contains("Traceback") || line.contains("Error") {

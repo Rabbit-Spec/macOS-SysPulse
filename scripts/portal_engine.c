@@ -22,6 +22,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <libproc.h>
+#include <ctype.h>
 
 #define SYS_SUPPORT_DIR "/Library/Application Support/SysPulse"
 #define PRIVILEGED_ENGINE_PREFIX "/Library/Application Support/SysPulse/"
@@ -30,6 +32,11 @@
 #define BPF_BUF_LEN 65536
 #define OFFSET 334
 #define MAX_SEEN_SEQS 128
+#define FRAG_SLOTS 8
+#define MAX_FRAGS_PER_PKT 8
+#define FRAG_MAX_FRAME_LEN 2048
+#define FRAG_ASSEMBLE_CAP 4096
+#define FRAG_TIMEOUT_SEC 0.35
 
 #pragma pack(push, 1)
 struct eth_header {
@@ -94,6 +101,68 @@ static int g_orig_redirect = -1;
 static int g_orig_forwarding = -1;
 static int g_mode_oneway = 1;
 static int g_spoof_active = 0;
+static int g_watch_mode = 0;
+static int g_debug_mode = 0;
+static double g_engine_t0 = 0.0;
+static pid_t g_parent_pid = 0;
+
+static void emit_event(const char *fmt, ...) {
+    va_list ap;
+    printf("[EVENT] ");
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+    fflush(stdout);
+}
+
+static double monotonic_seconds(void);
+
+static void debug_log(const char *fmt, ...) {
+    if (!g_debug_mode) return;
+    double elapsed = (g_engine_t0 > 0.0) ? (monotonic_seconds() - g_engine_t0) : 0.0;
+    printf("[DEBUG +%.3fs] ", elapsed);
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+    fflush(stdout);
+}
+
+static void debug_hex_prefix(const uint8_t *buf, size_t len, char *out, size_t out_cap) {
+    size_t n = len < 32 ? len : 32;
+    size_t pos = 0;
+    if (out_cap == 0) return;
+    out[0] = '\0';
+    for (size_t i = 0; i < n && pos + 3 < out_cap; i++) {
+        pos += (size_t)snprintf(out + pos, out_cap - pos, "%s%02x", (i > 0 && (i % 4 == 0)) ? " " : "", buf[i]);
+    }
+}
+
+typedef struct {
+    int in_use;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint16_t ip_id;
+    uint8_t proto;
+    double created_at;
+    int is_udp_9296;
+    int non_9296;
+    int has_last;
+    size_t expected_ip_payload_len;
+    int frag_count;
+    struct {
+        uint8_t frame[FRAG_MAX_FRAME_LEN];
+        size_t frame_len;
+        size_t ip_hl;
+        size_t frag_off_bytes;
+        size_t payload_len;
+        int more_frags;
+    } frags[MAX_FRAGS_PER_PKT];
+} FragReassemblySlot;
+
+static FragReassemblySlot g_frag_slots[FRAG_SLOTS];
 
 static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -219,13 +288,65 @@ static int get_interface_mac_and_ip(const char *ifname, uint8_t mac[6], uint32_t
     return found_mac ? 0 : -1;
 }
 
-static void configure_bpf_filter(int fd, uint32_t ps5_ip_net, uint32_t portal_ip_net) {
+static void configure_bpf_filter_ex(int fd, uint32_t ps5_ip_net, uint32_t portal_ip_net, int include_discovery, int no_flush) {
     if (ps5_ip_net == 0 || portal_ip_net == 0) return;
 
     uint32_t ps5_h = ntohl(ps5_ip_net);
     uint32_t portal_h = ntohl(portal_ip_net);
+    unsigned long cmd = no_flush ? BIOCSETFNR : BIOCSETF;
 
-    /* 内核级 BPF 过滤：仅放行 ARP (0x0806) 与 PS5 <-> Portal 之间的全端口 IPv4 (0x0800) 帧 */
+    if (include_discovery) {
+        /* 哨兵模式统一过滤：放行 ARP (0x0806)、PS5 <-> Portal IPv4、以及任意源广播/单播 UDP 9302/67 (0x0800) */
+        struct bpf_insn insns[] = {
+            /* 0: 读取 EtherType (offset 12, 2 bytes) */
+            BPF_STMT(BPF_LD + BPF_H + BPF_ABS, 12),
+            /* 1: ARP (0x0806) -> ACCEPT (idx 18) */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, 0x0806, 16, 0),
+            /* 2: IPv4 (0x0800) -> next (idx 3), else DROP (idx 19) */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, 0x0800, 0, 16),
+            /* 3: 读取 IPv4 源地址 (offset 26) */
+            BPF_STMT(BPF_LD + BPF_W + BPF_ABS, 26),
+            /* 4: src == PS5 -> 5, else 7 */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, ps5_h, 0, 2),
+            /* 5: dst */
+            BPF_STMT(BPF_LD + BPF_W + BPF_ABS, 30),
+            /* 6: dst == Portal -> ACCEPT (18), else 10 */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, portal_h, 11, 3),
+            /* 7: src == Portal -> 8, else 10 */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, portal_h, 0, 2),
+            /* 8: dst */
+            BPF_STMT(BPF_LD + BPF_W + BPF_ABS, 30),
+            /* 9: dst == PS5 -> ACCEPT (18), else 10 */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, ps5_h, 8, 0),
+            /* 10: ip.proto (offset 23) */
+            BPF_STMT(BPF_LD + BPF_B + BPF_ABS, 23),
+            /* 11: UDP (17) -> 12, else DROP (19) */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, 17, 0, 7),
+            /* 12: ip.frag_off (offset 20) */
+            BPF_STMT(BPF_LD + BPF_H + BPF_ABS, 20),
+            /* 13: frag_off & 0x1FFF != 0 -> DROP (19), else 14 */
+            BPF_JUMP(BPF_JMP + BPF_JSET + BPF_K, 0x1FFF, 5, 0),
+            /* 14: X = IP header length */
+            BPF_STMT(BPF_LDX + BPF_B + BPF_MSH, 14),
+            /* 15: A = UDP dport (14 + X + 2) */
+            BPF_STMT(BPF_LD + BPF_H + BPF_IND, 16),
+            /* 16: dport == 9302 -> ACCEPT (18), else 17 */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, 9302, 1, 0),
+            /* 17: dport == 67 -> ACCEPT (18), else DROP (19) */
+            BPF_JUMP(BPF_JMP + BPF_JEQ + BPF_K, 67, 0, 1),
+            /* 18: ACCEPT */
+            BPF_STMT(BPF_RET + BPF_K, (u_int)-1),
+            /* 19: DROP */
+            BPF_STMT(BPF_RET + BPF_K, 0)
+        };
+        struct bpf_program prog;
+        prog.bf_len = (u_int)(sizeof(insns) / sizeof(insns[0]));
+        prog.bf_insns = insns;
+        ioctl(fd, cmd, &prog);
+        return;
+    }
+
+    /* 手动模式窄过滤：仅放行 ARP (0x0806) 与 PS5 <-> Portal 之间的全端口 IPv4 (0x0800) 帧 */
     struct bpf_insn insns[] = {
         /* 0: 读取 EtherType (offset 12, 2 bytes) */
         BPF_STMT(BPF_LD + BPF_H + BPF_ABS, 12),
@@ -256,7 +377,11 @@ static void configure_bpf_filter(int fd, uint32_t ps5_ip_net, uint32_t portal_ip
     struct bpf_program prog;
     prog.bf_len = (u_int)(sizeof(insns) / sizeof(insns[0]));
     prog.bf_insns = insns;
-    ioctl(fd, BIOCSETF, &prog);
+    ioctl(fd, cmd, &prog);
+}
+
+static void configure_bpf_filter(int fd, uint32_t ps5_ip_net, uint32_t portal_ip_net) {
+    configure_bpf_filter_ex(fd, ps5_ip_net, portal_ip_net, g_watch_mode, 0);
 }
 
 static int open_bpf_device(const char *ifname, uint32_t ps5_ip_net, uint32_t portal_ip_net) {
@@ -453,7 +578,7 @@ static void ping_hosts_parallel(const char *ip1, const char *ip2) {
                 dup2(devnull, STDERR_FILENO);
                 if (devnull > 2) close(devnull);
             }
-            char *const argv[] = { "/sbin/ping", "-c", "1", "-W", "200", (char *)ips[i], NULL };
+            char *const argv[] = { "/sbin/ping", "-c", "1", "-W", "1000", (char *)ips[i], NULL };
             execv("/sbin/ping", argv);
             _exit(127);
         }
@@ -467,11 +592,13 @@ static void ping_hosts_parallel(const char *ip1, const char *ip2) {
     }
 }
 
-static void check_route_for_ip(const char *label, const char *ip_str, const char *expected_iface) {
-    if (!ip_str || !ip_str[0]) return;
+static int check_route_for_ip(const char *label, const char *ip_str, const char *expected_iface, char *actual_iface_out, size_t actual_cap, int *has_gw_out) {
+    if (actual_iface_out && actual_cap > 0) actual_iface_out[0] = '\0';
+    if (has_gw_out) *has_gw_out = 0;
+    if (!ip_str || !ip_str[0]) return 0;
     char out[4096];
     char *const argv[] = { "/sbin/route", "-n", "get", (char *)ip_str, NULL };
-    if (run_argv_capture("/sbin/route", argv, out, sizeof(out)) != 0 || !out[0]) return;
+    if (run_argv_capture("/sbin/route", argv, out, sizeof(out)) != 0 || !out[0]) return 0;
 
     char route_iface[64] = "";
     int has_gateway_flag = 0;
@@ -488,6 +615,11 @@ static void check_route_for_ip(const char *label, const char *ip_str, const char
         }
     }
 
+    if (actual_iface_out && actual_cap > 0 && route_iface[0]) {
+        snprintf(actual_iface_out, actual_cap, "%s", route_iface);
+    }
+    if (has_gw_out) *has_gw_out = has_gateway_flag;
+
     if (has_gateway_flag || (route_iface[0] && strcmp(route_iface, expected_iface) != 0)) {
         printf("[诊断] ⚠️ %s (%s) 系统路由为 %s%s，与当前选择网卡 %s 不一致！\n",
                label,
@@ -496,13 +628,17 @@ static void check_route_for_ip(const char *label, const char *ip_str, const char
                has_gateway_flag ? " (经过网关/非直连子网)" : "",
                expected_iface);
         fflush(stdout);
+        emit_event("{\"type\":\"route_mismatch\",\"target\":\"%s\",\"ip\":\"%s\",\"actual_iface\":\"%s\",\"gateway\":%d}",
+                   label, ip_str, route_iface[0] ? route_iface : "", has_gateway_flag);
+        return -1;
     }
+    return 0;
 }
 
 static int resolve_mac_via_arp(const char *ip_str, const char *expected_iface, uint8_t mac[6], int send_ping) {
     if (!ip_str || !ip_str[0]) return -1;
     if (send_ping) {
-        char *const ping_argv[] = { "/sbin/ping", "-c", "1", "-W", "200", (char *)ip_str, NULL };
+        char *const ping_argv[] = { "/sbin/ping", "-c", "1", "-W", "1000", (char *)ip_str, NULL };
         run_argv_quiet("/sbin/ping", ping_argv);
     }
 
@@ -612,34 +748,16 @@ static int load_restore_state(void) {
     return 0;
 }
 
-static void restore_network_state(int force_arp) {
-    if (g_bpf_fd >= 0 && g_has_ps5_mac && g_has_portal_mac && g_ps5_ip && g_portal_ip && (g_spoof_active || force_arp)) {
-        for (int i = 0; i < 5; i++) {
-            send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_ps5_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
-            if (!g_mode_oneway || force_arp) {
-                send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_portal_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
-            }
-            usleep(60000);
-        }
-    }
+static void restore_arp_to_direct(int force_arp);
 
-    if (g_orig_redirect >= 0) {
-        int mib[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS };
-        sysctl(mib, 4, NULL, NULL, &g_orig_redirect, sizeof(g_orig_redirect));
-        g_orig_redirect = -1;
-    }
-    if (g_orig_forwarding >= 0) {
-        int mib_fwd[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_FORWARDING };
-        sysctl(mib_fwd, 4, NULL, NULL, &g_orig_forwarding, sizeof(g_orig_forwarding));
-        g_orig_forwarding = -1;
-    }
+static void restore_network_state(int force_arp) {
+    restore_arp_to_direct(force_arp);
 
     if (g_bpf_fd >= 0) {
         close(g_bpf_fd);
         g_bpf_fd = -1;
     }
     unlink(PID_FILE);
-    unlink(STATE_FILE);
 }
 
 static int read_varint(const uint8_t *buf, size_t len, size_t *pos, uint64_t *val) {
@@ -655,6 +773,95 @@ static int read_varint(const uint8_t *buf, size_t len, size_t *pos, uint64_t *va
         }
     }
     return -1;
+}
+
+static int mutate_launchspec_adaptive(uint8_t *f3_b64, size_t avail_len, uint64_t f3_size, const char *profile_num, char *diag_buf, size_t diag_cap) {
+    size_t scan_b64 = f3_size < avail_len ? (size_t)f3_size : avail_len;
+    if (scan_b64 > 3072) scan_b64 = 3072;
+    scan_b64 = (scan_b64 / 4) * 4;
+    if (scan_b64 < 64) {
+        if (diag_buf && !diag_buf[0]) snprintf(diag_buf, diag_cap, "adaptive_short=%zu", scan_b64);
+        return 0;
+    }
+
+    uint8_t dec[2304];
+    size_t dec_len = 0;
+    for (size_t i = 0; i + 4 <= scan_b64 && dec_len + 3 <= sizeof(dec); i += 4) {
+        if (f3_b64[i + 2] == '=' || f3_b64[i + 3] == '=') break;
+        if (b64_decode_4((const char *)(f3_b64 + i), dec + dec_len) != 0) break;
+        dec_len += 3;
+    }
+    if (dec_len < 32) {
+        if (diag_buf && !diag_buf[0]) snprintf(diag_buf, diag_cap, "adaptive_b64_err dec=%zu", dec_len);
+        return 0;
+    }
+
+    const char *needle = "\"bwKbpsSent\":";
+    size_t needle_len = strlen(needle);
+    size_t found_pos = SIZE_MAX;
+    for (size_t i = 0; i + needle_len < dec_len; i++) {
+        if (memcmp(dec + i, needle, needle_len) == 0) {
+            found_pos = i + needle_len;
+            break;
+        }
+    }
+    if (found_pos == SIZE_MAX) {
+        if (diag_buf && !diag_buf[0]) snprintf(diag_buf, diag_cap, "adaptive_no_bwkey dec=%zu", dec_len);
+        return 0;
+    }
+
+    while (found_pos < dec_len && (dec[found_pos] == ' ' || dec[found_pos] == '\t')) found_pos++;
+    size_t tok_end = found_pos;
+    while (tok_end < dec_len) {
+        uint8_t ch = dec[tok_end];
+        if ((ch >= '0' && ch <= '9') || ch == 'e' || ch == 'E' || ch == '+' || ch == '-' || ch == '.') {
+            tok_end++;
+        } else {
+            break;
+        }
+    }
+    size_t tok_len = tok_end - found_pos;
+    if (tok_len < 4) {
+        if (diag_buf && !diag_buf[0]) snprintf(diag_buf, diag_cap, "adaptive_tok_short=%zu", tok_len);
+        return 0;
+    }
+
+    char orig_tok[24] = "";
+    size_t copy_len = tok_len < sizeof(orig_tok) - 1 ? tok_len : sizeof(orig_tok) - 1;
+    memcpy(orig_tok, dec + found_pos, copy_len);
+    orig_tok[copy_len] = '\0';
+
+    char replacement[16];
+    memset(replacement, ' ', sizeof(replacement));
+    if (tok_len == 4) {
+        if (strcmp(profile_num, "65") == 0) memcpy(replacement, "65e3", 4);
+        else if (strcmp(profile_num, "200") == 0) memcpy(replacement, "2e+5", 4);
+        else memcpy(replacement, "1e+5", 4);
+    } else if (tok_len == 5) {
+        if (strcmp(profile_num, "65") == 0) memcpy(replacement, "65000", 5);
+        else if (strcmp(profile_num, "200") == 0) memcpy(replacement, "2e+05", 5);
+        else memcpy(replacement, "1e+05", 5);
+    } else {
+        const char *num = (strcmp(profile_num, "65") == 0) ? "65000"
+                        : ((strcmp(profile_num, "200") == 0) ? "200000" : "100000");
+        size_t nlen = strlen(num);
+        if (nlen > tok_len) return 0;
+        memcpy(replacement, num, nlen);
+    }
+    memcpy(dec + found_pos, replacement, tok_len);
+    debug_log("adaptive LaunchSpec: pos=%zu orig_bw=%s -> new_len=%zu (profile=%s)",
+              found_pos, orig_tok, tok_len, profile_num);
+
+    size_t lo = (found_pos / 3) * 3;
+    size_t hi = ((tok_end + 2) / 3) * 3;
+    size_t b64_start = (lo / 3) * 4;
+    size_t b64_end = (hi / 3) * 4;
+    if (hi > dec_len || b64_end > scan_b64) return 0;
+
+    for (size_t i = lo, j = b64_start; i < hi; i += 3, j += 4) {
+        b64_encode_4(dec + i, (char *)(f3_b64 + j));
+    }
+    return 1;
 }
 
 static int mutate_launchspec(uint8_t *data, size_t len, const char *profile_num, char *diag_buf, size_t diag_cap) {
@@ -692,7 +899,7 @@ static int mutate_launchspec(uint8_t *data, size_t len, const char *profile_num,
         if (diag_buf) snprintf(diag_buf, diag_cap, "varint_ver len=%zu", len);
         return 0;
     }
-    if (tag != 8 || version != 20) {
+    if (tag != 8 || version < 18 || version > 32) {
         if (diag_buf) {
             snprintf(diag_buf, diag_cap, "ver_tag len=%zu tag=%llu ver=%llu",
                      len, (unsigned long long)tag, (unsigned long long)version);
@@ -722,52 +929,53 @@ static int mutate_launchspec(uint8_t *data, size_t len, const char *profile_num,
         }
         /* Takion 应用层会把 2296 字节的 field=3 分片到两个 1226B UDP 包中，目标偏移 556..564 位于首包内，故仅校验实际读写边界 */
         if ((tag >> 3) == 3) {
-            if (size != 2296) {
-                if (diag_buf) {
-                    snprintf(diag_buf, diag_cap, "f3_size len=%zu f3_size=%llu (expected 2296)",
-                             len, (unsigned long long)size);
-                }
-                return 0;
-            }
-            size_t lo = 333;
-            size_t a = pos + (lo / 3 * 4);
+            if (version == 20 && size == 2296) {
+                size_t lo = 333;
+                size_t a = pos + (lo / 3 * 4);
 
-            if (strcmp(profile_num, "65") == 0) {
-                size_t b = pos + 448;
-                if (b > len) return 0;
-                uint8_t raw[3];
-                if (b64_decode_4((char *)(data + a), raw) != 0) {
-                    if (diag_buf) snprintf(diag_buf, diag_cap, "b64_65_err len=%zu", len);
-                    return 0;
+                if (strcmp(profile_num, "65") == 0) {
+                    size_t b = pos + 448;
+                    if (b <= len) {
+                        uint8_t raw[3];
+                        if (b64_decode_4((char *)(data + a), raw) == 0) {
+                            raw[1] ^= 0x04;
+                            b64_encode_4(raw, (char *)(data + a));
+                            return 1;
+                        }
+                    }
+                } else if (strcmp(profile_num, "200") == 0) {
+                    size_t b = pos + 452;
+                    if (b <= len) {
+                        uint8_t raw[6];
+                        if (b64_decode_8((char *)(data + a), raw) == 0) {
+                            uint8_t delta[5] = { 0x00, 0x50, 0x1b, 0x00, 0x05 };
+                            for (int i = 0; i < 5; i++) raw[1 + i] ^= delta[i];
+                            b64_encode_8(raw, (char *)(data + a));
+                            return 1;
+                        }
+                    }
+                } else {
+                    size_t b = pos + 452;
+                    if (b <= len) {
+                        uint8_t raw[6];
+                        if (b64_decode_8((char *)(data + a), raw) == 0) {
+                            uint8_t delta[5] = { 0x03, 0x50, 0x1b, 0x00, 0x05 };
+                            for (int i = 0; i < 5; i++) raw[1 + i] ^= delta[i];
+                            b64_encode_8(raw, (char *)(data + a));
+                            return 1;
+                        }
+                    }
                 }
-                raw[1] ^= 0x04;
-                b64_encode_4(raw, (char *)(data + a));
-                return 1;
-            } else if (strcmp(profile_num, "200") == 0) {
-                size_t b = pos + 452;
-                if (b > len) return 0;
-                uint8_t raw[6];
-                if (b64_decode_8((char *)(data + a), raw) != 0) {
-                    if (diag_buf) snprintf(diag_buf, diag_cap, "b64_200_err len=%zu", len);
-                    return 0;
-                }
-                uint8_t delta[5] = { 0x00, 0x50, 0x1b, 0x00, 0x05 };
-                for (int i = 0; i < 5; i++) raw[1 + i] ^= delta[i];
-                b64_encode_8(raw, (char *)(data + a));
-                return 1;
-            } else {
-                size_t b = pos + 452;
-                if (b > len) return 0;
-                uint8_t raw[6];
-                if (b64_decode_8((char *)(data + a), raw) != 0) {
-                    if (diag_buf) snprintf(diag_buf, diag_cap, "b64_100_err len=%zu", len);
-                    return 0;
-                }
-                uint8_t delta[5] = { 0x03, 0x50, 0x1b, 0x00, 0x05 };
-                for (int i = 0; i < 5; i++) raw[1 + i] ^= delta[i];
-                b64_encode_8(raw, (char *)(data + a));
+            }
+            /* 自适应 JSON 等长定位回退路径（兼容固件版本或偏移微调） */
+            if (mutate_launchspec_adaptive(data + pos, len - pos, size, profile_num, diag_buf, diag_cap)) {
                 return 1;
             }
+            if (diag_buf && !diag_buf[0]) {
+                snprintf(diag_buf, diag_cap, "f3_adaptive_miss len=%zu ver=%llu f3_size=%llu",
+                         len, (unsigned long long)version, (unsigned long long)size);
+            }
+            return 0;
         }
         if (size > len - pos) {
             if (diag_buf) {
@@ -883,6 +1091,9 @@ static void observe_ps5_message(const uint8_t *data, size_t len, ConfirmationSta
             st->accepted = (st->armed && key_acc == 1 && ver_acc == 1) ? 1 : 0;
             st->streaming = 0;
             st->samples = 0;
+            debug_log("PS5<-BANG ver=%llu key_acc=%llu ver_acc=%llu armed=%d accepted=%d",
+                      (unsigned long long)ver, (unsigned long long)key_acc,
+                      (unsigned long long)ver_acc, st->armed, st->accepted);
             if (st->accepted && !st->bang_printed) {
                 st->bang_printed = 1;
                 printf("[响应] 📡 收到 PS5 确认响应 (BANG v%llu · Key Accepted)\n", (unsigned long long)ver);
@@ -891,14 +1102,18 @@ static void observe_ps5_message(const uint8_t *data, size_t len, ConfirmationSta
         }
     } else if (kind == 13 && st->accepted) {
         st->streaming = 1;
+        debug_log("PS5<-STREAMINFO accepted=1 streaming=1");
     } else if (kind == 16 && f17_ptr) {
         uint64_t raw_target = 0;
         if (parse_submessage_varints(f17_ptr, f17_len, &raw_target, NULL, NULL) == 0) {
             if (raw_target > 0) st->last_target_raw = raw_target;
+            debug_log("PS5<-CONNECTIONQUALITY target_raw=%llu samples=%d armed=%d accepted=%d streaming=%d",
+                      (unsigned long long)raw_target, st->samples, st->armed, st->accepted, st->streaming);
             if (!st->armed && !st->early_warned) {
                 st->early_warned = 1;
                 printf("[警告] ⚠️ 检测到未修改的旧串流会话，请先断开 Portal 重试...\n");
                 fflush(stdout);
+                emit_event("{\"type\":\"already_streaming\",\"source\":\"ps5_telemetry\"}");
             }
             if (st->accepted && st->streaming) {
                 if (raw_target >= st->confirm_threshold) {
@@ -977,7 +1192,302 @@ static int install_sudoers_rule(const char *self_exe) {
     return 0;
 }
 
+static void disable_kernel_ip_bypass(void) {
+    int mib_redir[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS };
+    size_t len_redir = sizeof(g_orig_redirect);
+    if (g_orig_redirect < 0 && sysctl(mib_redir, 4, &g_orig_redirect, &len_redir, NULL, 0) == 0) {
+        if (g_orig_redirect != 0) {
+            int zero = 0;
+            sysctl(mib_redir, 4, NULL, NULL, &zero, sizeof(zero));
+        } else {
+            g_orig_redirect = -1;
+        }
+    }
+    int mib_fwd[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_FORWARDING };
+    size_t len_fwd = sizeof(g_orig_forwarding);
+    if (g_orig_forwarding < 0 && sysctl(mib_fwd, 4, &g_orig_forwarding, &len_fwd, NULL, 0) == 0) {
+        if (g_orig_forwarding != 0) {
+            int zero = 0;
+            sysctl(mib_fwd, 4, NULL, NULL, &zero, sizeof(zero));
+        } else {
+            g_orig_forwarding = -1;
+        }
+    }
+}
+
+static void restore_arp_to_direct(int force_arp) {
+    if (g_bpf_fd >= 0 && g_has_ps5_mac && g_has_portal_mac && g_ps5_ip && g_portal_ip && (g_spoof_active || force_arp)) {
+        for (int i = 0; i < 5; i++) {
+            send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_ps5_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
+            if (!g_mode_oneway || force_arp) {
+                send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_portal_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+            }
+            usleep(60000);
+        }
+    }
+    g_spoof_active = 0;
+    if (g_orig_redirect >= 0) {
+        int mib[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS };
+        sysctl(mib, 4, NULL, NULL, &g_orig_redirect, sizeof(g_orig_redirect));
+        g_orig_redirect = -1;
+    }
+    if (g_orig_forwarding >= 0) {
+        int mib_fwd[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_FORWARDING };
+        sysctl(mib_fwd, 4, NULL, NULL, &g_orig_forwarding, sizeof(g_orig_forwarding));
+        g_orig_forwarding = -1;
+    }
+    unlink(STATE_FILE);
+}
+
+static uint16_t udp_checksum_raw(uint32_t saddr, uint32_t daddr, const uint8_t *udp_bytes, size_t udp_len) {
+    struct udp_pseudo pseudo;
+    pseudo.src = saddr;
+    pseudo.dst = daddr;
+    pseudo.zero = 0;
+    pseudo.proto = IPPROTO_UDP;
+    pseudo.len = htons((uint16_t)udp_len);
+
+    uint8_t buf[sizeof(pseudo) + FRAG_ASSEMBLE_CAP];
+    if (udp_len > FRAG_ASSEMBLE_CAP) return 0;
+    memcpy(buf, &pseudo, sizeof(pseudo));
+    memcpy(buf + sizeof(pseudo), udp_bytes, udp_len);
+    uint16_t cs = calc_checksum(buf, sizeof(pseudo) + udp_len);
+    return (cs == 0) ? 0xFFFF : cs;
+}
+
+static void forward_out_frame(uint8_t *frame, size_t frame_len, uint64_t *fwd_out,
+                              uint64_t *write_err_cnt, int *last_write_errno) {
+    if (!g_has_ps5_mac || frame_len < sizeof(struct eth_header)) return;
+    struct eth_header *eth = (struct eth_header *)frame;
+    memcpy(eth->dst, g_ps5_mac, 6);
+    memcpy(eth->src, g_own_mac, 6);
+    ssize_t nw = write(g_bpf_fd, frame, frame_len);
+    if (nw > 0) {
+        if (fwd_out) (*fwd_out)++;
+    } else {
+        if (write_err_cnt) (*write_err_cnt)++;
+        if (last_write_errno) *last_write_errno = errno;
+    }
+}
+
+static void flush_frag_slot_raw(FragReassemblySlot *slot, uint64_t *fwd_out,
+                                uint64_t *write_err_cnt, int *last_write_errno) {
+    if (!slot || !slot->in_use) return;
+    for (int i = 0; i < slot->frag_count; i++) {
+        forward_out_frame(slot->frags[i].frame, slot->frags[i].frame_len, fwd_out, write_err_cnt, last_write_errno);
+    }
+    slot->in_use = 0;
+}
+
+static void expire_frag_slots(double now, uint64_t *fwd_out, uint64_t *write_err_cnt, int *last_write_errno) {
+    for (int i = 0; i < FRAG_SLOTS; i++) {
+        if (g_frag_slots[i].in_use && (now - g_frag_slots[i].created_at >= FRAG_TIMEOUT_SEC)) {
+            flush_frag_slot_raw(&g_frag_slots[i], fwd_out, write_err_cnt, last_write_errno);
+        }
+    }
+}
+
+static void reset_frag_slots(void) {
+    memset(g_frag_slots, 0, sizeof(g_frag_slots));
+}
+
+/* 处理分片 UDP 9296 LaunchSpec：集齐分片后在连续区改写并按原分片边界回填，失败则原样转发以免断流 */
+static void handle_fragmented_udp_out(
+    uint8_t *pkt, size_t frame_len, struct ip_header *ip, size_t ip_hl, size_t ip_tot,
+    double now, const char *profile_num,
+    uint8_t seen_seqs[MAX_SEEN_SEQS][8], int *unique_seqs,
+    int *first_mutated_announced, double *first_mutated_at,
+    ConfirmationState *conf, double *streaminfo_at,
+    uint64_t *unmatched_9296_large_out, char *first_unmatched_diag, size_t diag_cap,
+    uint64_t *fwd_out, uint64_t *write_err_cnt, int *last_write_errno
+) {
+    uint16_t frag_raw = ntohs(ip->frag_off);
+    size_t frag_off_bytes = (size_t)(frag_raw & 0x1FFF) * 8;
+    int more_frags = (frag_raw & 0x2000) ? 1 : 0;
+    size_t payload_len = ip_tot - ip_hl;
+
+    if (frame_len > FRAG_MAX_FRAME_LEN || frag_off_bytes + payload_len > FRAG_ASSEMBLE_CAP) {
+        forward_out_frame(pkt, frame_len, fwd_out, write_err_cnt, last_write_errno);
+        return;
+    }
+
+    FragReassemblySlot *slot = NULL;
+    int free_idx = -1;
+    int oldest_idx = 0;
+    for (int i = 0; i < FRAG_SLOTS; i++) {
+        if (g_frag_slots[i].in_use) {
+            if (g_frag_slots[i].saddr == ip->saddr &&
+                g_frag_slots[i].daddr == ip->daddr &&
+                g_frag_slots[i].ip_id == ip->id &&
+                g_frag_slots[i].proto == ip->proto) {
+                slot = &g_frag_slots[i];
+                break;
+            }
+            if (g_frag_slots[i].created_at < g_frag_slots[oldest_idx].created_at) {
+                oldest_idx = i;
+            }
+        } else if (free_idx < 0) {
+            free_idx = i;
+        }
+    }
+
+    if (!slot) {
+        int idx = (free_idx >= 0) ? free_idx : oldest_idx;
+        if (g_frag_slots[idx].in_use) {
+            flush_frag_slot_raw(&g_frag_slots[idx], fwd_out, write_err_cnt, last_write_errno);
+        }
+        slot = &g_frag_slots[idx];
+        memset(slot, 0, sizeof(*slot));
+        slot->in_use = 1;
+        slot->saddr = ip->saddr;
+        slot->daddr = ip->daddr;
+        slot->ip_id = ip->id;
+        slot->proto = ip->proto;
+        slot->created_at = now;
+    }
+
+    if (slot->non_9296) {
+        forward_out_frame(pkt, frame_len, fwd_out, write_err_cnt, last_write_errno);
+        return;
+    }
+
+    if (frag_off_bytes == 0 && payload_len >= sizeof(struct udp_header)) {
+        struct udp_header *uh = (struct udp_header *)((uint8_t *)ip + ip_hl);
+        if (ntohs(uh->dest) == 9296) {
+            slot->is_udp_9296 = 1;
+        } else {
+            slot->non_9296 = 1;
+            flush_frag_slot_raw(slot, fwd_out, write_err_cnt, last_write_errno);
+            forward_out_frame(pkt, frame_len, fwd_out, write_err_cnt, last_write_errno);
+            return;
+        }
+    }
+
+    if (slot->frag_count >= MAX_FRAGS_PER_PKT) {
+        flush_frag_slot_raw(slot, fwd_out, write_err_cnt, last_write_errno);
+        forward_out_frame(pkt, frame_len, fwd_out, write_err_cnt, last_write_errno);
+        return;
+    }
+
+    int fi = slot->frag_count++;
+    memcpy(slot->frags[fi].frame, pkt, frame_len);
+    slot->frags[fi].frame_len = frame_len;
+    slot->frags[fi].ip_hl = ip_hl;
+    slot->frags[fi].frag_off_bytes = frag_off_bytes;
+    slot->frags[fi].payload_len = payload_len;
+    slot->frags[fi].more_frags = more_frags;
+    debug_log("frag slot id=0x%04x idx=%d off=%zu plen=%zu MF=%d",
+              ntohs(ip->id), fi, frag_off_bytes, payload_len, more_frags);
+
+    if (!more_frags) {
+        slot->has_last = 1;
+        slot->expected_ip_payload_len = frag_off_bytes + payload_len;
+    }
+
+    if (!slot->has_last || !slot->is_udp_9296 || slot->expected_ip_payload_len < sizeof(struct udp_header)) {
+        return;
+    }
+
+    /* 按偏移排序检查是否连续覆盖 [0, expected_ip_payload_len) */
+    for (int a = 0; a < slot->frag_count - 1; a++) {
+        for (int b = a + 1; b < slot->frag_count; b++) {
+            if (slot->frags[b].frag_off_bytes < slot->frags[a].frag_off_bytes) {
+                __typeof__(slot->frags[0]) tmp = slot->frags[a];
+                slot->frags[a] = slot->frags[b];
+                slot->frags[b] = tmp;
+            }
+        }
+    }
+
+    size_t cursor = 0;
+    for (int i = 0; i < slot->frag_count; i++) {
+        if (slot->frags[i].frag_off_bytes != cursor) return;
+        cursor += slot->frags[i].payload_len;
+    }
+    if (cursor != slot->expected_ip_payload_len) return;
+
+    uint8_t assembled[FRAG_ASSEMBLE_CAP];
+    for (int i = 0; i < slot->frag_count; i++) {
+        size_t off = slot->frags[i].frag_off_bytes;
+        size_t plen = slot->frags[i].payload_len;
+        memcpy(assembled + off,
+               slot->frags[i].frame + sizeof(struct eth_header) + slot->frags[i].ip_hl,
+               plen);
+    }
+
+    struct udp_header *udp = (struct udp_header *)assembled;
+    size_t udp_len = ntohs(udp->len);
+    if (udp_len >= sizeof(struct udp_header) && udp_len <= slot->expected_ip_payload_len) {
+        uint8_t *payload = assembled + sizeof(struct udp_header);
+        size_t udp_payload_len = udp_len - sizeof(struct udp_header);
+        if (udp_payload_len >= 32) {
+            char diag_buf[160] = "";
+            if (g_debug_mode) {
+                char hex_buf[128];
+                debug_hex_prefix(payload, udp_payload_len, hex_buf, sizeof(hex_buf));
+                debug_log("frag reassembled UDP/9296 id=0x%04x frags=%d payload_len=%zu hex=[%s]",
+                          ntohs(slot->ip_id), slot->frag_count, udp_payload_len, hex_buf);
+            }
+            if (mutate_launchspec(payload, udp_payload_len, profile_num, udp_payload_len >= 1000 ? diag_buf : NULL, sizeof(diag_buf))) {
+                udp->check = 0;
+                udp->check = htons(udp_checksum_raw(slot->saddr, slot->daddr, assembled, udp_len));
+
+                /* 原位回填每一片 UDP 数据并重算各自 IP 校验和 */
+                for (int i = 0; i < slot->frag_count; i++) {
+                    uint8_t *dst_frame = slot->frags[i].frame;
+                    struct ip_header *fip = (struct ip_header *)(dst_frame + sizeof(struct eth_header));
+                    memcpy(dst_frame + sizeof(struct eth_header) + slot->frags[i].ip_hl,
+                           assembled + slot->frags[i].frag_off_bytes,
+                           slot->frags[i].payload_len);
+                    fip->check = 0;
+                    fip->check = htons(calc_checksum(fip, slot->frags[i].ip_hl));
+                }
+
+                uint8_t seq_key[8];
+                memcpy(seq_key, payload + 1, 4);
+                memcpy(seq_key + 4, payload + 17, 4);
+                int already_seen = 0;
+                for (int s = 0; s < *unique_seqs && s < MAX_SEEN_SEQS; s++) {
+                    if (memcmp(seen_seqs[s], seq_key, 8) == 0) {
+                        already_seen = 1;
+                        break;
+                    }
+                }
+                if (!already_seen) {
+                    if (*unique_seqs < MAX_SEEN_SEQS) {
+                        memcpy(seen_seqs[*unique_seqs], seq_key, 8);
+                    }
+                    (*unique_seqs)++;
+                    if (conf) {
+                        conf->armed = 1;
+                        conf->accepted = 0;
+                        conf->streaming = 0;
+                        conf->samples = 0;
+                    }
+                    if (streaminfo_at) *streaminfo_at = 0.0;
+                }
+                if (!(*first_mutated_announced)) {
+                    *first_mutated_announced = 1;
+                    *first_mutated_at = now;
+                    printf("[注入] 🎯 已重组分片并修改 LaunchSpec 握手参数为 %s Mbps！\n", profile_num);
+                    fflush(stdout);
+                }
+            } else if (udp_payload_len >= 1000) {
+                (*unmatched_9296_large_out)++;
+                if (first_unmatched_diag && !first_unmatched_diag[0] && diag_buf[0]) {
+                    snprintf(first_unmatched_diag, diag_cap, "%s", diag_buf);
+                }
+                debug_log("frag UDP/9296 missed LaunchSpec: %s", diag_buf[0] ? diag_buf : "no_diag");
+            }
+        }
+    }
+
+    flush_frag_slot_raw(slot, fwd_out, write_err_cnt, last_write_errno);
+}
+
 int main(int argc, char *argv[]) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     char ps5_ip_str[64] = "";
     char portal_ip_str[64] = "";
     char bitrate_arg[32] = "100M";
@@ -1002,6 +1512,14 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             const char *m = argv[++i];
             g_mode_oneway = (strcmp(m, "twoway") == 0) ? 0 : 1;
+        } else if (strcmp(argv[i], "--watch") == 0) {
+            g_watch_mode = 1;
+            g_mode_oneway = 1;
+        } else if (strcmp(argv[i], "--debug") == 0) {
+            g_debug_mode = 1;
+        } else if (strcmp(argv[i], "--parent-pid") == 0 && i + 1 < argc) {
+            long p = strtol(argv[++i], NULL, 10);
+            if (p > 1) g_parent_pid = (pid_t)p;
         } else if (strcmp(argv[i], "--restore") == 0) {
             restore_only = 1;
         } else if (strcmp(argv[i], "--check-privilege") == 0) {
@@ -1046,7 +1564,12 @@ int main(int argc, char *argv[]) {
             }
         }
         if (pid > 1) {
-            if (kill((pid_t)pid, SIGINT) == 0) {
+            char pid_path[PROC_PIDPATHINFO_MAXSIZE] = "";
+            int path_len = proc_pidpath((pid_t)pid, pid_path, sizeof(pid_path));
+            const char *base = (path_len > 0) ? strrchr(pid_path, '/') : NULL;
+            int is_portal_proc = (path_len > 0 && ((base && strcmp(base, "/portal_engine") == 0) || strcmp(pid_path, "portal_engine") == 0));
+
+            if (is_portal_proc && kill((pid_t)pid, SIGINT) == 0) {
                 /* 等待引擎完成 300ms ARP 复原包发送并退出，避免中途打断 usleep */
                 int exited = 0;
                 for (int w = 0; w < 48; w++) {
@@ -1069,7 +1592,7 @@ int main(int argc, char *argv[]) {
                 if (exited) {
                     unlink(PID_FILE);
                 }
-            } else if (errno == ESRCH) {
+            } else {
                 unlink(PID_FILE);
             }
         } else {
@@ -1162,15 +1685,26 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    check_route_for_ip("PS5", ps5_ip_str, g_iface);
-    check_route_for_ip("PS Portal", portal_ip_str, g_iface);
-
-    ping_hosts_parallel(ps5_ip_str, portal_ip_str);
-    if (ps5_ip_str[0] && resolve_mac_via_arp(ps5_ip_str, g_iface, g_ps5_mac, 0) == 0) {
-        g_has_ps5_mac = 1;
+    char ps5_route_iface[64] = "";
+    char portal_route_iface[64] = "";
+    int ps5_has_gw = 0, portal_has_gw = 0;
+    int ps5_route_err = check_route_for_ip("PS5", ps5_ip_str, g_iface, ps5_route_iface, sizeof(ps5_route_iface), &ps5_has_gw);
+    int portal_route_err = check_route_for_ip("PS Portal", portal_ip_str, g_iface, portal_route_iface, sizeof(portal_route_iface), &portal_has_gw);
+    if (g_watch_mode && (ps5_route_err != 0 || portal_route_err != 0)) {
+        emit_event("{\"type\":\"state\",\"state\":\"out_of_lan\",\"reason\":\"route_mismatch\"}");
+        fflush(stdout);
+        unlink(PID_FILE);
+        return 2;
     }
-    if (portal_ip_str[0] && resolve_mac_via_arp(portal_ip_str, g_iface, g_portal_mac, 0) == 0) {
-        g_has_portal_mac = 1;
+
+    if (!g_watch_mode) {
+        ping_hosts_parallel(ps5_ip_str, portal_ip_str);
+        if (ps5_ip_str[0] && resolve_mac_via_arp(ps5_ip_str, g_iface, g_ps5_mac, 0) == 0) {
+            g_has_ps5_mac = 1;
+        }
+        if (portal_ip_str[0] && resolve_mac_via_arp(portal_ip_str, g_iface, g_portal_mac, 0) == 0) {
+            g_has_portal_mac = 1;
+        }
     }
 
     char own_ip_buf[16], own_mac_buf[18], ps5_mac_buf[18], portal_mac_buf[18];
@@ -1181,7 +1715,7 @@ int main(int argc, char *argv[]) {
 
     printf("[诊断] 网卡 %s (%s | MAC %s) | 模式: %s\n",
            g_iface, own_ip_buf, own_mac_buf,
-           g_mode_oneway ? "单向视频直连 (oneway)" : "双向遥测验证 (twoway)");
+           g_watch_mode ? "被动旁路守望 (watch/oneway)" : (g_mode_oneway ? "单向视频直连 (oneway)" : "双向遥测验证 (twoway)"));
     printf("[诊断] PS5 (%s): %s | Portal (%s): %s\n",
            ps5_ip_str[0] ? ps5_ip_str : "未配置",
            g_has_ps5_mac ? ps5_mac_buf : "待 ARP 探测",
@@ -1193,7 +1727,7 @@ int main(int argc, char *argv[]) {
         unlink(PID_FILE);
         return 1;
     }
-    if (!g_has_ps5_mac || !g_has_portal_mac) {
+    if (!g_watch_mode && (!g_has_ps5_mac || !g_has_portal_mac)) {
         printf("[诊断] 🔍 尚有设备 MAC 未解析（可能处于待机），将持续广播 ARP 探测并在双方均就绪后启用%s。\n",
                g_mode_oneway ? "单向牵引" : "双向中继");
     }
@@ -1207,17 +1741,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    int mib_redir[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS };
-    size_t len_redir = sizeof(g_orig_redirect);
-    if (sysctl(mib_redir, 4, &g_orig_redirect, &len_redir, NULL, 0) == 0) {
-        int zero = 0;
-        sysctl(mib_redir, 4, NULL, NULL, &zero, sizeof(zero));
-    }
-    int mib_fwd[4] = { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_FORWARDING };
-    size_t len_fwd = sizeof(g_orig_forwarding);
-    if (sysctl(mib_fwd, 4, &g_orig_forwarding, &len_fwd, NULL, 0) == 0) {
-        int zero = 0;
-        sysctl(mib_fwd, 4, NULL, NULL, &zero, sizeof(zero));
+    g_engine_t0 = monotonic_seconds();
+    debug_log("引擎初始化完成: iface=%s watch=%d mode=%s bitrate=%s bpf_fd=%d route_ps5=%s(gw=%d) route_portal=%s(gw=%d)",
+              g_iface, g_watch_mode, g_mode_oneway ? "oneway" : "twoway", profile_num, g_bpf_fd,
+              ps5_route_iface[0] ? ps5_route_iface : "?", ps5_has_gw,
+              portal_route_iface[0] ? portal_route_iface : "?", portal_has_gw);
+
+    if (!g_watch_mode) {
+        disable_kernel_ip_bypass();
     }
 
     uint8_t *bpf_buffer = malloc(BPF_BUF_LEN);
@@ -1227,10 +1758,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    enum WatchPhase {
+        WATCH_IDLE = 0,
+        WATCH_PREFLIGHT = 1,
+        WATCH_ACTIVE_BURST = 2
+    };
+
+    enum WatchPhase watch_phase = g_watch_mode ? WATCH_IDLE : WATCH_ACTIVE_BURST;
     double start_ts = monotonic_seconds();
     double ready_at = start_ts + 1.5;
-    double end_ts = ready_at + 120.0;
+    double end_ts = start_ts + 121.5;
     double next_arp = 0.0;
+    double preflight_deadline = 0.0;
+    double preflight_next_probe = 0.0;
+    double burst_deadline = 0.0;
+    double watch_cooldown_until = 0.0;
+    double last_portal_seen_at = -1000.0;
+    double last_parent_check_at = start_ts;
+    int ps5_liveness_ok = 0;
+
     double first_mutated_at = 0.0;
     double streaminfo_at = 0.0;
     int ready_announced = 0;
@@ -1240,14 +1786,20 @@ int main(int argc, char *argv[]) {
     int spoof_started_announced = 0;
     int early_direct_handoff = 0;
     int mac_conflict_aborted = 0;
-    int frag_warned = 0;
+    int frag_info_announced = 0;
+    int ps5_mac_logged = 0;
+    int portal_mac_logged = 0;
+    int cooldown_notify_pending = 0;
 
     uint64_t fwd_in = 0;
     uint64_t fwd_out = 0;
     uint64_t write_err_cnt = 0;
     uint64_t unmatched_9296_large_out = 0;
+    uint64_t debug_udp9296_out_cnt = 0;
+    uint64_t debug_arp_seen_cnt = 0;
     char first_unmatched_diag[160] = "";
     int last_write_errno = 0;
+    int first_tcp9295_logged = 0;
     uint8_t seen_seqs[MAX_SEEN_SEQS][8];
     int unique_seqs = 0;
 
@@ -1258,59 +1810,173 @@ int main(int argc, char *argv[]) {
     memset(&conf, 0, sizeof(conf));
     conf.confirm_threshold = confirm_target;
 
+    if (g_watch_mode) {
+        emit_event("{\"type\":\"state\",\"state\":\"watching\"}");
+        printf("----------------------------------------------------------------------\n");
+        printf("[就绪] 🟢 自动守望已就绪！现在随时可唤醒 PS Portal 并点击连接 PS5。\n");
+        fflush(stdout);
+    }
+
     while (g_running) {
         double now = monotonic_seconds();
-        if (now >= end_ts) break;
-        if (g_mode_oneway && first_mutated_announced && first_mutated_at > 0.0 && (now - first_mutated_at >= 3.0)) {
-            break;
-        }
-        if (!g_mode_oneway && conf.accepted && conf.streaming && streaminfo_at > 0.0 && (now - streaminfo_at >= 5.0)) {
-            early_direct_handoff = 1;
-            break;
+
+        if (g_parent_pid > 1 && (now - last_parent_check_at >= 2.0)) {
+            last_parent_check_at = now;
+            if (kill(g_parent_pid, 0) != 0 && errno == ESRCH) {
+                printf("[守望] ℹ️ 主进程 (PID %d) 已退出，正在安全回收引擎。\n", (int)g_parent_pid);
+                fflush(stdout);
+                break;
+            }
         }
 
-        if (now >= next_arp) {
+        expire_frag_slots(now, &fwd_out, &write_err_cnt, &last_write_errno);
+
+        if (!g_watch_mode) {
+            if (now >= end_ts) break;
+            if (g_mode_oneway && first_mutated_announced && first_mutated_at > 0.0 && (now - first_mutated_at >= 3.0)) {
+                break;
+            }
+            if (!g_mode_oneway && conf.accepted && conf.streaming && streaminfo_at > 0.0 && (now - streaminfo_at >= 5.0)) {
+                early_direct_handoff = 1;
+                break;
+            }
+        } else {
+            if (watch_phase == WATCH_IDLE && cooldown_notify_pending && now >= watch_cooldown_until) {
+                cooldown_notify_pending = 0;
+                emit_event("{\"type\":\"cooldown_ended\"}");
+                printf("[就绪] 🟢 冷却已结束，现在随时可唤醒 PS Portal 并点击连接 PS5。\n");
+                fflush(stdout);
+            }
+            if (watch_phase == WATCH_PREFLIGHT) {
+                if (ps5_liveness_ok && g_has_ps5_mac && g_has_portal_mac) {
+                    watch_phase = WATCH_ACTIVE_BURST;
+                    burst_deadline = now + 120.0;
+                    next_arp = 0.0;
+                    first_mutated_announced = 0;
+                    first_mutated_at = 0.0;
+                    first_out_seen = 0;
+                    spoof_started_announced = 0;
+                    unique_seqs = 0;
+                    frag_info_announced = 0;
+                    unmatched_9296_large_out = 0;
+                    debug_udp9296_out_cnt = 0;
+                    first_tcp9295_logged = 0;
+                    first_unmatched_diag[0] = '\0';
+                    cooldown_notify_pending = 0;
+                    reset_frag_slots();
+                    disable_kernel_ip_bypass();
+                    emit_event("{\"type\":\"state\",\"state\":\"bursting\",\"seconds\":120}");
+                    debug_log("WATCH_PREFLIGHT -> WATCH_ACTIVE_BURST (ps5_alive=1 ps5_mac=1 portal_mac=1)");
+                    printf("----------------------------------------------------------------------\n");
+                    printf("[指引] 🎮 已检测到 Portal 唤醒并开启增强通道！请在 120 秒内于 Portal 上点击「连接 PS5」。\n");
+                    fflush(stdout);
+                } else if (now >= preflight_deadline) {
+                    watch_phase = WATCH_IDLE;
+                    watch_cooldown_until = now + 3.0;
+                    debug_log("WATCH_PREFLIGHT 超时(2.0s): ps5_alive=%d has_ps5_mac=%d has_portal_mac=%d -> 退回 WATCH_IDLE(3s冷却)",
+                              ps5_liveness_ok, g_has_ps5_mac, g_has_portal_mac);
+                    printf("[守望] 💤 PS5 未在 2 秒内响应在线预检，退回静默待命（有新连接流量时可立即重试）。\n");
+                    fflush(stdout);
+                } else if (now >= preflight_next_probe && g_ps5_ip) {
+                    const uint8_t *dst_mac = g_has_ps5_mac ? g_ps5_mac : BROADCAST_MAC;
+                    send_arp_raw(g_bpf_fd, dst_mac, g_own_mac, 1, g_own_mac, g_own_ip, ZERO_MAC, g_ps5_ip);
+                    if (!g_has_portal_mac && g_portal_ip) {
+                        send_arp_raw(g_bpf_fd, BROADCAST_MAC, g_own_mac, 1, g_own_mac, g_own_ip, ZERO_MAC, g_portal_ip);
+                    }
+                    debug_log("WATCH_PREFLIGHT 探测发送: ps5_alive=%d ps5_mac=%d portal_mac=%d",
+                              ps5_liveness_ok, g_has_ps5_mac, g_has_portal_mac);
+                    preflight_next_probe = now + 0.25;
+                }
+            } else if (watch_phase == WATCH_ACTIVE_BURST) {
+                int burst_done = 0;
+                const char *burst_res = "timeout";
+                if (first_mutated_announced) {
+                    if (first_mutated_at > 0.0 && (now - first_mutated_at >= 3.0)) {
+                        burst_done = 1;
+                        burst_res = "enhanced";
+                    }
+                } else if (now >= burst_deadline) {
+                    burst_done = 1;
+                    burst_res = "timeout";
+                }
+                if (burst_done) {
+                    restore_arp_to_direct(0);
+                    reset_frag_slots();
+                    watch_phase = WATCH_IDLE;
+                    watch_cooldown_until = now + 20.0;
+                    if (strcmp(burst_res, "enhanced") == 0) {
+                        cooldown_notify_pending = 0;
+                        emit_event("{\"type\":\"state\",\"state\":\"watching\",\"result\":\"enhanced\"}");
+                        printf("[成功] 🎉 已为本次串流开启 %s Mbps 高画质（修改 %d 个启动包 · 视频直连不经 Mac），现在可以正常游玩！\n",
+                               profile_num, unique_seqs);
+                    } else {
+                        cooldown_notify_pending = 1;
+                        emit_event("{\"type\":\"state\",\"state\":\"watching\",\"result\":\"timeout\",\"cooldown\":20}");
+                        printf("[守望] ⏸ 本轮 120 秒窗口内暂未收到连接握手，已恢复直连路由。请等待 20 秒冷却结束后再用 Portal 连接。\n");
+                        if (unmatched_9296_large_out > 0) {
+                            printf("[诊断] 💡 窗口内捕获到 %llu 个 UDP/9296 大载荷包但未命中 LaunchSpec 模板 (%s)。\n",
+                                   (unsigned long long)unmatched_9296_large_out,
+                                   first_unmatched_diag[0] ? first_unmatched_diag : "未知原因");
+                        }
+                    }
+                    fflush(stdout);
+                }
+            }
+        }
+
+        if (watch_phase == WATCH_ACTIVE_BURST && now >= next_arp) {
             if (!g_has_ps5_mac && g_ps5_ip) {
                 send_arp_raw(g_bpf_fd, BROADCAST_MAC, g_own_mac, 1, g_own_mac, g_own_ip, ZERO_MAC, g_ps5_ip);
+                debug_log("ACTIVE_BURST 广播 ARP 探测 PS5 MAC");
             }
             if (!g_has_portal_mac && g_portal_ip) {
                 send_arp_raw(g_bpf_fd, BROADCAST_MAC, g_own_mac, 1, g_own_mac, g_own_ip, ZERO_MAC, g_portal_ip);
+                debug_log("ACTIVE_BURST 广播 ARP 探测 Portal MAC");
             }
             if (g_has_ps5_mac && g_has_portal_mac && g_ps5_ip && g_portal_ip) {
                 if (validate_distinct_macs() != 0) {
                     printf("[错误] ❌ 检测到设备 MAC 冲突（Mac / PS5 / Portal 存在相同 MAC），已中止中继以保护网络！\n");
                     fflush(stdout);
-                    mac_conflict_aborted = 1;
-                    break;
-                }
-                if (!spoof_started_announced) {
-                    spoof_started_announced = 1;
-                    g_spoof_active = 1;
-                    save_restore_state();
-                    printf("[诊断] ✅ 双方 MAC 已就绪，已启动%s。\n",
-                           g_mode_oneway ? "单向 ARP 牵引" : "双向 ARP 中继牵引");
-                    fflush(stdout);
-                }
-                // 单向模式只对 Portal 发起牵引；双向模式对两端发起牵引
-                send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
-                if (!g_mode_oneway) {
-                    send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+                    if (g_watch_mode) {
+                        restore_arp_to_direct(0);
+                        watch_phase = WATCH_IDLE;
+                        watch_cooldown_until = now + 60.0;
+                        emit_event("{\"type\":\"error\",\"code\":\"mac_conflict\"}");
+                    } else {
+                        mac_conflict_aborted = 1;
+                        break;
+                    }
+                } else {
+                    if (!spoof_started_announced) {
+                        spoof_started_announced = 1;
+                        g_spoof_active = 1;
+                        save_restore_state();
+                        printf("[诊断] ✅ 双方 MAC 已就绪，已启动%s。\n",
+                               g_mode_oneway ? "单向 ARP 牵引" : "双向 ARP 中继牵引");
+                        fflush(stdout);
+                    }
+                    send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
+                    if (!g_mode_oneway) {
+                        send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+                    }
+                    debug_log("周期发送 ARP 牵引 (op=2 -> Portal%s)", g_mode_oneway ? "" : " & PS5");
                 }
             }
-            next_arp = now + 1.0;
+            next_arp = now + ((g_has_ps5_mac && g_has_portal_mac) ? 1.0 : 0.20);
         }
 
-        if (!ready_announced && now >= ready_at) {
+        if (!g_watch_mode && !ready_announced && now >= ready_at) {
             ready_announced = 1;
+            emit_event("{\"type\":\"state\",\"state\":\"listening\"}");
             printf("----------------------------------------------------------------------\n");
-            printf("[准备] ⚡️ 网络协商就绪！请在 120 秒内在 Portal 上点击连接 PS5...\n");
+            printf("[就绪] 🎮 增强通道已就绪！现在请在 120 秒内于 PS Portal 上点击连接 PS5。\n");
             fflush(stdout);
         }
 
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(g_bpf_fd, &read_fds);
-        struct timeval tv = { 0, 50000 }; // 50ms
+        struct timeval tv = { 0, (watch_phase == WATCH_IDLE) ? 200000 : 50000 };
 
         int ret = select(g_bpf_fd + 1, &read_fds, NULL, NULL, &tv);
         if (ret <= 0) continue;
@@ -1328,38 +1994,90 @@ int main(int argc, char *argv[]) {
             if (pkt_len < sizeof(struct eth_header)) continue;
             struct eth_header *eth = (struct eth_header *)pkt;
 
-            // 忽略自身发出的帧，避免回环
             if (memcmp(eth->src, g_own_mac, 6) == 0) continue;
 
-            // 动态嗅探 ARP 表以捕获刚唤醒设备的 MAC
             if (ntohs(eth->ethertype) == 0x0806 && pkt_len >= sizeof(struct eth_header) + sizeof(struct arp_header)) {
                 struct arp_header *arp = (struct arp_header *)(pkt + sizeof(struct eth_header));
-                if (g_ps5_ip && arp->spa == g_ps5_ip && !g_has_ps5_mac && memcmp(arp->sha, g_own_mac, 6) != 0) {
-                    memcpy(g_ps5_mac, arp->sha, 6);
-                    g_has_ps5_mac = 1;
-                    char mac_s[18];
-                    format_mac_str(g_ps5_mac, mac_s);
-                    printf("[诊断] 📡 捕获 PS5 MAC: %s\n", mac_s);
-                    fflush(stdout);
-                    if (g_has_portal_mac) next_arp = 0.0;
+                uint16_t arp_op = ntohs(arp->op);
+
+                if (g_ps5_ip && arp->spa == g_ps5_ip && memcmp(arp->sha, g_own_mac, 6) != 0) {
+                    ps5_liveness_ok = 1;
+                    if (!g_has_ps5_mac || memcmp(g_ps5_mac, arp->sha, 6) != 0) {
+                        memcpy(g_ps5_mac, arp->sha, 6);
+                        g_has_ps5_mac = 1;
+                        ps5_mac_logged = 0;
+                    }
+                    if (!ps5_mac_logged) {
+                        char mac_s[18];
+                        ps5_mac_logged = 1;
+                        format_mac_str(g_ps5_mac, mac_s);
+                        printf("[诊断] 📡 捕获 PS5 MAC: %s\n", mac_s);
+                        fflush(stdout);
+                    }
+                    if (g_has_portal_mac && watch_phase == WATCH_ACTIVE_BURST) next_arp = 0.0;
                 }
-                if (g_portal_ip && arp->spa == g_portal_ip && !g_has_portal_mac && memcmp(arp->sha, g_own_mac, 6) != 0) {
-                    memcpy(g_portal_mac, arp->sha, 6);
-                    g_has_portal_mac = 1;
-                    char mac_s[18];
-                    format_mac_str(g_portal_mac, mac_s);
-                    printf("[诊断] 📡 捕获 Portal MAC: %s\n", mac_s);
-                    fflush(stdout);
-                    if (g_has_ps5_mac) next_arp = 0.0;
+                if (g_portal_ip && arp->spa == g_portal_ip && memcmp(arp->sha, g_own_mac, 6) != 0) {
+                    if (!g_has_portal_mac || memcmp(g_portal_mac, arp->sha, 6) != 0) {
+                        memcpy(g_portal_mac, arp->sha, 6);
+                        g_has_portal_mac = 1;
+                        portal_mac_logged = 0;
+                    }
+                    if (!portal_mac_logged) {
+                        char mac_s[18];
+                        portal_mac_logged = 1;
+                        format_mac_str(g_portal_mac, mac_s);
+                        printf("[诊断] 📡 捕获 Portal MAC: %s\n", mac_s);
+                        fflush(stdout);
+                    }
+                    if (g_has_ps5_mac && watch_phase == WATCH_ACTIVE_BURST) next_arp = 0.0;
                 }
-                // 抢占应答目标设备的 ARP Who-Has 探测，防止真实对端回复覆盖欺骗条目
-                if (g_has_ps5_mac && g_has_portal_mac && validate_distinct_macs() == 0 && ntohs(arp->op) == 1) {
+
+                int is_portal_src = (g_portal_ip && arp->spa == g_portal_ip);
+                int is_ps5_src = (g_ps5_ip && arp->spa == g_ps5_ip);
+                if (g_debug_mode && (is_portal_src || is_ps5_src || (g_ps5_ip && arp->tpa == g_ps5_ip) || (g_portal_ip && arp->tpa == g_portal_ip)) && debug_arp_seen_cnt < 120) {
+                    debug_arp_seen_cnt++;
+                    char sha_s[18], spa_s[16], tpa_s[16];
+                    format_mac_str(arp->sha, sha_s);
+                    format_ip_str(arp->spa, spa_s);
+                    format_ip_str(arp->tpa, tpa_s);
+                    debug_log("RX ARP op=%u (%s) sha=%s spa=%s -> tpa=%s phase=%d",
+                              arp_op, arp_op == 1 ? "Who-Has" : (arp_op == 2 ? "Reply" : "Other"),
+                              sha_s, spa_s, tpa_s, (int)watch_phase);
+                }
+
+                if (g_watch_mode && watch_phase == WATCH_IDLE) {
+                    int strong_arp = (arp_op == 1 && is_portal_src && arp->tpa == g_ps5_ip);
+                    int wifi_wake = (arp_op == 1 && is_portal_src && (last_portal_seen_at < 0.0 || (now - last_portal_seen_at >= 60.0)));
+                    if (is_portal_src) last_portal_seen_at = now;
+                    if (strong_arp || (wifi_wake && now >= watch_cooldown_until)) {
+                        watch_phase = WATCH_PREFLIGHT;
+                        ps5_liveness_ok = 0;
+                        preflight_deadline = now + 2.0;
+                        preflight_next_probe = 0.0;
+                        debug_log("ARP 触发 WATCH_PREFLIGHT (strong_arp=%d wifi_wake=%d)", strong_arp, wifi_wake);
+                        printf("[守望] 🔍 捕获 %s，正在 2 秒内预检 PS5 在线状态...\n",
+                               strong_arp ? "Portal ARP 请求 PS5" : "Portal Wi-Fi 唤醒信号");
+                        fflush(stdout);
+                    }
+                } else if (is_portal_src) {
+                    last_portal_seen_at = now;
+                }
+
+                /* 抢占应答目标 ARP（同时覆盖 Who-Has op=1 与 Reply/无故 ARP op=2，含 tpa=0 RFC5227），防止真实对端覆盖欺骗条目 */
+                if (watch_phase == WATCH_ACTIVE_BURST && g_has_ps5_mac && g_has_portal_mac &&
+                    validate_distinct_macs() == 0 && (arp_op == 1 || arp_op == 2)) {
                     if (arp->spa == g_portal_ip && arp->tpa == g_ps5_ip) {
                         send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
                         send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
-                    } else if (!g_mode_oneway && arp->spa == g_ps5_ip && arp->tpa == g_portal_ip) {
-                        send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
-                        send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+                        debug_log("⚡ ARP 抢占回击 Portal (来源 Portal 请求/通告 PS5, op=%u)", arp_op);
+                    } else if (arp->spa == g_ps5_ip && (arp->tpa == g_portal_ip || arp->tpa == g_ps5_ip || arp->tpa == 0)) {
+                        send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
+                        send_arp_raw(g_bpf_fd, g_portal_mac, g_own_mac, 2, g_own_mac, g_ps5_ip, g_portal_mac, g_portal_ip);
+                        debug_log("⚡ ARP 抢占反制 Portal (来源 PS5 op=%u, 防止覆盖欺骗表项)", arp_op);
+                        if (!g_mode_oneway && arp->tpa == g_portal_ip) {
+                            send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+                            send_arp_raw(g_bpf_fd, g_ps5_mac, g_own_mac, 2, g_own_mac, g_portal_ip, g_ps5_mac, g_ps5_ip);
+                        }
                     }
                 }
                 continue;
@@ -1374,28 +2092,78 @@ int main(int argc, char *argv[]) {
             size_t ip_tot = ntohs(ip->tot_len);
             if (ip_hl < 20 || ip_tot < ip_hl || pkt_len < sizeof(struct eth_header) + ip_tot) continue;
 
-            // 从到达的 IPv4 包源 MAC 兜底学习未解析设备的 MAC（避免对方沿用旧 ARP 缓存不发广播）
-            if (g_portal_ip && ip->saddr == g_portal_ip && ip->daddr == g_ps5_ip && !g_has_portal_mac) {
+            if (g_portal_ip && ip->saddr == g_portal_ip && !g_has_portal_mac) {
                 if (!g_has_ps5_mac || memcmp(eth->src, g_ps5_mac, 6) != 0) {
                     memcpy(g_portal_mac, eth->src, 6);
                     g_has_portal_mac = 1;
+                    portal_mac_logged = 1;
                     char mac_s[18];
                     format_mac_str(g_portal_mac, mac_s);
                     printf("[诊断] 📡 从 IPv4 流量捕获 Portal MAC: %s\n", mac_s);
                     fflush(stdout);
-                    if (g_has_ps5_mac) next_arp = 0.0;
+                    if (g_has_ps5_mac && watch_phase == WATCH_ACTIVE_BURST) next_arp = 0.0;
                 }
             }
-            if (g_ps5_ip && ip->saddr == g_ps5_ip && ip->daddr == g_portal_ip && !g_has_ps5_mac) {
+            if (g_ps5_ip && ip->saddr == g_ps5_ip && !g_has_ps5_mac) {
                 if (!g_has_portal_mac || memcmp(eth->src, g_portal_mac, 6) != 0) {
                     memcpy(g_ps5_mac, eth->src, 6);
                     g_has_ps5_mac = 1;
+                    ps5_mac_logged = 1;
                     char mac_s[18];
                     format_mac_str(g_ps5_mac, mac_s);
                     printf("[诊断] 📡 从 IPv4 流量捕获 PS5 MAC: %s\n", mac_s);
                     fflush(stdout);
-                    if (g_has_portal_mac) next_arp = 0.0;
+                    if (g_has_portal_mac && watch_phase == WATCH_ACTIVE_BURST) next_arp = 0.0;
                 }
+            }
+
+            if (g_watch_mode && watch_phase != WATCH_ACTIVE_BURST) {
+                /* 旁路守望或预检窗口：识别 UDP 9302/67/9296 与 TCP 9295 触发信号，严禁篡改/转发任何业务包 */
+                int src_is_portal = (g_portal_ip && ip->saddr == g_portal_ip);
+                int src_is_ps5 = (g_ps5_ip && ip->saddr == g_ps5_ip);
+                if (src_is_ps5 && watch_phase == WATCH_PREFLIGHT) {
+                    ps5_liveness_ok = 1;
+                }
+                if (ip->proto == IPPROTO_UDP && (ntohs(ip->frag_off) & 0x1FFF) == 0 && ip_tot >= ip_hl + sizeof(struct udp_header)) {
+                    struct udp_header *udp = (struct udp_header *)((uint8_t *)ip + ip_hl);
+                    uint16_t dport = ntohs(udp->dest);
+                    if (watch_phase == WATCH_IDLE) {
+                        int ddp_trigger = (dport == 9302 && (src_is_portal || ip->daddr == g_ps5_ip));
+                        int dhcp_wake = (dport == 67 && src_is_portal && (last_portal_seen_at < 0.0 || (now - last_portal_seen_at >= 60.0)));
+                        int takion_trigger = (dport == 9296 && src_is_portal && g_ps5_ip && ip->daddr == g_ps5_ip);
+                        if (src_is_portal) last_portal_seen_at = now;
+                        if (takion_trigger || ((ddp_trigger || dhcp_wake) && now >= watch_cooldown_until)) {
+                            watch_phase = WATCH_PREFLIGHT;
+                            ps5_liveness_ok = 0;
+                            preflight_deadline = now + 2.0;
+                            preflight_next_probe = 0.0;
+                            debug_log("UDP/%u 触发 WATCH_PREFLIGHT (ddp=%d dhcp=%d takion=%d)",
+                                      dport, ddp_trigger, dhcp_wake, takion_trigger);
+                            printf("[守望] 🔍 捕获 %s，正在 2 秒内预检 PS5 在线状态...\n",
+                                   takion_trigger ? "UDP/9296 握手流量" : (ddp_trigger ? "UDP/9302 DDP 探测" : "Portal DHCP 联网唤醒"));
+                            fflush(stdout);
+                        }
+                    } else if (src_is_portal) {
+                        last_portal_seen_at = now;
+                    }
+                } else if (ip->proto == IPPROTO_TCP && (ntohs(ip->frag_off) & 0x1FFF) == 0 && ip_tot >= ip_hl + 4) {
+                    const uint8_t *tcp_bytes = (const uint8_t *)ip + ip_hl;
+                    uint16_t dport = (uint16_t)(((uint16_t)tcp_bytes[2] << 8) | tcp_bytes[3]);
+                    if (watch_phase == WATCH_IDLE &&
+                        dport == 9295 && src_is_portal && g_ps5_ip && ip->daddr == g_ps5_ip) {
+                        last_portal_seen_at = now;
+                        watch_phase = WATCH_PREFLIGHT;
+                        ps5_liveness_ok = 0;
+                        preflight_deadline = now + 2.0;
+                        preflight_next_probe = 0.0;
+                        debug_log("TCP/9295 触发 WATCH_PREFLIGHT (无视冷却)");
+                        printf("[守望] 🔍 捕获 TCP/9295 Remote Play 会话连接，正在 2 秒内预检 PS5 在线状态...\n");
+                        fflush(stdout);
+                    } else if (src_is_portal) {
+                        last_portal_seen_at = now;
+                    }
+                }
+                continue;
             }
 
             if (memcmp(eth->dst, g_own_mac, 6) != 0) continue;
@@ -1404,12 +2172,36 @@ int main(int argc, char *argv[]) {
             int is_in  = (g_portal_ip && g_ps5_ip && ip->saddr == g_ps5_ip && ip->daddr == g_portal_ip);
             if (!is_out && !is_in) continue;
 
-            if (ip->proto == IPPROTO_UDP && !frag_warned && (ntohs(ip->frag_off) & 0x1FFF) == 0 && (ntohs(ip->frag_off) & 0x2000) != 0 && ip_tot >= ip_hl + sizeof(struct udp_header)) {
-                struct udp_header *frag_udp = (struct udp_header *)((uint8_t *)ip + ip_hl);
-                if (is_out && ntohs(frag_udp->dest) == 9296) {
-                    frag_warned = 1;
-                    printf("[诊断] ⚠️ 检测到分片 UDP 9296 握手包（当前链路 MTU 发生 IP 分片，可能影响握手注入）。\n");
-                    fflush(stdout);
+            if (is_out && ip->proto == IPPROTO_UDP && (ntohs(ip->frag_off) & 0x3FFF) != 0) {
+                if (!frag_info_announced && (ntohs(ip->frag_off) & 0x1FFF) == 0 && ip_tot >= ip_hl + sizeof(struct udp_header)) {
+                    struct udp_header *frag_udp = (struct udp_header *)((uint8_t *)ip + ip_hl);
+                    if (ntohs(frag_udp->dest) == 9296) {
+                        frag_info_announced = 1;
+                        printf("[诊断] 🧩 检测到分片 UDP/9296 握手包，已启用 IP 分片重组注入通道。\n");
+                        fflush(stdout);
+                    }
+                }
+                int was_mutated = first_mutated_announced;
+                handle_fragmented_udp_out(
+                    pkt, sizeof(struct eth_header) + ip_tot, ip, ip_hl, ip_tot,
+                    now, profile_num, seen_seqs, &unique_seqs,
+                    &first_mutated_announced, &first_mutated_at,
+                    &conf, &streaminfo_at,
+                    &unmatched_9296_large_out, first_unmatched_diag, sizeof(first_unmatched_diag),
+                    &fwd_out, &write_err_cnt, &last_write_errno
+                );
+                if (!was_mutated && first_mutated_announced) {
+                    emit_event("{\"type\":\"stream_enhanced\",\"bitrate\":%s,\"fragmented\":1}", profile_num);
+                }
+                continue;
+            }
+
+            if (g_debug_mode && is_out && ip->proto == IPPROTO_TCP && ip_tot >= ip_hl + 4 && !first_tcp9295_logged) {
+                const uint8_t *tcp_b = (const uint8_t *)ip + ip_hl;
+                uint16_t tcp_dport = (uint16_t)(((uint16_t)tcp_b[2] << 8) | tcp_b[3]);
+                if (tcp_dport == 9295) {
+                    first_tcp9295_logged = 1;
+                    debug_log("ACTIVE_BURST 捕获首包 TCP/9295 Portal->PS5 (%zu bytes)", ip_tot);
                 }
             }
 
@@ -1424,7 +2216,15 @@ int main(int argc, char *argv[]) {
 
                     if (is_out && dport == 9296 && payload_len >= 32) {
                         char diag_buf[160] = "";
-                        if (mutate_launchspec(payload, payload_len, profile_num, payload_len >= 1000 ? diag_buf : NULL, sizeof(diag_buf))) {
+                        int should_log_pkt = (g_debug_mode && debug_udp9296_out_cnt < 40);
+                        if (should_log_pkt) {
+                            debug_udp9296_out_cnt++;
+                            char hex_buf[128];
+                            debug_hex_prefix(payload, payload_len, hex_buf, sizeof(hex_buf));
+                            debug_log("RX UDP/9296 #%llu sport=%u ip_tot=%zu udp_len=%zu plen=%zu hex=[%s]",
+                                      (unsigned long long)debug_udp9296_out_cnt, sport, ip_tot, udp_len, payload_len, hex_buf);
+                        }
+                        if (mutate_launchspec(payload, payload_len, profile_num, (payload_len >= 1000 || g_debug_mode) ? diag_buf : NULL, sizeof(diag_buf))) {
                             udp->check = 0;
                             udp->check = htons(udp_checksum(ip, udp, udp_len));
                             ip->check = 0;
@@ -1434,7 +2234,7 @@ int main(int argc, char *argv[]) {
                             memcpy(seq_key, payload + 1, 4);
                             memcpy(seq_key + 4, payload + 17, 4);
                             int already_seen = 0;
-                            for (int s = 0; s < unique_seqs; s++) {
+                            for (int s = 0; s < unique_seqs && s < MAX_SEEN_SEQS; s++) {
                                 if (memcmp(seen_seqs[s], seq_key, 8) == 0) {
                                     already_seen = 1;
                                     break;
@@ -1454,13 +2254,20 @@ int main(int argc, char *argv[]) {
                             if (!first_mutated_announced) {
                                 first_mutated_announced = 1;
                                 first_mutated_at = monotonic_seconds();
+                                emit_event("{\"type\":\"stream_enhanced\",\"bitrate\":%s,\"fragmented\":0}", profile_num);
                                 printf("[注入] 🎯 截获并修改 LaunchSpec 握手参数为 %s Mbps！\n", profile_num);
                                 fflush(stdout);
                             }
-                        } else if (payload_len >= 1000) {
-                            unmatched_9296_large_out++;
-                            if (!first_unmatched_diag[0] && diag_buf[0]) {
-                                snprintf(first_unmatched_diag, sizeof(first_unmatched_diag), "%s", diag_buf);
+                        } else {
+                            if (should_log_pkt && diag_buf[0]) {
+                                debug_log("UDP/9296 #%llu 未命中 LaunchSpec (%s)",
+                                          (unsigned long long)debug_udp9296_out_cnt, diag_buf);
+                            }
+                            if (payload_len >= 1000) {
+                                unmatched_9296_large_out++;
+                                if (!first_unmatched_diag[0] && diag_buf[0]) {
+                                    snprintf(first_unmatched_diag, sizeof(first_unmatched_diag), "%s", diag_buf);
+                                }
                             }
                         }
                     } else if (!g_mode_oneway && is_in && sport == 9296) {
@@ -1517,10 +2324,10 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            if (conf.confirmed) break;
+            if (!g_watch_mode && conf.confirmed) break;
         }
 
-        if (conf.confirmed) break;
+        if (!g_watch_mode && conf.confirmed) break;
     }
 
     free(bpf_buffer);
@@ -1528,6 +2335,11 @@ int main(int argc, char *argv[]) {
 
     if (mac_conflict_aborted) {
         return 1;
+    }
+    if (g_watch_mode) {
+        printf("[守望] 🛑 自动守望进程已停止并彻底复原网络直连。\n");
+        fflush(stdout);
+        return 0;
     }
 
     double target_mbps = conf.last_target_raw > 0 ? ((double)conf.last_target_raw / 1000000.0) : 0.0;

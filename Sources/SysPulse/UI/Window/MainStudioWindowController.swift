@@ -98,6 +98,7 @@ public final class StudioWindowNavigationState {
         didSet {
             if oldValue != selectedTab {
                 SystemResourceMonitor.shared.refreshDemandFromMain()
+                AccessoryBatteryManager.shared.updateVisibilityState()
             }
         }
     }
@@ -106,6 +107,7 @@ public final class StudioWindowNavigationState {
         didSet {
             if oldValue != isModalPresented {
                 SystemResourceMonitor.shared.refreshDemandFromMain()
+                AccessoryBatteryManager.shared.updateVisibilityState()
             }
         }
     }
@@ -268,6 +270,7 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     public private(set) var isWindowVisible: Bool = false
+    public private(set) var isWindowActivelyVisible: Bool = false
 
     private override init() {
         super.init()
@@ -345,8 +348,10 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         }
 
         isWindowVisible = true
+        isWindowActivelyVisible = true
         StudioWindowNavigationState.shared.isMainWindowVisible = true
         SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
         if let win = window {
             win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
             win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -369,6 +374,40 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    public func refreshEffectiveVisibility() {
+        let sleepCoord = SystemSleepCoordinator.shared
+        let visibleOnScreen: Bool = {
+            guard isWindowVisible,
+                  let win = window,
+                  win.isVisible,
+                  !win.isMiniaturized,
+                  win.occlusionState.contains(.visible),
+                  !sleepCoord.isScreenAsleep,
+                  !sleepCoord.isSystemAsleep else {
+                return false
+            }
+            return true
+        }()
+        isWindowActivelyVisible = visibleOnScreen
+        StudioWindowNavigationState.shared.isMainWindowVisible = visibleOnScreen
+        let popoverShown = MenuBarController.shared?.isPopoverShown ?? false
+        PowerSourceEngine.shared.setPanelVisible(visibleOnScreen || popoverShown)
+        SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
+    }
+
+    public func windowDidChangeOcclusionState(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidMiniaturize(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidDeminiaturize(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
     public func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         return NSSize(
             width: max(1200, frameSize.width),
@@ -378,9 +417,12 @@ public final class MainStudioWindowController: NSObject, NSWindowDelegate {
 
     public func windowWillClose(_ notification: Notification) {
         isWindowVisible = false
+        isWindowActivelyVisible = false
         StudioWindowNavigationState.shared.isMainWindowVisible = false
-        PowerSourceEngine.shared.setPanelVisible(false)
+        let popoverShown = MenuBarController.shared?.isPopoverShown ?? false
+        PowerSourceEngine.shared.setPanelVisible(popoverShown)
         SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
         // Return to lightweight menu bar agent mode so Full Screen menu bar auto-hide is never blocked
         NSApp.setActivationPolicy(.accessory)
         NSApp.deactivate()

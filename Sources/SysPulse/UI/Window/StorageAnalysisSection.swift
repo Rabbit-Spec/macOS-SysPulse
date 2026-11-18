@@ -213,8 +213,8 @@ public struct StorageAnalysisSection: View {
                 .pointingHandOnHover()
             } else {
                 Button {
-                    // 分析主目录前检查完全磁盘访问权限
-                    if permissions.fullDiskAccessStatus != .authorized && analysis.selectedLocation == .home {
+                    // 分析全盘或主目录前检查完全磁盘访问权限
+                    if permissions.fullDiskAccessStatus != .authorized && (analysis.selectedLocation == .home || analysis.selectedLocation == .entireDisk) {
                         analysis.showingFDAGuidance = true
                     } else {
                         analysis.startScan()
@@ -244,6 +244,12 @@ public struct StorageAnalysisSection: View {
     private var locationPickerMenu: some View {
         Menu {
             Section("常用位置") {
+                Button {
+                    analysis.startScan(location: .entireDisk)
+                } label: {
+                    Label("全盘概览 (/)", systemImage: "internaldrive.fill")
+                }
+
                 Button {
                     analysis.startScan(location: .home)
                 } label: {
@@ -337,13 +343,64 @@ public struct StorageAnalysisSection: View {
     private var spaceInsightsOverviewCard: some View {
         cardContainer {
             HStack(spacing: 0) {
+                let deltaSubtitle: String = {
+                    let base = "\(analysis.totalScannedFiles) 个项目"
+                    var suffix = ""
+                    if analysis.pendingSizingCount > 0 {
+                        suffix = " · 后台核算 \(analysis.pendingSizingCount) 项"
+                    } else if let delta = analysis.diskTelemetry.scanDeltaBytes {
+                        if abs(delta) < 1024 * 1024 {
+                            suffix = " · 较上次持平"
+                        } else {
+                            let sign = delta >= 0 ? "+" : "-"
+                            let absStr = ByteCountFormatter.string(fromByteCount: abs(delta), countStyle: .file)
+                            suffix = " · 较上次 \(sign)\(absStr)"
+                        }
+                    }
+                    return base + suffix
+                }()
+
                 insightStatColumn(
                     icon: "chart.pie.fill",
                     color: Color.cyan,
-                    title: "当前占用总计",
+                    title: "当前扫描总计",
                     value: analysis.formattedTotalBytes,
-                    subtitle: "\(analysis.totalScannedFiles) 个项目"
+                    subtitle: deltaSubtitle
                 )
+
+                dividerLine
+
+                let telemetry = analysis.diskTelemetry
+                let purgeable = analysis.hiddenInsights.first(where: { $0.id == "purgeable" })?.detectedSize ?? "自动管理"
+                let diskUsedText = telemetry.volumeUsedBytes > 0
+                    ? ByteCountFormatter.string(fromByteCount: telemetry.volumeUsedBytes, countStyle: .file)
+                    : "--"
+                let diskTotalText = telemetry.volumeTotalBytes > 0
+                    ? ByteCountFormatter.string(fromByteCount: telemetry.volumeTotalBytes, countStyle: .file)
+                    : "--"
+                let apfsGapSubtitle: String = {
+                    guard telemetry.volumeTotalBytes > 0 else { return "APFS 物理块与系统预留" }
+                    guard analysis.totalScannedBytes > 0 && telemetry.volumeUsedBytes > 0 else {
+                        return "总 \(diskTotalText) · 可清除 \(purgeable)"
+                    }
+                    let diff = telemetry.volumeUsedBytes - analysis.totalScannedBytes
+                    if diff > 1024 * 1024 * 512 && analysis.selectedLocation == .entireDisk {
+                        let gapStr = ByteCountFormatter.string(fromByteCount: diff, countStyle: .file)
+                        return "总 \(diskTotalText) · 系统/快照差异 \(gapStr)"
+                    } else if diff < -1024 * 1024 * 512 {
+                        let cloneStr = ByteCountFormatter.string(fromByteCount: -diff, countStyle: .file)
+                        return "总 \(diskTotalText) · 含 APFS 克隆 \(cloneStr)"
+                    }
+                    return "总 \(diskTotalText) · 可清除 \(purgeable)"
+                }()
+                insightStatColumn(
+                    icon: "internaldrive.fill",
+                    color: Color.blue,
+                    title: "卷宗实际已用",
+                    value: diskUsedText,
+                    subtitle: apfsGapSubtitle
+                )
+                .help("可清除空间：\(purgeable)。物理已用与文件求和功能差异通常来源于 APFS 写时复制克隆、时间机器快照、系统预留或 \(analysis.protectedUnreadableCount) 个受保护未读目录。")
 
                 dividerLine
 
@@ -353,17 +410,6 @@ public struct StorageAnalysisSection: View {
                     title: "最大单项占用",
                     value: analysis.topLargeFiles.first?.formattedSize ?? "--",
                     subtitle: analysis.topLargeFiles.first?.name ?? "未检测到大文件"
-                )
-
-                dividerLine
-
-                let purgeable = analysis.hiddenInsights.first(where: { $0.id == "purgeable" })?.detectedSize ?? "系统自动释放"
-                insightStatColumn(
-                    icon: "externaldrive.badge.icloud",
-                    color: Color.blue,
-                    title: "系统可清除空间",
-                    value: purgeable,
-                    subtitle: "临时缓存与预留数据"
                 )
 
                 dividerLine
@@ -437,6 +483,31 @@ public struct StorageAnalysisSection: View {
                 browserToolBar
                     .frame(height: 44)
                     .padding(.horizontal, 16)
+
+                if let actionMsg = analysis.lastActionMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: actionMsg.contains("拦截") || actionMsg.contains("失败") || actionMsg.contains("无法") ? "exclamationmark.shield.fill" : "checkmark.circle.fill")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(actionMsg.contains("拦截") || actionMsg.contains("失败") || actionMsg.contains("无法") ? Color.orange : Color.green)
+                        Text(actionMsg)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(theme.primaryText)
+                            .lineLimit(1)
+                        Spacer()
+                        Button {
+                            analysis.lastActionMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(colorScheme == .dark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+                }
 
                 Divider()
                     .overlay(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
@@ -545,6 +616,98 @@ public struct StorageAnalysisSection: View {
 
             Spacer()
 
+            if analysis.activeViewMode == .browser && analysis.rootNode != nil {
+                HStack(spacing: 6) {
+                    if analysis.isMultiSelectMode {
+                        Button {
+                            analysis.selectUnusedOverYearInCurrentFolder()
+                        } label: {
+                            Text("选一年未动")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 8)
+                                .frame(height: 26)
+                                .background(Capsule().fill(Color.orange.opacity(0.12)))
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+
+                        if !analysis.selectedNodeIDs.isEmpty {
+                            let selStr = ByteCountFormatter.string(fromByteCount: analysis.selectedNodesBytes, countStyle: .file)
+                            Button {
+                                analysis.moveSelectedNodesToTrash()
+                            } label: {
+                                Text("移到废纸篓 (\(analysis.selectedNodeIDs.count) · \(selStr))")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(Color.white)
+                                    .padding(.horizontal, 9)
+                                    .frame(height: 26)
+                                    .background(Capsule().fill(Color.red))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                        }
+                    }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            analysis.showHiddenFilesInBrowser.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: analysis.showHiddenFilesInBrowser ? "eye.fill" : "eye.slash")
+                                .font(.system(size: 10.5))
+                            Text(analysis.hiddenEntriesCountInCurrentFolder > 0 ? "隐藏文件夹(\(analysis.hiddenEntriesCountInCurrentFolder))" : "隐藏文件夹")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(analysis.showHiddenFilesInBrowser ? Color.cyan : theme.secondaryText)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(Capsule().fill((analysis.showHiddenFilesInBrowser ? Color.cyan : Color.gray).opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                    .help("显示或隐藏 .ollama / .cache / .claude 等以点开头的目录")
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            analysis.isMultiSelectMode.toggle()
+                            if !analysis.isMultiSelectMode {
+                                analysis.clearNodeSelection()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 10.5))
+                            Text("多选")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(analysis.isMultiSelectMode ? Color.blue : theme.secondaryText)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(Capsule().fill((analysis.isMultiSelectMode ? Color.blue : Color.gray).opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+
+                    if let current = analysis.currentNode {
+                        Button {
+                            analysis.refreshNode(current)
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(theme.secondaryText)
+                                .frame(width: 26, height: 26)
+                                .background(Circle().fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)))
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+                        .help("仅刷新当前目录（无需整盘重扫）")
+                    }
+                }
+            }
+
             HStack(spacing: 2) {
                 ForEach(AnalysisViewMode.allCases) { mode in
                     let isSelected = (analysis.activeViewMode == mode)
@@ -641,6 +804,10 @@ public struct StorageAnalysisSection: View {
 
             let items = analysis.currentFolderChildren
             let currentDirTotalBytes = max(1, analysis.currentNode?.sizeBytes ?? 1)
+            let collapseLimit = 20
+            let shouldCollapseTail = !analysis.isTailExpanded && items.count > 25 && analysis.searchQuery.isEmpty
+            let visibleItems = shouldCollapseTail ? Array(items.prefix(collapseLimit)) : items
+            let hiddenTailItems = shouldCollapseTail ? Array(items.dropFirst(collapseLimit)) : []
 
             if items.isEmpty {
                 VStack(spacing: 8) {
@@ -655,10 +822,35 @@ public struct StorageAnalysisSection: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(items) { item in
+                        ForEach(visibleItems) { item in
                             browserRow(item: item, totalDirBytes: currentDirTotalBytes)
                             Divider()
                                 .overlay(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02))
+                        }
+
+                        if shouldCollapseTail {
+                            let tailBytes = hiddenTailItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                            let tailFormatted = ByteCountFormatter.string(fromByteCount: tailBytes, countStyle: .file)
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    analysis.isTailExpanded = true
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "ellipsis.circle.fill")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(theme.secondaryText)
+                                    Text("其余 \(hiddenTailItems.count) 个较小项目（合计 \(tailFormatted)）· 点击展开全部")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(theme.secondaryText)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
                         }
                     }
                     .padding(.bottom, 8)
@@ -670,23 +862,84 @@ public struct StorageAnalysisSection: View {
     private func browserRow(item: AnalysisNode, totalDirBytes: Int64) -> some View {
         let proportion = min(1.0, max(0.0, Double(item.sizeBytes) / Double(totalDirBytes)))
         let percentStr = String(format: "%.1f%%", proportion * 100)
+        let isSelected = analysis.selectedNodeIDs.contains(item.id)
 
         return HStack(spacing: 12) {
             HStack(spacing: 10) {
+                if analysis.isMultiSelectMode {
+                    Button {
+                        analysis.toggleNodeSelection(item)
+                    } label: {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.blue : theme.secondaryText.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+                }
+
                 Image(nsImage: item.icon)
                     .resizable()
                     .frame(width: 20, height: 20)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(item.name)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                            .lineLimit(1)
+
+                        if item.isHiddenFolder {
+                            Text("隐藏目录")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(Color.cyan)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.cyan.opacity(0.12)))
+                        }
+
+                        if item.isProtectedOrUnreadable {
+                            Text("需磁盘访问权限")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        } else if item.isSizingPending {
+                            Text("核算中")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(Color.blue)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.blue.opacity(0.14)))
+                        }
+
+                        if !item.isDirectory && item.isUnusedOverYear {
+                            Text("一年未动")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        }
+                    }
 
                     if item.isDirectory {
-                        Text("\(item.childCount) 项")
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundStyle(theme.secondaryText)
+                        if item.isProtectedOrUnreadable {
+                            Text("受系统隐私保护 · 开启完全磁盘访问权限后可精确统计")
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(Color.orange.opacity(0.9))
+                                .lineLimit(1)
+                        } else if let hint = analysis.folderPurposeHint(for: item) {
+                            Text("\(item.childCount) 项 · \(hint)")
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(theme.secondaryText)
+                                .lineLimit(1)
+                        } else {
+                            Text("\(item.childCount) 项")
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(theme.secondaryText)
+                        }
                     } else if item.isPackage {
                         Text("应用软件包 · \(item.extensionName)")
                             .font(.system(size: 11, weight: .regular))
@@ -729,13 +982,13 @@ public struct StorageAnalysisSection: View {
 
             Text(item.formattedSize)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(theme.primaryText)
+                .foregroundStyle(item.isProtectedOrUnreadable ? Color.orange : theme.primaryText)
                 .frame(width: 120, alignment: .trailing)
 
             Spacer()
 
             HStack(spacing: 6) {
-                if item.isDirectory {
+                if item.isDirectory && !item.isProtectedOrUnreadable {
                     Button {
                         analysis.navigateTo(node: item)
                     } label: {
@@ -799,6 +1052,42 @@ public struct StorageAnalysisSection: View {
                 analysis.navigateTo(node: item)
             } else {
                 analysis.revealInFinder(url: item.url)
+            }
+        }
+        .contextMenu {
+            if item.isDirectory {
+                Button {
+                    analysis.navigateTo(node: item)
+                } label: {
+                    Label("进入目录", systemImage: "arrow.right.circle")
+                }
+                Button {
+                    analysis.refreshNode(item)
+                } label: {
+                    Label("刷新此目录", systemImage: "arrow.clockwise")
+                }
+            } else {
+                Button {
+                    analysis.openItem(url: item.url)
+                } label: {
+                    Label("打开文件", systemImage: "arrow.up.forward.app")
+                }
+            }
+            Button {
+                analysis.revealInFinder(url: item.url)
+            } label: {
+                Label("在访达中显示", systemImage: "folder")
+            }
+            Button {
+                analysis.copyPath(item.path)
+            } label: {
+                Label("复制完整路径", systemImage: "doc.on.doc")
+            }
+            Divider()
+            Button(role: .destructive) {
+                analysis.moveToTrash(node: item)
+            } label: {
+                Label("移到废纸篓", systemImage: "trash")
             }
         }
     }
@@ -875,12 +1164,23 @@ public struct StorageAnalysisSection: View {
                     .frame(width: 20, height: 20)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(theme.primaryText)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(item.name)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                            .lineLimit(1)
 
-                    Text(item.extensionName)
+                        if item.isUnusedOverYear {
+                            Text("一年未动")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.orange.opacity(0.14)))
+                        }
+                    }
+
+                    Text("\(item.extensionName) · \(item.fileKind.rawValue)")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(theme.secondaryText)
                 }
@@ -946,6 +1246,29 @@ public struct StorageAnalysisSection: View {
         .onTapGesture(count: 2) {
             analysis.revealInFinder(url: item.url)
         }
+        .contextMenu {
+            Button {
+                analysis.openItem(url: item.url)
+            } label: {
+                Label("打开文件", systemImage: "arrow.up.forward.app")
+            }
+            Button {
+                analysis.revealInFinder(url: item.url)
+            } label: {
+                Label("在访达中显示", systemImage: "folder")
+            }
+            Button {
+                analysis.copyPath(item.path)
+            } label: {
+                Label("复制完整路径", systemImage: "doc.on.doc")
+            }
+            Divider()
+            Button(role: .destructive) {
+                analysis.moveToTrash(largeFile: item)
+            } label: {
+                Label("移到废纸篓", systemImage: "trash")
+            }
+        }
     }
 
     private func rankBadgeColor(rank: Int) -> Color {
@@ -961,7 +1284,104 @@ public struct StorageAnalysisSection: View {
 
     private var hiddenSpaceInsightsView: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
+                if !analysis.ageBuckets.isEmpty || !analysis.sizeBuckets.isEmpty || !analysis.kindBuckets.isEmpty {
+                    HStack(alignment: .top, spacing: 12) {
+                        if !analysis.ageBuckets.isEmpty {
+                            breakdownCard(
+                                title: "文件沉睡年龄",
+                                icon: "clock.badge.exclamationmark.fill",
+                                tint: .orange,
+                                buckets: analysis.ageBuckets,
+                                totalBytes: max(1, analysis.totalScannedBytes)
+                            )
+                        }
+
+                        if !analysis.sizeBuckets.isEmpty {
+                            breakdownCard(
+                                title: "体积分层占比",
+                                icon: "chart.bar.fill",
+                                tint: .purple,
+                                buckets: analysis.sizeBuckets,
+                                totalBytes: max(1, analysis.totalScannedBytes)
+                            )
+                        }
+
+                        if !analysis.kindBuckets.isEmpty {
+                            breakdownCard(
+                                title: "文件类型构成",
+                                icon: "square.grid.2x2.fill",
+                                tint: .cyan,
+                                buckets: Array(analysis.kindBuckets.prefix(4)),
+                                totalBytes: max(1, analysis.totalScannedBytes)
+                            )
+                        }
+                    }
+                }
+
+                if !analysis.toolAdvisories.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "terminal.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Color.mint)
+                            Text("CLI 专项工具深度占用建议（Docker / Ollama / Xcode / Homebrew）")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundStyle(theme.primaryText)
+                        }
+
+                        ForEach(analysis.toolAdvisories) { adv in
+                            HStack(spacing: 12) {
+                                Image(systemName: adv.iconName)
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(Color.mint)
+                                    .frame(width: 32, height: 32)
+                                    .background(Circle().fill(Color.mint.opacity(0.14)))
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(adv.toolName)
+                                            .font(.system(size: 13, weight: .bold))
+                                            .foregroundStyle(theme.primaryText)
+                                        Text(adv.formattedSize)
+                                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(Color.mint)
+                                    }
+                                    Text(adv.summary)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(theme.secondaryText)
+                                    Text(adv.cliCommand)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(theme.primaryText.opacity(0.9))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(RoundedRectangle(cornerRadius: 5).fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05)))
+                                }
+
+                                Spacer()
+
+                                Button("复制命令") {
+                                    analysis.copyPath(adv.cliCommand)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button("打开目录") {
+                                    analysis.revealInFinder(url: adv.targetURL)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            .padding(10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.mint.opacity(colorScheme == .dark ? 0.06 : 0.04))
+                                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.mint.opacity(0.2), lineWidth: 0.8))
+                            )
+                        }
+                    }
+                }
+
                 ForEach(analysis.hiddenInsights) { insight in
                     hiddenInsightRow(insight: insight)
                 }
@@ -970,6 +1390,59 @@ public struct StorageAnalysisSection: View {
             .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func breakdownCard(
+        title: String,
+        icon: String,
+        tint: Color,
+        buckets: [AnalysisBucketMetric],
+        totalBytes: Int64
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+            }
+
+            ForEach(buckets) { bucket in
+                let ratio = min(1.0, max(0.0, Double(bucket.bytes) / Double(totalBytes)))
+                let col = badgeColor(name: bucket.tintName)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(bucket.label)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(theme.primaryText)
+                        Spacer()
+                        Text("\(bucket.formattedSize) · \(bucket.count) 项")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.06))
+                                .frame(height: 5)
+                            Capsule()
+                                .fill(col)
+                                .frame(width: max(4, geo.size.width * CGFloat(ratio)), height: 5)
+                        }
+                    }
+                    .frame(height: 5)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04), lineWidth: 0.8))
+        )
     }
 
     private func hiddenInsightRow(insight: HiddenSpaceInsight) -> some View {
@@ -1039,6 +1512,11 @@ public struct StorageAnalysisSection: View {
         case "green": return Color.green
         case "cyan": return Color.cyan
         case "orange": return Color.orange
+        case "red": return Color.red
+        case "mint": return Color.mint
+        case "indigo": return Color.indigo
+        case "pink": return Color.pink
+        case "teal": return Color.teal
         default: return Color.gray
         }
     }

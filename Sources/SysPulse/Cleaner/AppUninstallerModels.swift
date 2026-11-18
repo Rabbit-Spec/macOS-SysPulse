@@ -6,12 +6,21 @@ public enum AppSpaceComponentType: String, CaseIterable, Identifiable, Sendable 
     case appBundle = "应用本体"
     case containers = "沙盒容器"
     case groupContainers = "共享群组"
+    case applicationScripts = "应用脚本"
     case appSupport = "应用支持数据"
     case caches = "运行缓存"
+    case httpStorages = "网络存储"
+    case webKit = "网页容器"
     case preferences = "偏好设置"
+    case syncedPreferences = "同步偏好"
     case savedState = "窗口状态"
     case launchAgents = "自启代理"
+    case launchDaemons = "守护进程"
+    case helperTools = "特权助手"
+    case systemPlugins = "系统扩展"
+    case receipts = "安装票据"
     case logs = "运行日志"
+    case homebrewCask = "Cask 源"
 
     public var id: String { rawValue }
 
@@ -20,14 +29,28 @@ public enum AppSpaceComponentType: String, CaseIterable, Identifiable, Sendable 
         case .appBundle: return "app.badge.fill"
         case .containers: return "cube.box.fill"
         case .groupContainers: return "shippingbox.fill"
+        case .applicationScripts: return "scroll.fill"
         case .appSupport: return "folder.fill.badge.gearshape"
         case .caches: return "archivebox.fill"
+        case .httpStorages: return "network"
+        case .webKit: return "safari.fill"
         case .preferences: return "slider.horizontal.2.square"
+        case .syncedPreferences: return "icloud.fill"
         case .savedState: return "macwindow.on.rectangle"
         case .launchAgents: return "bolt.horizontal.fill"
+        case .launchDaemons: return "server.rack"
+        case .helperTools: return "wrench.and.screwdriver.fill"
+        case .systemPlugins: return "puzzlepiece.extension.fill"
+        case .receipts: return "doc.plaintext.fill"
         case .logs: return "doc.text.magnifyingglass"
+        case .homebrewCask: return "shippingbox.circle.fill"
         }
     }
+}
+
+public enum AppResidueConfidence: String, Sendable {
+    case auto = "高置信"
+    case review = "建议复核"
 }
 
 public struct AppSpaceComponent: Identifiable, Sendable {
@@ -36,19 +59,25 @@ public struct AppSpaceComponent: Identifiable, Sendable {
     public let path: URL
     public let sizeBytes: Int64
     public let isSafeToTrash: Bool
+    public let confidence: AppResidueConfidence
+    public let evidenceLabel: String
 
     public init(
         id: UUID = UUID(),
         type: AppSpaceComponentType,
         path: URL,
         sizeBytes: Int64,
-        isSafeToTrash: Bool = true
+        isSafeToTrash: Bool = true,
+        confidence: AppResidueConfidence = .auto,
+        evidenceLabel: String = ""
     ) {
         self.id = id
         self.type = type
         self.path = path
         self.sizeBytes = sizeBytes
         self.isSafeToTrash = isSafeToTrash
+        self.confidence = confidence
+        self.evidenceLabel = evidenceLabel
     }
 
     public var formattedSize: String {
@@ -69,6 +98,18 @@ public struct AppSpaceComponent: Identifiable, Sendable {
     }
 }
 
+public struct HomebrewCaskMatch: Sendable {
+    public let token: String
+    public let caskroomPath: URL
+    public let installedVersion: String
+
+    public init(token: String, caskroomPath: URL, installedVersion: String) {
+        self.token = token
+        self.caskroomPath = caskroomPath
+        self.installedVersion = installedVersion
+    }
+}
+
 public struct InstalledAppInfo: Identifiable, Sendable {
     public let id: UUID
     public let name: String
@@ -80,6 +121,8 @@ public struct InstalledAppInfo: Identifiable, Sendable {
     public let isRunning: Bool
     public let runningPID: pid_t?
     public let isSystemApp: Bool
+    public let caskMatch: HomebrewCaskMatch?
+    public let hasLaunchRegistrations: Bool
     public let components: [AppSpaceComponent]
     public let totalSizeBytes: Int64
     public let binarySizeBytes: Int64
@@ -96,6 +139,8 @@ public struct InstalledAppInfo: Identifiable, Sendable {
         isRunning: Bool = false,
         runningPID: pid_t? = nil,
         isSystemApp: Bool = false,
+        caskMatch: HomebrewCaskMatch? = nil,
+        hasLaunchRegistrations: Bool = false,
         components: [AppSpaceComponent] = []
     ) {
         self.id = id
@@ -108,6 +153,8 @@ public struct InstalledAppInfo: Identifiable, Sendable {
         self.isRunning = isRunning
         self.runningPID = runningPID
         self.isSystemApp = isSystemApp
+        self.caskMatch = caskMatch
+        self.hasLaunchRegistrations = hasLaunchRegistrations
         self.components = components
 
         let total = components.reduce(0) { $0 + $1.sizeBytes }
@@ -118,17 +165,9 @@ public struct InstalledAppInfo: Identifiable, Sendable {
         self.dataSizeBytes = max(0, total - bin)
     }
 
-    public var formattedTotalSize: String {
-        formatBytes(totalSizeBytes)
-    }
-
-    public var formattedBinarySize: String {
-        formatBytes(binarySizeBytes)
-    }
-
-    public var formattedDataSize: String {
-        formatBytes(dataSizeBytes)
-    }
+    public var formattedTotalSize: String { formatBytes(totalSizeBytes) }
+    public var formattedBinarySize: String { formatBytes(binarySizeBytes) }
+    public var formattedDataSize: String { formatBytes(dataSizeBytes) }
 
     public var isUnused: Bool {
         guard let d = lastUsedDate else { return true }
@@ -145,19 +184,12 @@ public struct InstalledAppInfo: Identifiable, Sendable {
         guard let d = lastUsedDate else { return "长期未使用" }
         let cal = Calendar.current
         let days = cal.dateComponents([.day], from: d, to: Date()).day ?? 0
-        if days == 0 {
-            return "今天有活动"
-        } else if days == 1 {
-            return "昨天有活动"
-        } else if days < 7 {
-            return "\(days) 天前有活动"
-        } else if days < 30 {
-            return "\(days / 7) 周前有活动"
-        } else if days < 365 {
-            return "\(days / 30) 个月前有活动"
-        } else {
-            return "1 年以上未活动"
-        }
+        if days == 0 { return "今天有活动" }
+        else if days == 1 { return "昨天有活动" }
+        else if days < 7 { return "\(days) 天前有活动" }
+        else if days < 30 { return "\(days / 7) 周前有活动" }
+        else if days < 365 { return "\(days / 30) 个月前有活动" }
+        else { return "1 年以上未活动" }
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -182,6 +214,8 @@ public struct OrphanedResidueItem: Identifiable, Sendable {
     public let path: URL
     public let sizeBytes: Int64
     public let lastModifiedDate: Date?
+    public let confidence: AppResidueConfidence
+    public let evidenceLabel: String
 
     public init(
         id: UUID = UUID(),
@@ -190,7 +224,9 @@ public struct OrphanedResidueItem: Identifiable, Sendable {
         componentType: AppSpaceComponentType,
         path: URL,
         sizeBytes: Int64,
-        lastModifiedDate: Date? = nil
+        lastModifiedDate: Date? = nil,
+        confidence: AppResidueConfidence = .auto,
+        evidenceLabel: String = "未匹配到宿主应用"
     ) {
         self.id = id
         self.originalAppName = originalAppName
@@ -199,6 +235,8 @@ public struct OrphanedResidueItem: Identifiable, Sendable {
         self.path = path
         self.sizeBytes = sizeBytes
         self.lastModifiedDate = lastModifiedDate
+        self.confidence = confidence
+        self.evidenceLabel = evidenceLabel
     }
 
     public var formattedSize: String {
@@ -215,6 +253,59 @@ public struct OrphanedResidueItem: Identifiable, Sendable {
     }
 }
 
+// MARK: - 命令行工具卸载项
+
+public enum CommandLineToolSource: String, CaseIterable, Identifiable, Sendable {
+    case homebrewFormula = "Homebrew"
+    case userLocalBin = "用户目录 Bin"
+    case systemLocalBin = "系统 Local Bin"
+    case npmGlobal = "npm 全局"
+    case uvOrPipx = "pipx / uv"
+
+    public var id: String { rawValue }
+}
+
+public struct CommandLineToolItem: Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let displayTitle: String
+    public let source: CommandLineToolSource
+    public let installURL: URL
+    public let binaryURL: URL?
+    public let version: String
+    public let sizeBytes: Int64
+    public let isRunning: Bool
+    public let formulaName: String?
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        displayTitle: String,
+        source: CommandLineToolSource,
+        installURL: URL,
+        binaryURL: URL?,
+        version: String,
+        sizeBytes: Int64,
+        isRunning: Bool = false,
+        formulaName: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.displayTitle = displayTitle
+        self.source = source
+        self.installURL = installURL
+        self.binaryURL = binaryURL
+        self.version = version
+        self.sizeBytes = sizeBytes
+        self.isRunning = isRunning
+        self.formulaName = formulaName
+    }
+
+    public var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
+    }
+}
+
 public enum AppSortOption: String, CaseIterable, Identifiable, Sendable {
     case sizeDesc = "占用体积 ↓"
     case nameAsc = "应用名称 A-Z"
@@ -226,9 +317,20 @@ public enum AppSortOption: String, CaseIterable, Identifiable, Sendable {
 
 public enum UninstallerSubTab: String, CaseIterable, Identifiable, Sendable {
     case installedApps = "应用空间与卸载"
+    case commandLineTools = "命令行工具"
     case orphanedResidues = "无主残留"
+    case startupItems = "启动项管理"
 
     public var id: String { rawValue }
+
+    public var iconName: String {
+        switch self {
+        case .installedApps: return "square.stack.3d.up.fill"
+        case .commandLineTools: return "terminal.fill"
+        case .orphanedResidues: return "trash.slash.fill"
+        case .startupItems: return "bolt.badge.checkmark.fill"
+        }
+    }
 }
 
 // MARK: - 应用分类筛选器
@@ -241,7 +343,6 @@ public enum AppCategoryFilter: String, CaseIterable, Identifiable, Sendable {
     case system = "系统应用"
 
     public var id: String { rawValue }
-
     public var displayName: String { rawValue }
 
     public var iconName: String {
@@ -265,8 +366,6 @@ public enum AppCategoryFilter: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-// MARK: - Uninstaller Deletion Mode (废纸篓 vs 永久删除)
-
 public enum UninstallerDeleteMode: String, CaseIterable, Identifiable, Sendable {
     case moveToTrash = "移到废纸篓 (推荐)"
     case permanent = "直接永久删除"
@@ -283,8 +382,6 @@ public enum UninstallerDeleteMode: String, CaseIterable, Identifiable, Sendable 
     }
 }
 
-// MARK: - Uninstaller Status Machine
-
 public enum UninstallerStatus: Sendable, Equatable {
     case idle
     case scanning(progress: Double, currentApp: String)
@@ -292,8 +389,6 @@ public enum UninstallerStatus: Sendable, Equatable {
     case uninstalling(progress: Double, currentApp: String)
     case finished(freedBytes: Int64, count: Int)
 }
-
-// MARK: - Unified Row Item for Card 3
 
 public enum UninstallerRowItem: Identifiable, Sendable {
     case app(InstalledAppInfo)

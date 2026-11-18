@@ -47,8 +47,8 @@ public final class PowerSourceEngine {
     }
 
     public func activate() {
-        setupHIDWatchdog()
         refresh(forceUIUpdate: true)
+        setupHIDWatchdog()
         startListening()
         seedInitialEvent()
     }
@@ -74,13 +74,20 @@ public final class PowerSourceEngine {
 
     private func updateHIDPollingCadence(triggerImmediate: Bool = false) {
         guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
-        // When macOS IOPS already monitors AC/battery via IOPSNotificationCreateRunLoopSource,
-        // keep HID USB polling at 30s and skip IOPS-redundant usages to eliminate synchronous USB blocking.
-        let iopsActive = lastPollFoundIOPS
-        let interval: Double = iopsActive ? 30.0 : (isPanelVisible ? 8.0 : 30.0)
+        // When macOS IOPS (ioupsd) already detects and reports the external UPS via IOPSNotificationCreateRunLoopSource,
+        // stop direct IOHIDManager USB polling completely to avoid USB hub pipe stalls during sleep/wake transitions.
+        if lastPollFoundIOPS {
+            lastHIDSnapshot = nil
+            HIDHardwareWatchdog.shared.stop()
+            return
+        }
+        guard !SystemSleepCoordinator.shared.isSystemAsleep && !SystemSleepCoordinator.shared.isScreenAsleep else {
+            return
+        }
+        let interval: Double = isPanelVisible ? 8.0 : 30.0
         HIDHardwareWatchdog.shared.setPollingInterval(
             interval,
-            skipIOPSRedundantUsages: iopsActive,
+            skipIOPSRedundantUsages: false,
             triggerImmediate: triggerImmediate
         )
     }
@@ -91,25 +98,24 @@ public final class PowerSourceEngine {
         HIDHardwareWatchdog.shared.onSnapshotUpdated = { [weak self] snapshot in
             self?.handleBackgroundHIDSnapshot(snapshot)
         }
-        let iopsActive = lastPollFoundIOPS
-        let initialInterval: Double = iopsActive ? 30.0 : (isPanelVisible ? 8.0 : 30.0)
-        HIDHardwareWatchdog.shared.setPollingInterval(
-            initialInterval,
-            skipIOPSRedundantUsages: iopsActive,
-            triggerImmediate: false
-        )
-        HIDHardwareWatchdog.shared.start(intervalSeconds: initialInterval)
+        updateHIDPollingCadence(triggerImmediate: false)
     }
 
     public func pauseForSleep() {
         HIDHardwareWatchdog.shared.pauseForSleep()
     }
 
+    public func handleScreenDidSleep() {
+        HIDHardwareWatchdog.shared.pauseForSleep()
+    }
+
     public func resumeFromWake() {
         guard FeatureToggleManager.shared.enablePluginUPSManager else { return }
-        HIDHardwareWatchdog.shared.resumeFromWake(afterDelaySeconds: 2.5)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.refresh(forceUIUpdate: true)
+        refresh(forceUIUpdate: true)
+        if !lastPollFoundIOPS && !SystemSleepCoordinator.shared.isScreenAsleep {
+            HIDHardwareWatchdog.shared.resumeFromWake(afterDelaySeconds: 2.0)
+        } else {
+            HIDHardwareWatchdog.shared.stop()
         }
     }
 
@@ -566,6 +572,7 @@ public final class PowerSourceEngine {
     }
 
     public func appendEvent(_ event: PowerEvent) {
+        guard event.type != .selfTest else { return }
         events.insert(event, at: 0)
         if events.count > 100 {
             events.removeLast()
@@ -587,12 +594,6 @@ public final class PowerSourceEngine {
         telemetry.isAudibleAlarmEnabled = !newMuted
         logger.info("蜂鸣器状态切换为: \(newMuted ? "已静音" : "开启")")
 
-        appendEvent(PowerEvent(
-            type: .selfTest,
-            details: newMuted ? "已将 UPS 蜂鸣器设为静音模式（断电时不发声）" : "已恢复开启 UPS 蜂鸣器提示音（断电时蜂鸣警报）",
-            batteryLevel: telemetry.batteryLevel,
-            voltageVolts: telemetry.voltageVolts
-        ))
         onTelemetryUpdated?()
     }
 }

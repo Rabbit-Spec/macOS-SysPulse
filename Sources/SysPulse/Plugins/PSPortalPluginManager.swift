@@ -1,7 +1,9 @@
 import Foundation
 import AppKit
 import Darwin
+import Network
 import Observation
+@preconcurrency import UserNotifications
 
 public enum PortalRelayMode: String, CaseIterable, Identifiable, Sendable {
     case oneWayDirect = "oneway"
@@ -54,6 +56,8 @@ public enum PluginModuleType: String, CaseIterable, Identifiable, Sendable {
     case arpSniffer = "arp_sniffer"
     case upsManager = "ups_manager"
     case antigravityContext = "antigravity_context"
+    case aiToolCleaner = "ai_tool_cleaner"
+    case softwareUpdater = "software_updater"
 
     public var id: String { rawValue }
 
@@ -64,6 +68,21 @@ public enum PluginModuleType: String, CaseIterable, Identifiable, Sendable {
         case .arpSniffer: return "局域网 ARP 嗅探与设备诊断"
         case .upsManager: return "UPS 电源管理"
         case .antigravityContext: return "Antigravity 上下文扩容"
+        case .aiToolCleaner: return "AI 工具清理与维护"
+        case .softwareUpdater: return "软件更新中心"
+        }
+    }
+
+    /// 各插件当前版本号；后续涉及某插件功能或逻辑变更时对应版本自动递增 0.0.1。
+    public var version: String {
+        switch self {
+        case .psPortal: return "0.1.5"
+        case .wifiLatency: return "0.1.1"
+        case .arpSniffer: return "0.1.3"
+        case .upsManager: return "0.1.7"
+        case .antigravityContext: return "0.1.1"
+        case .aiToolCleaner: return "0.1.2"
+        case .softwareUpdater: return "0.1.2"
         }
     }
 }
@@ -75,6 +94,75 @@ public enum SonyDeviceRole: String, Sendable, Codable {
     case other
 }
 
+public enum PortalEngineState: Equatable, Sendable {
+    case disabled
+    case idle
+    case authorizing
+    case starting
+    case autoWatching
+    case autoBursting
+    case manualListening(remainingSeconds: Int)
+    case enhancingActive(bitrateTag: String)
+    case stopping
+    case suspendedOutOfLAN
+    case needsConfiguration
+    case deviceOffline
+    case alreadyStreamingHint
+    case error(String)
+
+    public var badgeText: String {
+        switch self {
+        case .disabled: return "未启用"
+        case .idle: return "已启用"
+        case .authorizing: return "等待授权..."
+        case .starting: return "启动中..."
+        case .autoWatching: return "自动待命中"
+        case .autoBursting: return "正在连接..."
+        case .manualListening(let s): return s > 0 ? "监听中 (\(s)s)" : "监听握手中..."
+        case .enhancingActive: return "画质增强中"
+        case .stopping: return "停止中..."
+        case .suspendedOutOfLAN: return "不在家庭网络"
+        case .needsConfiguration: return "待配置 IP"
+        case .deviceOffline: return "设备未在线"
+        case .alreadyStreamingHint: return "需重连生效"
+        case .error: return "启动异常"
+        }
+    }
+
+    public func subtitle(bitrateTag: String) -> String {
+        switch self {
+        case .disabled:
+            return "插件未启用，可随时在模块开关中开启"
+        case .idle:
+            return "就绪 · 可一键手动监听，或开启全自动增强守望"
+        case .authorizing:
+            return "请在系统弹窗中输入密码或验证触控 ID"
+        case .starting:
+            return "正在初始化原生 BPF 旁路监听..."
+        case .autoWatching:
+            return "静默监听中 · Portal 唤醒后自动开启 \(bitrateTag)"
+        case .autoBursting:
+            return "已捕捉 Portal 连接请求，正在切换 \(bitrateTag)..."
+        case .manualListening(let s):
+            return "等待 Portal 点击连接（剩余 \(s)s）"
+        case .enhancingActive(let tag):
+            return "当前串流已开启 \(tag) 高画质 · 视频直连不经过 Mac"
+        case .stopping:
+            return "正在恢复局域网直连 ARP 路由..."
+        case .suspendedOutOfLAN:
+            return "当前不在家庭局域网，自动守望已休眠"
+        case .needsConfiguration:
+            return "需先扫描或填写 PS5 与 Portal IP"
+        case .deviceOffline:
+            return "PS5 未开机，请在唤醒主机后重试"
+        case .alreadyStreamingHint:
+            return "已在串流中，断开并重新连接后即可生效"
+        case .error(let msg):
+            return msg
+        }
+    }
+}
+
 public struct DiscoveredDevice: Identifiable, Sendable, Codable {
     public let id: String
     public let ip: String
@@ -83,6 +171,9 @@ public struct DiscoveredDevice: Identifiable, Sendable, Codable {
     public let role: SonyDeviceRole
     public let hostName: String?
     public let label: String
+    public let confidence: Int
+    public let matchReasons: [String]
+    public let interfaceName: String?
 
     public init(
         id: String,
@@ -91,7 +182,10 @@ public struct DiscoveredDevice: Identifiable, Sendable, Codable {
         isLikelySony: Bool,
         role: SonyDeviceRole = .other,
         hostName: String? = nil,
-        label: String
+        label: String,
+        confidence: Int = 50,
+        matchReasons: [String] = [],
+        interfaceName: String? = nil
     ) {
         self.id = id
         self.ip = ip
@@ -100,6 +194,9 @@ public struct DiscoveredDevice: Identifiable, Sendable, Codable {
         self.role = role
         self.hostName = hostName
         self.label = label
+        self.confidence = confidence
+        self.matchReasons = matchReasons
+        self.interfaceName = interfaceName
     }
 }
 
@@ -114,10 +211,14 @@ public final class PSPortalPluginManager {
     public static let shared = PSPortalPluginManager()
 
     public var activePluginType: PluginModuleType? = nil
+    public var engineState: PortalEngineState = .disabled
     public var isRunning: Bool = false
     public var isStopping: Bool = false
     public var isListening: Bool = false
     public var isStreamActive: Bool = false
+    public var autoWatchEnabled: Bool = false
+    public var debugModeEnabled: Bool = false
+    public var notificationsEnabled: Bool = true
     public var relayMode: PortalRelayMode = .oneWayDirect
     public var targetBitrate: BitrateProfile = .mbps100
     public var selectedInterface: String = "en0"
@@ -133,7 +234,8 @@ public final class PSPortalPluginManager {
     public var isCheckingForUpdates: Bool = false
     public var updateStatusMessage: String? = nil
     public var logs: [PortalLogEntry] = []
-    public var pluginVersion: String = "0.1.3"
+    public var lastLogAppendAt: Date = .distantPast
+    public var pluginVersion: String = PluginModuleType.psPortal.version
     public var pluginAuthor: String = "atameric"
     public var pluginRepo: String = "https://github.com/atameric/ps5-portal-high-bitrate"
     public var installedCommitSHA: String = "4430daa"
@@ -141,17 +243,26 @@ public final class PSPortalPluginManager {
     public var installedCommitMsg: String = "docs: add October 21 Raspberry Pi and mobile update"
     public var lastError: String? = nil
     public var listenRemainingSeconds: Int? = nil
+    public var cooldownRemainingSeconds: Int? = nil
 
     private var relayProcess: Process?
     private var outputPipe: Pipe?
-    private var logWatchTimer: Timer?
     private var listenCountdownTimer: Timer?
     private var listenDeadline: Date?
-    private var lastLogOffset: UInt64 = 0
+    private var listenCountdownDuration: Int = 120
+    private var cooldownCountdownTimer: Timer?
+    private var cooldownDeadline: Date?
+    private var cooldownCountdownDuration: Int = 20
     private var logLineBuffer: Data = Data()
     private var relaySessionID: UInt64 = 0
     private var resetWorkItem: DispatchWorkItem?
     private var hasExplicitInterfaceConfig: Bool = false
+    private var pathMonitor: NWPathMonitor?
+    private let pathMonitorQueue = DispatchQueue(label: "com.syspulse.portal.pathmonitor")
+    private var pathDebounceTask: Task<Void, Never>?
+    private var streamPresenceTask: Task<Void, Never>?
+    private var consecutivePortalMisses: Int = 0
+    private var suspendedBySleep: Bool = false
 
     nonisolated private static let privilegedEngineDirectory = "/Library/Application Support/SysPulse"
     nonisolated private static let privilegedEnginePath = "/Library/Application Support/SysPulse/portal_engine"
@@ -207,24 +318,73 @@ public final class PSPortalPluginManager {
             isBootstrapped = true
         }
         detectInterfaces()
+        if case .disabled = engineState {
+            transition(to: (ps5IP.isEmpty || portalIP.isEmpty) ? .needsConfiguration : .idle)
+        }
         if logs.isEmpty {
             appendLog("[SysPulse] 插件子系统加载完成：PS Portal 串流画质增强模块 (v\(pluginVersion))")
+        }
+        startNetworkPathMonitor()
+        if autoWatchEnabled {
+            ensureAutoWatchRunning(reason: "插件已激活")
         }
     }
 
     public func deactivate() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathDebounceTask?.cancel()
+        pathDebounceTask = nil
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
         stopRelay()
-        logWatchTimer?.invalidate()
-        logWatchTimer = nil
         stopListenCountdown()
+        stopCooldownCountdown()
         isScanningDevices = false
         discoveredDevices = []
+        transition(to: .disabled)
+    }
+
+    private func transition(to newState: PortalEngineState) {
+        engineState = newState
+        switch newState {
+        case .disabled, .idle, .needsConfiguration, .suspendedOutOfLAN, .deviceOffline, .error:
+            isRunning = false
+            isStopping = false
+            isListening = false
+            isStreamActive = false
+        case .authorizing, .starting, .autoWatching:
+            isRunning = true
+            isStopping = false
+            isListening = false
+            isStreamActive = false
+        case .autoBursting, .manualListening:
+            isRunning = true
+            isStopping = false
+            isListening = true
+            isStreamActive = false
+        case .enhancingActive:
+            isRunning = autoWatchEnabled
+            isStopping = false
+            isListening = false
+            isStreamActive = true
+        case .alreadyStreamingHint:
+            isRunning = autoWatchEnabled
+            isStopping = false
+            isListening = false
+            isStreamActive = false
+        case .stopping:
+            isStopping = true
+            isListening = false
+            isStreamActive = false
+        }
     }
 
     private func startListenCountdown(seconds: Int = 120) {
         listenCountdownTimer?.invalidate()
-        listenDeadline = Date().addingTimeInterval(TimeInterval(seconds))
-        listenRemainingSeconds = seconds
+        listenCountdownDuration = max(1, seconds)
+        listenDeadline = Date().addingTimeInterval(TimeInterval(listenCountdownDuration))
+        listenRemainingSeconds = listenCountdownDuration
 
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -233,9 +393,12 @@ public final class PSPortalPluginManager {
                     self.stopListenCountdown()
                     return
                 }
-                let remaining = max(0, min(seconds, Int(ceil(deadline.timeIntervalSinceNow))))
+                let remaining = max(0, min(self.listenCountdownDuration, Int(ceil(deadline.timeIntervalSinceNow))))
                 if self.listenRemainingSeconds != remaining {
                     self.listenRemainingSeconds = remaining
+                    if case .manualListening = self.engineState {
+                        self.engineState = .manualListening(remainingSeconds: remaining)
+                    }
                 }
                 if remaining <= 0 {
                     self.listenCountdownTimer?.invalidate()
@@ -252,6 +415,40 @@ public final class PSPortalPluginManager {
         listenCountdownTimer = nil
         listenDeadline = nil
         listenRemainingSeconds = nil
+    }
+
+    private func startCooldownCountdown(seconds: Int = 20) {
+        cooldownCountdownTimer?.invalidate()
+        cooldownCountdownDuration = max(1, seconds)
+        cooldownDeadline = Date().addingTimeInterval(TimeInterval(cooldownCountdownDuration))
+        cooldownRemainingSeconds = cooldownCountdownDuration
+
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isRunning, let deadline = self.cooldownDeadline else {
+                    self.stopCooldownCountdown()
+                    return
+                }
+                let remaining = max(0, min(self.cooldownCountdownDuration, Int(ceil(deadline.timeIntervalSinceNow))))
+                if self.cooldownRemainingSeconds != remaining {
+                    self.cooldownRemainingSeconds = remaining
+                }
+                if remaining <= 0 {
+                    self.cooldownCountdownTimer?.invalidate()
+                    self.cooldownCountdownTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cooldownCountdownTimer = timer
+    }
+
+    private func stopCooldownCountdown() {
+        cooldownCountdownTimer?.invalidate()
+        cooldownCountdownTimer = nil
+        cooldownDeadline = nil
+        cooldownRemainingSeconds = nil
     }
 
     // MARK: - 目录与资源自举
@@ -367,6 +564,15 @@ public final class PSPortalPluginManager {
         if let portal = json["portalIP"] as? String, !portal.isEmpty {
             self.portalIP = portal
         }
+        if let autoWatch = json["autoWatchEnabled"] as? Bool {
+            self.autoWatchEnabled = autoWatch
+        }
+        if let debugMode = json["debugModeEnabled"] as? Bool {
+            self.debugModeEnabled = debugMode
+        }
+        if let notif = json["notificationsEnabled"] as? Bool {
+            self.notificationsEnabled = notif
+        }
         if let adm = json["runWithAdmin"] as? Bool {
             self.runWithAdmin = adm
         }
@@ -380,6 +586,9 @@ public final class PSPortalPluginManager {
             "interfaceManualSelection": hasExplicitInterfaceConfig,
             "ps5IP": ps5IP,
             "portalIP": portalIP,
+            "autoWatchEnabled": autoWatchEnabled,
+            "debugModeEnabled": debugModeEnabled,
+            "notificationsEnabled": notificationsEnabled,
             "runWithAdmin": runWithAdmin
         ]
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted) {
@@ -487,6 +696,7 @@ public final class PSPortalPluginManager {
 
     nonisolated private static func collectPortalScanArpSnapshot(
         targetIface: String,
+        activeIfaceNames: Set<String>,
         localIP: String,
         gatewayIP: String
     ) -> [String: (ip: String, mac: String, ifName: String)] {
@@ -508,10 +718,10 @@ public final class PSPortalPluginManager {
             guard mac.count == 17,
                   mac != "00:00:00:00:00:00",
                   mac != "ff:ff:ff:ff:ff:ff" else { continue }
-            if !localIP.isEmpty && !entry.ifName.isEmpty && entry.ifName != targetIface {
+            if !entry.ifName.isEmpty && entry.ifName != targetIface && !activeIfaceNames.contains(entry.ifName) {
                 continue
             }
-            if arpByIP[ip] != nil && ifName != targetIface {
+            if let existing = arpByIP[ip], existing.ifName == targetIface && ifName != targetIface {
                 continue
             }
             arpByIP[ip] = (ip: ip, mac: mac, ifName: ifName)
@@ -541,14 +751,41 @@ public final class PSPortalPluginManager {
         }
     }
 
+    public func bindDiscoveredDevice(_ device: DiscoveredDevice, as roleOverride: SonyDeviceRole? = nil) {
+        let role = roleOverride ?? device.role
+        if let iface = device.interfaceName, !iface.isEmpty, iface != selectedInterface,
+           activeInterfaces.contains(where: { $0.name == iface }) {
+            selectInterface(iface)
+            appendLog("[SysPulse] 🔄 已同步切换监听网卡至 \(iface)")
+        }
+        switch role {
+        case .ps5Host:
+            ps5IP = device.ip
+        case .portalClient:
+            portalIP = device.ip
+        case .unknownSony, .other:
+            break
+        }
+        saveConfig()
+        refreshConfigurationStateIfIdle()
+        if autoWatchEnabled && !isRunning {
+            ensureAutoWatchRunning(reason: "设备配置更新")
+        }
+    }
+
     public func scanLocalDevices() {
         guard !isScanningDevices else { return }
+        if case .autoBursting = engineState {
+            appendLog("[提示] 当前正在自动触发连接握手窗口，请等待数秒后再执行扫描。")
+            return
+        }
         detectInterfaces()
         self.isScanningDevices = true
         self.appendLog("[SysPulse] 正在唤醒并探测局域网 PS5 / PS Portal 设备...")
 
         let targetIface = self.selectedInterface
         let localIP = self.selectedInterfaceInfo?.ip ?? ""
+        let activeIfaceNames = Set(self.activeInterfaces.map(\.name))
         let (gatewayIP, _) = NetworkDetailModel.detectGatewayAndInterface()
         let currentPS5 = self.ps5IP.trimmingCharacters(in: .whitespacesAndNewlines)
         let currentPortal = self.portalIP.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -557,7 +794,8 @@ public final class PSPortalPluginManager {
             let subnetInfo = ActiveInterfaceInfo.ipv4SubnetInfo(for: targetIface)
             let (targetHosts, resolvedBroadcasts) = LanDeviceSnifferEngine.resolveScanTargetHosts(
                 interfaceName: targetIface,
-                fallbackGatewayIP: gatewayIP
+                fallbackGatewayIP: gatewayIP,
+                extraIPs: [currentPS5, currentPortal]
             )
             var mutableBroadcasts = resolvedBroadcasts
             if let bcast = subnetInfo?.broadcast, !bcast.isEmpty, !mutableBroadcasts.contains(bcast) {
@@ -565,87 +803,50 @@ public final class PSPortalPluginManager {
             }
             let broadcastTargets = mutableBroadcasts
 
-            // 优先定向唤醒已记录的 PS5 / Portal IP（突破无线 DTIM 深度待机省电唤醒延迟）
             let priorityIPs = Array(Set([currentPS5, currentPortal].filter {
                 !$0.isEmpty && $0 != localIP && $0 != gatewayIP && Self.isValidUnicastIPv4($0)
             }))
 
-            // 第 1 阶段：优先 IP ICMP + TCP (9295/443/80) + UDP (5353/9302) 唤醒，兼顾全网段 UDP + ICMP 扫网
+            // 第 1 阶段：优先 IP + 全网段并发唤醒
             if !priorityIPs.isEmpty {
-                LanDeviceSnifferEngine.probeHostsViaICMP(
-                    ips: priorityIPs,
-                    interfaceName: targetIface,
-                    batchSize: priorityIPs.count,
-                    batchDelayUs: 0
-                )
-                LanDeviceSnifferEngine.probeHostsViaTCP(
-                    ips: priorityIPs,
-                    ports: [9295, 443, 80],
-                    interfaceName: targetIface,
-                    batchSize: priorityIPs.count,
-                    batchDelayUs: 12_000
-                )
-                LanDeviceSnifferEngine.probeHostsViaUDP(
-                    ips: priorityIPs,
-                    ports: [5353, 9302],
-                    interfaceName: targetIface,
-                    batchSize: priorityIPs.count,
-                    batchDelayUs: 0
-                )
+                LanDeviceSnifferEngine.probeHostsViaICMP(ips: priorityIPs, interfaceName: targetIface, batchSize: priorityIPs.count, batchDelayUs: 0)
+                LanDeviceSnifferEngine.probeHostsViaTCP(ips: priorityIPs, ports: [9295, 443, 80, 7000, 8008], interfaceName: targetIface, batchSize: priorityIPs.count, batchDelayUs: 10_000)
+                LanDeviceSnifferEngine.probeHostsViaUDP(ips: priorityIPs, ports: [5353, 9302], interfaceName: targetIface, batchSize: priorityIPs.count, batchDelayUs: 0)
             }
 
             if !targetHosts.isEmpty {
-                LanDeviceSnifferEngine.probeHostsViaUDP(
-                    ips: targetHosts,
-                    ports: [5353, 137],
-                    interfaceName: targetIface,
-                    batchSize: 32,
-                    batchDelayUs: 6_000
-                )
-                LanDeviceSnifferEngine.probeHostsViaICMP(
-                    ips: targetHosts,
-                    interfaceName: targetIface,
-                    batchSize: 32,
-                    batchDelayUs: 6_000
-                )
+                LanDeviceSnifferEngine.probeHostsViaUDP(ips: targetHosts, ports: [5353, 137], interfaceName: targetIface, batchSize: 32, batchDelayUs: 6_000)
+                LanDeviceSnifferEngine.probeHostsViaICMP(ips: targetHosts, interfaceName: targetIface, batchSize: 32, batchDelayUs: 6_000)
             }
             usleep(450_000)
 
             var arpByIP = Self.collectPortalScanArpSnapshot(
                 targetIface: targetIface,
+                activeIfaceNames: activeIfaceNames,
                 localIP: localIP,
                 gatewayIP: gatewayIP
             )
 
-            // 第 2 阶段：若待机 Portal 仍未从无线省电态（约 900ms DTIM 周期）唤醒入表，则补发 ICMP + TCP SYN 9295/443 再等 500ms
+            // 第 2 阶段：针对无线 DTIM 省电设备执行二次全量补漏唤醒
             let hasSavedPortalInArp = currentPortal.isEmpty || arpByIP[currentPortal] != nil
             let hasPortalCandidateInArp = arpByIP.values.contains {
-                LanDeviceSnifferEngine.isPortalOUI($0.mac) || LanDeviceSnifferEngine.isSonyInteractiveOUI($0.mac)
+                LanDeviceSnifferEngine.isPortalOUI($0.mac) ||
+                LanDeviceSnifferEngine.isSonyInteractiveOUI($0.mac)
             }
             if !hasSavedPortalInArp || !hasPortalCandidateInArp {
                 let missingPriority = priorityIPs.filter { arpByIP[$0] == nil }
                 let missingHosts = targetHosts.filter { arpByIP[$0] == nil }
-                let wakeupIPs = missingPriority.isEmpty ? missingHosts : Array(Set(missingPriority + missingHosts))
+                let wakeupIPs = Array(Set(missingPriority + missingHosts))
                 if !wakeupIPs.isEmpty {
                     DispatchQueue.main.async {
                         self?.appendLog("[SysPulse] 正在针对深度待机无线设备执行二次唤醒探活...")
                     }
-                    LanDeviceSnifferEngine.probeHostsViaICMP(
-                        ips: wakeupIPs,
-                        interfaceName: targetIface,
-                        batchSize: 32,
-                        batchDelayUs: 8_000
-                    )
-                    LanDeviceSnifferEngine.probeHostsViaTCP(
-                        ips: priorityIPs.isEmpty ? missingHosts : priorityIPs,
-                        ports: [9295, 443],
-                        interfaceName: targetIface,
-                        batchSize: 24,
-                        batchDelayUs: 15_000
-                    )
-                    usleep(500_000)
+                    LanDeviceSnifferEngine.probeHostsViaICMP(ips: wakeupIPs, interfaceName: targetIface, batchSize: 32, batchDelayUs: 7_000)
+                    LanDeviceSnifferEngine.probeHostsViaTCP(ips: wakeupIPs, ports: [9295, 443], interfaceName: targetIface, batchSize: 32, batchDelayUs: 8_000)
+                    usleep(550_000)
                     let refreshed = Self.collectPortalScanArpSnapshot(
                         targetIface: targetIface,
+                        activeIfaceNames: activeIfaceNames,
                         localIP: localIP,
                         gatewayIP: gatewayIP
                     )
@@ -655,18 +856,20 @@ public final class PSPortalPluginManager {
                 }
             }
 
-            // 第 3 阶段：并行执行 PlayStation DDP (UDP 9302) 与 多协议设备自报探测 (DNS PTR / mDNS / SSDP / NetBIOS)
+            // 第 3 阶段：全量单播 DDP 9302 + 多协议自报 + TCP 9295/7000/8008 端口指纹并查
             DispatchQueue.main.async {
-                self?.appendLog("[SysPulse] 正在通过 DDP (9302) + 多协议自报 + SIE OUI 综合识别主机与 Portal...")
+                self?.appendLog("[SysPulse] 正在通过 DDP (9302) + TCP 9295 与多协议特征识别 Sony 设备...")
             }
 
-            let ddpTargets = Array(Set(arpByIP.values.filter {
-                LanDeviceSnifferEngine.isSonyOUI($0.mac) || LanOuiDatabase.isLocallyAdministeredMAC($0.mac)
-            }.map(\.ip) + priorityIPs))
+            let targetIfaceARPIPs = arpByIP.values.filter { $0.ifName == targetIface }.map(\.ip)
+            let ddpTargets = Array(Set(targetIfaceARPIPs + priorityIPs))
             let reportTargets = Array(arpByIP.keys)
 
             let ddpBox = ProbeResultBox<[String: PlayStationDDPInfo]>([:])
             let reportBox = ProbeResultBox<[String: LanPeerSelfReport]>([:])
+            let tcp9295Box = ProbeResultBox<Set<String>>([])
+            let tcp7000Box = ProbeResultBox<Set<String>>([])
+            let tcp8008Box = ProbeResultBox<Set<String>>([])
             let probeGroup = DispatchGroup()
 
             probeGroup.enter()
@@ -675,7 +878,7 @@ public final class PSPortalPluginManager {
                     targetIPs: ddpTargets,
                     broadcastIPs: broadcastTargets,
                     interfaceName: targetIface,
-                    timeoutMs: 340
+                    timeoutMs: 600
                 )
                 ddpBox.set(map)
                 probeGroup.leave()
@@ -689,16 +892,55 @@ public final class PSPortalPluginManager {
                         gatewayIP: gatewayIP,
                         localIP: localIP,
                         interfaceName: targetIface,
-                        timeoutMs: 400
+                        timeoutMs: 450
                     )
                     reportBox.set(reports)
                     probeGroup.leave()
                 }
+
+                probeGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let open = LanDeviceSnifferEngine.probeHostsViaTCPWithResults(
+                        ips: targetIfaceARPIPs.isEmpty ? reportTargets : targetIfaceARPIPs,
+                        port: 9295,
+                        interfaceName: targetIface,
+                        timeoutMs: 320
+                    )
+                    tcp9295Box.set(open)
+                    probeGroup.leave()
+                }
+
+                probeGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let open = LanDeviceSnifferEngine.probeHostsViaTCPWithResults(
+                        ips: targetIfaceARPIPs.isEmpty ? reportTargets : targetIfaceARPIPs,
+                        port: 7000,
+                        interfaceName: targetIface,
+                        timeoutMs: 220
+                    )
+                    tcp7000Box.set(open)
+                    probeGroup.leave()
+                }
+
+                probeGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let open = LanDeviceSnifferEngine.probeHostsViaTCPWithResults(
+                        ips: targetIfaceARPIPs.isEmpty ? reportTargets : targetIfaceARPIPs,
+                        port: 8008,
+                        interfaceName: targetIface,
+                        timeoutMs: 220
+                    )
+                    tcp8008Box.set(open)
+                    probeGroup.leave()
+                }
             }
 
-            _ = probeGroup.wait(timeout: .now() + .milliseconds(550))
+            _ = probeGroup.wait(timeout: .now() + .milliseconds(780))
             let ddpMap = ddpBox.get()
             let selfReports = reportBox.get()
+            let tcp9295Open = tcp9295Box.get()
+            let tcp7000Open = tcp7000Box.get()
+            let tcp8008Open = tcp8008Box.get()
 
             var results: [DiscoveredDevice] = []
             for entry in arpByIP.values {
@@ -710,6 +952,8 @@ public final class PSPortalPluginManager {
                 let isPortalOUI = LanDeviceSnifferEngine.isPortalOUI(mac)
                 let isSIEOUI = LanDeviceSnifferEngine.isSonyInteractiveOUI(mac)
                 let isLocalAdminMAC = LanOuiDatabase.isLocallyAdministeredMAC(mac)
+                let hasTCP9295 = tcp9295Open.contains(ip)
+                let isSmartTVPort = tcp7000Open.contains(ip) || tcp8008Open.contains(ip)
 
                 let selfReportName = [report?.friendlyName, report?.model, report?.hostname]
                     .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -719,31 +963,52 @@ public final class PSPortalPluginManager {
                     .joined(separator: " ")
 
                 let isNonHandheldSonyDevice = !combinedText.contains("portal") && (
-                    combinedText.contains("bravia") ||
-                    combinedText.contains("xperia") ||
-                    combinedText.contains("soundbar") ||
+                    LanDeviceSnifferEngine.isNonHandheldSonyText(combinedText) ||
                     combinedText.contains("speaker") ||
-                    combinedText.contains("ht-") ||
                     combinedText.contains("srs-") ||
                     combinedText.contains("vpl-") ||
-                    (combinedText.contains("tv") && !combinedText.contains("ps"))
+                    (combinedText.contains("tv") && !combinedText.contains("ps")) ||
+                    isSmartTVPort
                 )
 
-                let matchesPortalName = combinedText.contains("portal")
-                let matchesSavedPortal = !currentPortal.isEmpty && ip == currentPortal && (isSonyOUI || isLocalAdminMAC)
-                let isPortalCandidate = !isNonHandheldSonyDevice && (isPortalOUI || matchesPortalName || isSIEOUI || matchesSavedPortal)
+                var ps5Score = 0
+                var ps5Reasons: [String] = []
+                if ddp != nil { ps5Score += 85; ps5Reasons.append("DDP 9302") }
+                if hasTCP9295 { ps5Score += 25; ps5Reasons.append("TCP 9295") }
+                if isSIEOUI && (ddp != nil || hasTCP9295) { ps5Score += 10; ps5Reasons.append("SIE 硬件段") }
+                if isNonHandheldSonyDevice { ps5Score -= 90 }
+
+                var portalScore = 0
+                var portalReasons: [String] = []
+                if isPortalOUI { portalScore += 55; portalReasons.append("Portal OUI") }
+                if combinedText.contains("portal") { portalScore += 45; portalReasons.append("主机名匹配") }
+                if isSIEOUI && ddp == nil && !hasTCP9295 && !isPortalOUI { portalScore += 30; portalReasons.append("SIE 硬件段") }
+                if !currentPortal.isEmpty && ip == currentPortal && (isSonyOUI || isLocalAdminMAC) {
+                    portalScore += 30
+                    portalReasons.append("历史 IP 吻合")
+                }
+                if isNonHandheldSonyDevice { portalScore -= 90 }
+                if ddp != nil || hasTCP9295 { portalScore = 0 }
 
                 let role: SonyDeviceRole
                 let label: String
                 let resolvedHostName: String?
                 let isSony: Bool
+                let confidence: Int
+                let reasons: [String]
 
-                if let ddp {
+                if ddp != nil || (hasTCP9295 && !isNonHandheldSonyDevice) {
                     role = .ps5Host
-                    resolvedHostName = ddp.hostName.isEmpty ? selfReportName : ddp.hostName
-                    label = ddp.hostName.isEmpty ? ddp.hostType : "\(ddp.hostType) (\(ddp.hostName))"
+                    resolvedHostName = (ddp?.hostName.isEmpty == false ? ddp?.hostName : nil) ?? selfReportName
+                    if let ddp {
+                        label = ddp.hostName.isEmpty ? ddp.hostType : "\(ddp.hostType) (\(ddp.hostName))"
+                    } else {
+                        label = resolvedHostName.map { "PS5 主机 (\($0))" } ?? "PS5 主机 (Remote Play 9295)"
+                    }
                     isSony = true
-                } else if isPortalCandidate {
+                    confidence = min(100, max(10, ps5Score))
+                    reasons = ps5Reasons
+                } else if !isNonHandheldSonyDevice && portalScore >= 40 {
                     role = .portalClient
                     resolvedHostName = selfReportName
                     if let selfReportName, !selfReportName.lowercased().contains("portal") {
@@ -753,21 +1018,32 @@ public final class PSPortalPluginManager {
                     } else if isPortalOUI {
                         label = "PS Portal"
                     } else if isSIEOUI {
-                        label = "PS Portal (SIE 硬件)"
+                        label = "PS Portal 候选 (SIE 硬件)"
                     } else {
-                        label = "PS Portal (已配置)"
+                        label = "PS Portal 候选"
                     }
                     isSony = true
+                    confidence = min(100, max(10, portalScore))
+                    reasons = portalReasons
                 } else if isSonyOUI {
                     role = .unknownSony
                     resolvedHostName = selfReportName
-                    label = selfReportName.map { "Sony \($0)" } ?? "Sony PlayStation / 影音设备"
+                    label = selfReportName.map { "Sony \($0)" } ?? "Sony 影音/PlayStation 设备"
                     isSony = true
+                    confidence = isNonHandheldSonyDevice ? 10 : 30
+                    reasons = isNonHandheldSonyDevice ? ["已排除非掌机外设"] : ["Sony OUI"]
                 } else {
                     role = .other
                     resolvedHostName = selfReportName
                     label = selfReportName ?? LanOuiDatabase.shared.lookup(mac)?.displayName ?? "局域网终端"
                     isSony = false
+                    confidence = 15
+                    reasons = []
+                }
+
+                var finalReasons = reasons
+                if entry.ifName != targetIface {
+                    finalReasons.append("位于网卡 \(entry.ifName)")
                 }
 
                 results.append(DiscoveredDevice(
@@ -777,11 +1053,13 @@ public final class PSPortalPluginManager {
                     isLikelySony: isSony,
                     role: role,
                     hostName: resolvedHostName,
-                    label: label
+                    label: label,
+                    confidence: confidence,
+                    matchReasons: finalReasons,
+                    interfaceName: entry.ifName
                 ))
             }
 
-            // 补充仅通过 UDP 9302 广播发现但暂未在 ARP 过滤命中的 PS5
             for (ip, ddp) in ddpMap where arpByIP[ip] == nil {
                 results.append(DiscoveredDevice(
                     id: "\(ip)-ddp",
@@ -790,11 +1068,13 @@ public final class PSPortalPluginManager {
                     isLikelySony: true,
                     role: .ps5Host,
                     hostName: ddp.hostName,
-                    label: ddp.hostName.isEmpty ? ddp.hostType : "\(ddp.hostType) (\(ddp.hostName))"
+                    label: ddp.hostName.isEmpty ? ddp.hostType : "\(ddp.hostType) (\(ddp.hostName))",
+                    confidence: 85,
+                    matchReasons: ["DDP 9302"],
+                    interfaceName: targetIface
                 ))
             }
 
-            // 排序：PS5 主机 -> PS Portal -> 其他 Sony -> 局域网终端，同级按 IPv4 数值升序
             results.sort { a, b in
                 let rank: (SonyDeviceRole) -> Int = { role in
                     switch role {
@@ -807,61 +1087,65 @@ public final class PSPortalPluginManager {
                 if rank(a.role) != rank(b.role) {
                     return rank(a.role) < rank(b.role)
                 }
+                if a.confidence != b.confidence {
+                    return a.confidence > b.confidence
+                }
                 let ip1 = LanDeviceSnifferEngine.ipToComparable(a.ip)
                 let ip2 = LanDeviceSnifferEngine.ipToComparable(b.ip)
                 if ip1 != ip2 { return ip1 < ip2 }
                 return a.ip < b.ip
             }
 
+            let sonyResults = results.filter(\.isLikelySony)
+
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.discoveredDevices = results
+                self.discoveredDevices = sonyResults
                 self.isScanningDevices = false
 
-                let isInActiveSubnet: (String) -> Bool = { ip in
-                    guard !ip.isEmpty else { return false }
-                    if let subnetInfo {
-                        let targetVal = LanDeviceSnifferEngine.ipToComparable(ip)
-                        return targetVal != 0 && (targetVal & subnetInfo.mask) == (subnetInfo.ip & subnetInfo.mask)
-                    }
-                    guard !localIP.isEmpty else { return true }
-                    let localPrefix = localIP.split(separator: ".").prefix(3).joined(separator: ".")
-                    let targetPrefix = ip.split(separator: ".").prefix(3).joined(separator: ".")
-                    return !localPrefix.isEmpty && localPrefix == targetPrefix
+                let sameIfacePS5 = sonyResults.filter { $0.role == .ps5Host && ($0.interfaceName == nil || $0.interfaceName == targetIface) }
+                let ps5Dev = sameIfacePS5.first ?? sonyResults.first(where: { $0.role == .ps5Host })
+
+                // 严格筛选 Portal：严禁把 Standby SIE 设备或 unknownSony 电视盲填为 Portal；已有 IP 时绝不擅自覆写
+                let sameIfacePortals = sonyResults.filter {
+                    $0.role == .portalClient &&
+                    $0.ip != ps5Dev?.ip &&
+                    ($0.interfaceName == nil || $0.interfaceName == targetIface)
                 }
+                let bestPortal = sameIfacePortals.first(where: { $0.confidence >= 60 })
+                    ?? sonyResults.first(where: { $0.role == .portalClient && $0.ip != ps5Dev?.ip && $0.confidence >= 60 })
 
-                let ps5Dev = results.first(where: { $0.role == .ps5Host })
-                // 三级优先匹配 Portal：精准 Portal OUI / 自报含 Portal / 已保存 Portal IP > 其他 SIE 互动娱乐硬件 > 回退其他 Sony 设备
-                let portalDev = results.first(where: {
-                    $0.role == .portalClient && $0.ip != ps5Dev?.ip && (
-                        LanDeviceSnifferEngine.isPortalOUI($0.mac) ||
-                        ($0.hostName?.lowercased().contains("portal") == true) ||
-                        (!currentPortal.isEmpty && $0.ip == currentPortal)
-                    )
-                })
-                ?? results.first(where: { $0.role == .portalClient && $0.ip != ps5Dev?.ip })
-                ?? results.first(where: { $0.role == .unknownSony && $0.ip != ps5Dev?.ip })
-
-                if let ps5 = ps5Dev {
-                    self.appendLog("[识别] PS5 -> \(ps5.ip)")
+                if let ps5 = ps5Dev, ps5.confidence >= 60 {
+                    let reasonsTag = ps5.matchReasons.isEmpty ? "" : " [\(ps5.matchReasons.joined(separator: "·"))]"
+                    self.appendLog("[识别] PS5 -> \(ps5.ip)\(reasonsTag)")
                     let curPS5 = self.ps5IP.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if curPS5.isEmpty || curPS5 == portalDev?.ip || !isInActiveSubnet(curPS5) {
+                    if curPS5.isEmpty {
                         self.ps5IP = ps5.ip
-                    } else if ps5.ip != curPS5 && !results.contains(where: { $0.ip == curPS5 }) {
-                        self.appendLog("[提示] 新识别到同网段 PS5 (\(ps5.ip))，若主机已换 IP 可点击上方胶囊切换。")
+                    } else if ps5.ip != curPS5 {
+                        self.appendLog("[提示] 发现同网段 PS5 (\(ps5.ip))，已保留当前设置的 \(curPS5)（如需更换请点击上方设备胶囊）。")
                     }
                 }
-                if let portal = portalDev {
-                    self.appendLog("[识别] Portal -> \(portal.ip) (\(portal.label))")
+
+                if let portal = bestPortal {
+                    let reasonsTag = portal.matchReasons.isEmpty ? "" : " [\(portal.matchReasons.joined(separator: "·"))]"
+                    self.appendLog("[识别] Portal -> \(portal.ip) (\(portal.label)\(reasonsTag))")
                     let curPortal = self.portalIP.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if curPortal.isEmpty || curPortal == ps5Dev?.ip || !isInActiveSubnet(curPortal) {
+                    if curPortal.isEmpty && portal.ip != self.ps5IP.trimmingCharacters(in: .whitespacesAndNewlines) {
                         self.portalIP = portal.ip
-                    } else if portal.role == .portalClient && portal.ip != curPortal && !results.contains(where: { $0.ip == curPortal }) {
-                        self.appendLog("[提示] 新识别到同网段 Portal (\(portal.ip))，若设备已换 IP 可点击上方胶囊切换。")
+                    } else if portal.ip != curPortal {
+                        self.appendLog("[提示] 发现同网段 Portal (\(portal.ip))，已保留当前设置的 \(curPortal)（如需更换请点击上方设备胶囊）。")
                     }
+                } else if let candidate = sonyResults.first(where: { $0.role == .portalClient && $0.ip != ps5Dev?.ip }) {
+                    self.appendLog("[提示] 发现疑似 Portal 设备 \(candidate.ip)，请在上方列表中确认后再手动点击填入。")
                 }
+
                 self.saveConfig()
-                self.appendLog("[SysPulse] 局域网扫描完成")
+                self.refreshConfigurationStateIfIdle()
+                if sonyResults.isEmpty {
+                    self.appendLog("[SysPulse] 扫描完成，暂未发现 Sony / PlayStation 设备。")
+                } else {
+                    self.appendLog("[SysPulse] Sony 设备扫描完成（发现 \(sonyResults.count) 台 Sony 设备）")
+                }
             }
         }
     }
@@ -887,7 +1171,141 @@ public final class PSPortalPluginManager {
 
     // MARK: - 插件运行控制
 
+    private func refreshConfigurationStateIfIdle() {
+        let hasIPs = !ps5IP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                     !portalIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        switch engineState {
+        case .idle, .needsConfiguration, .deviceOffline:
+            transition(to: hasIPs ? .idle : .needsConfiguration)
+        case .error:
+            if hasIPs { transition(to: .idle) }
+        default:
+            break
+        }
+    }
+
+    public func setAutoWatchEnabled(_ enabled: Bool) {
+        autoWatchEnabled = enabled
+        saveConfig()
+        if enabled {
+            ensureAutoWatchRunning(reason: "用户开启自动增强模式")
+        } else {
+            appendLog("[守望] 已关闭自动增强守望。")
+            if isRunning || isStopping {
+                stopRelay()
+            } else {
+                refreshConfigurationStateIfIdle()
+            }
+        }
+    }
+
+    public func setDebugModeEnabled(_ enabled: Bool) {
+        debugModeEnabled = enabled
+        saveConfig()
+        appendLog(enabled
+            ? "[DEBUG] 🔍 已开启详细抓包诊断模式（日志同步落盘至 ~/Library/Logs/SysPulse/psportal.log）"
+            : "[SysPulse] 已关闭 Debug 详细诊断模式")
+        if isRunning && autoWatchEnabled {
+            stopRelay()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, self.autoWatchEnabled else { return }
+                self.ensureAutoWatchRunning(reason: "应用 Debug 日志开关配置")
+            }
+        } else if isRunning {
+            appendLog("[提示] 当前手动会话仍在运行，重新启动「画质增强」后生效 Debug 底层抓包日志。")
+        }
+    }
+
+    public func openDebugLogFile() {
+        let path = logFilePath
+        if !FileManager.default.fileExists(atPath: path) {
+            let content = logs.map(\.text).joined(separator: "\n") + "\n"
+            try? content.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: (path as NSString).deletingLastPathComponent)
+    }
+
+    public func ensureAutoWatchRunning(reason: String) {
+        guard autoWatchEnabled, FeatureToggleManager.shared.enablePluginPSPortal else { return }
+        guard !isStopping else { return }
+        if case .autoWatching = engineState { return }
+        if case .autoBursting = engineState { return }
+        if case .enhancingActive = engineState { return }
+        if case .starting = engineState { return }
+        if case .authorizing = engineState { return }
+
+        detectInterfaces()
+        let trimmedPS5 = ps5IP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPortal = portalIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPS5.isEmpty, !trimmedPortal.isEmpty,
+              Self.isValidUnicastIPv4(trimmedPS5), Self.isValidUnicastIPv4(trimmedPortal),
+              trimmedPS5 != trimmedPortal else {
+            transition(to: .needsConfiguration)
+            appendLog("[守望] 需先完成 PS5 与 Portal IP 配置后才能启动自动待命（\(reason)）。")
+            return
+        }
+        guard isPS5OnDirectLAN() else {
+            transition(to: .suspendedOutOfLAN)
+            appendLog("[守望] 当前设备不在家庭局域网直连子网内，自动守望已自动休眠。")
+            return
+        }
+        launchRelay(watchMode: true, triggerReason: reason)
+    }
+
+    private func suspendAutoWatchForOutOfLAN(reason: String) {
+        guard autoWatchEnabled else { return }
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
+        if case .suspendedOutOfLAN = engineState { return }
+        appendLog("[守望] \(reason)，自动切换为休眠状态并复原直连路由。")
+        if isRunning {
+            terminateCurrentEngineProcess(transitionTo: .suspendedOutOfLAN)
+        } else {
+            transition(to: .suspendedOutOfLAN)
+        }
+    }
+
+    public func handleWillSleep() {
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
+        if isRunning || isListening || isStreamActive {
+            suspendedBySleep = autoWatchEnabled
+            stopRelay()
+        }
+    }
+
+    public func resumeFromWake() {
+        guard FeatureToggleManager.shared.enablePluginPSPortal else { return }
+        let shouldResume = autoWatchEnabled || suspendedBySleep
+        suspendedBySleep = false
+        guard shouldResume else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2.0))
+            self?.ensureAutoWatchRunning(reason: "Mac 唤醒恢复")
+        }
+    }
+
+    public func endEnhancementSession(reason: String = "串流结束，自动切回待命") {
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
+        consecutivePortalMisses = 0
+        if autoWatchEnabled && relayProcess?.isRunning == true {
+            transition(to: .autoWatching)
+            appendLog("[守望] ℹ️ \(reason)")
+        } else if autoWatchEnabled {
+            transition(to: .idle)
+            ensureAutoWatchRunning(reason: reason)
+        } else {
+            transition(to: (ps5IP.isEmpty || portalIP.isEmpty) ? .needsConfiguration : .idle)
+            appendLog("[SysPulse] ℹ️ \(reason)")
+        }
+    }
+
     public func startRelay() {
+        launchRelay(watchMode: false, triggerReason: "用户手动启动")
+    }
+
+    private func launchRelay(watchMode: Bool, triggerReason: String) {
         guard !isRunning && !isStopping else { return }
         bootstrapPluginDirectory()
 
@@ -898,55 +1316,59 @@ public final class PSPortalPluginManager {
 
         guard !trimmedPS5.isEmpty, !trimmedPortal.isEmpty else {
             lastError = "请先填写 PS5 IP 与 PS Portal IP（可点击「扫描局域网设备」快速识别并填入）。"
+            transition(to: .needsConfiguration)
             appendLog("[错误] \(lastError!)")
             return
         }
         guard Self.isValidUnicastIPv4(trimmedPS5), Self.isValidUnicastIPv4(trimmedPortal) else {
             lastError = "请输入合法的局域网 IPv4 地址（例如 192.168.x.x）。"
+            transition(to: .error(lastError!))
             appendLog("[错误] \(lastError!)")
             return
         }
         guard trimmedPS5 != trimmedPortal else {
             lastError = "PS5 IP 与 PS Portal IP 不能相同（\(trimmedPS5)）。"
+            transition(to: .error(lastError!))
             appendLog("[错误] \(lastError!)")
             return
-        }
-        // 若上次 DDP 扫描已确认 PS5 与 Portal 身份但用户填反，自动对调纠偏
-        if let ps5Confirmed = discoveredDevices.first(where: { $0.role == .ps5Host }),
-           let portalConfirmed = discoveredDevices.first(where: { $0.role == .portalClient }) ?? discoveredDevices.first(where: { $0.role == .unknownSony }),
-           trimmedPS5 == portalConfirmed.ip && trimmedPortal == ps5Confirmed.ip {
-            ps5IP = ps5Confirmed.ip
-            portalIP = portalConfirmed.ip
-            appendLog("[SysPulse] ⚡️ 根据 DDP 识别结果检测到 PS5 与 Portal IP 填反，已自动对调纠正。")
         }
         saveConfig()
 
         let engine = engineFileURL.path
         guard FileManager.default.isExecutableFile(atPath: engine) else {
             lastError = "未找到插件原生中继引擎: portal_engine"
+            transition(to: .error(lastError!))
             appendLog("[错误] \(lastError!)")
             return
         }
 
         resetWorkItem?.cancel()
         resetWorkItem = nil
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
+        stopListenCountdown()
+        stopCooldownCountdown()
+        consecutivePortalMisses = 0
         relaySessionID &+= 1
         let currentSession = relaySessionID
 
         lastError = nil
-        isRunning = true
-        isListening = true
-        isStreamActive = false
         logLineBuffer.removeAll()
+        transition(to: .starting)
 
-        appendLog("[SysPulse] 启动 PS Portal 串流画质增强模块…")
-        appendLog("[配置] 目标码率: \(targetBitrate.rawValue) | 模式: \(relayMode.rawValue) | 网卡: \(selectedInterface)")
+        if watchMode {
+            appendLog("[守望] 正在启动被动旁路守望引擎（\(triggerReason)）…")
+        } else {
+            appendLog("[SysPulse] 启动 PS Portal 串流画质增强模块…")
+        }
+        appendLog("[配置] 目标码率: \(targetBitrate.rawValue) | 模式: \(watchMode ? "watch/oneway" : relayMode.rawValue) | 网卡: \(selectedInterface)")
         appendLog("[配置] PS5: \(ps5IP) | Portal: \(portalIP)")
+        appendLog("[提示] ⏳ 正在初始化网络监听通道，请稍候（就绪前请暂勿在 Portal 点击连接）...")
 
         if runWithAdmin {
-            startPrivilegedRelay(engine: engine, sessionID: currentSession)
+            startPrivilegedRelay(engine: engine, sessionID: currentSession, watchMode: watchMode)
         } else {
-            startStandardRelay(engine: engine, sessionID: currentSession)
+            startStandardRelay(engine: engine, sessionID: currentSession, watchMode: watchMode)
         }
     }
 
@@ -990,69 +1412,106 @@ public final class PSPortalPluginManager {
         return proc.terminationStatus == 0
     }
 
-    private func launchPasswordlessRelay(sessionID: UInt64) -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+    private func buildEngineArguments(watchMode: Bool) -> [String] {
         var args = [
-            "-n",
-            Self.privilegedEnginePath,
             "--interface", selectedInterface,
             "--bitrate", targetBitrate.shortTag,
-            "--mode", relayMode.rawValue
+            "--mode", watchMode ? "oneway" : relayMode.rawValue,
+            "--parent-pid", String(ProcessInfo.processInfo.processIdentifier)
         ]
         if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
         if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
-        proc.arguments = args
+        if watchMode { args.append("--watch") }
+        if debugModeEnabled { args.append("--debug") }
+        return args
+    }
 
-        let currentLogPath = logFilePath
-        FileManager.default.createFile(atPath: currentLogPath, contents: nil)
-        let logHandle = FileHandle(forWritingAtPath: currentLogPath)
-        if let logHandle {
-            proc.standardOutput = logHandle
-            proc.standardError = logHandle
-        } else {
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-        }
+    private func launchEngineProcess(executablePath: String, arguments: [String], sessionID: UInt64, watchMode: Bool, isSudo: Bool) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: executablePath)
+        proc.arguments = arguments
+
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        self.outputPipe?.fileHandleForReading.readabilityHandler = nil
+        self.outputPipe = pipe
         self.relayProcess = proc
 
-        proc.terminationHandler = { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self, self.relaySessionID == sessionID else { return }
-                self.pollLogFile(sessionID: sessionID)
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self, self.relaySessionID == sessionID else { return }
+                self.ingestLogData(data, sessionID: sessionID)
+            }
+        }
+
+        proc.terminationHandler = { [weak self] p in
+            let status = p.terminationStatus
+            Task { @MainActor [weak self] in
+                guard let self, self.relaySessionID == sessionID else { return }
+                self.outputPipe?.fileHandleForReading.readabilityHandler = nil
+                self.outputPipe = nil
                 self.flushRemainingLogBuffer(sessionID: sessionID)
                 self.resetWorkItem?.cancel()
                 self.resetWorkItem = nil
-                self.isRunning = false
-                self.isListening = false
-                self.isStreamActive = false
+                self.streamPresenceTask?.cancel()
+                self.streamPresenceTask = nil
                 self.stopListenCountdown()
-                self.logWatchTimer?.invalidate()
-                self.logWatchTimer = nil
+                self.stopCooldownCountdown()
                 self.relayProcess = nil
+
+                if status == 2 && watchMode {
+                    self.transition(to: .suspendedOutOfLAN)
+                    return
+                }
+                if case .enhancingActive = self.engineState, !watchMode {
+                    // 单向/手动注入成功退出后保留「画质增强中」短时展示并由 presence/reset 收尾
+                    return
+                }
+                if case .error = self.engineState { return }
+                if case .suspendedOutOfLAN = self.engineState { return }
+                if case .disabled = self.engineState { return }
+                self.transition(to: (self.ps5IP.isEmpty || self.portalIP.isEmpty) ? .needsConfiguration : .idle)
+                if !isSudo || status != 0 {
+                    self.appendLog("[SysPulse] 插件进程已安全退出 (退出码: \(status))")
+                }
             }
         }
 
         do {
             try proc.run()
-            try? logHandle?.close()
             let pid = proc.processIdentifier
-            self.appendLog("[SysPulse] ✅ 管理员特权中继已在后台激活 (免密模式 · sudo PID: \(pid))。")
-            self.startTailingLogFile(sessionID: sessionID)
+            if isSudo {
+                self.appendLog("[SysPulse] ✅ 管理员特权引擎已激活 (直连管道 · PID: \(pid))。")
+            }
             return true
         } catch {
-            try? logHandle?.close()
+            pipe.fileHandleForReading.readabilityHandler = nil
+            self.outputPipe = nil
             self.relayProcess = nil
             return false
         }
     }
 
-    private func startPrivilegedRelay(engine: String, sessionID: UInt64) {
-        try? "".write(toFile: logFilePath, atomically: true, encoding: .utf8)
-        lastLogOffset = 0
+    private func launchPasswordlessRelay(sessionID: UInt64, watchMode: Bool) -> Bool {
+        let args = ["-n", Self.privilegedEnginePath] + buildEngineArguments(watchMode: watchMode)
+        return launchEngineProcess(
+            executablePath: "/usr/bin/sudo",
+            arguments: args,
+            sessionID: sessionID,
+            watchMode: watchMode,
+            isSudo: true
+        )
+    }
+
+    private func startPrivilegedRelay(engine: String, sessionID: UInt64, watchMode: Bool) {
         logLineBuffer.removeAll()
 
-        // 检测系统目录 /Library/Application Support/SysPulse/portal_engine 是否已就绪且具备 sudo 免密特权
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let isReady = Self.isPrivilegedEngineReady(stagedPath: engine) && Self.checkPasswordlessSudo()
 
@@ -1060,14 +1519,14 @@ public final class PSPortalPluginManager {
                 guard let self = self, self.relaySessionID == sessionID else { return }
 
                 if isReady {
-                    self.appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在启动原生 BPF 注入引擎...")
-                    if self.launchPasswordlessRelay(sessionID: sessionID) {
+                    self.appendLog("[SysPulse] ⚡️ 检测到系统免密特权已激活，正在启动原生 BPF 引擎...")
+                    if self.launchPasswordlessRelay(sessionID: sessionID, watchMode: watchMode) {
                         return
                     }
                     self.appendLog("[提示] 免密进程启动受限，尝试重新安装特权组件...")
                 }
 
-                // 首次安装或升级引擎：通过 AppleScript 将原生引擎安装至 root 专属目录并写入 sudoers
+                self.transition(to: .authorizing)
                 self.appendLog("[SysPulse] 正在申请 macOS 系统管理员特权以安装原生 BPF 引擎并建立免密通道...")
 
                 let privDir = Self.shellSingleQuoted(Self.privilegedEngineDirectory)
@@ -1096,25 +1555,27 @@ public final class PSPortalPluginManager {
                         if let err = errorDict {
                             let errMsg = err[NSAppleScript.errorMessage] as? String ?? "用户取消授权"
                             self.appendLog("[提示] 特权授权未完成: \(errMsg)")
-                            self.lastError = "需要管理员特权才能启用原生 BPF / ARP 注入（\(errMsg)）。"
+                            self.lastError = "需要管理员特权才能启用原生 BPF 引擎（\(errMsg)）。"
                             self.appendLog("[错误] \(self.lastError!)")
                             self.resetWorkItem?.cancel()
                             self.resetWorkItem = nil
-                            self.isRunning = false
-                            self.isListening = false
-                            self.isStreamActive = false
                             self.stopListenCountdown()
-                        } else if sudoReady && self.launchPasswordlessRelay(sessionID: sessionID) {
-                            self.appendLog("[SysPulse] ✅ 已完成系统级特权安装并建立免密通道。")
+                            self.transition(to: .error(self.lastError!))
+                        } else if sudoReady {
+                            self.transition(to: .starting)
+                            if self.launchPasswordlessRelay(sessionID: sessionID, watchMode: watchMode) {
+                                self.appendLog("[SysPulse] ✅ 已完成系统级特权安装并建立免密通道。")
+                            } else {
+                                self.lastError = "特权引擎启动失败，请检查日志。"
+                                self.transition(to: .error(self.lastError!))
+                            }
                         } else {
                             self.lastError = "免密特权通道未生效，请确认当前账户属于管理员组后重试。"
                             self.appendLog("[错误] \(self.lastError!)")
                             self.resetWorkItem?.cancel()
                             self.resetWorkItem = nil
-                            self.isRunning = false
-                            self.isListening = false
-                            self.isStreamActive = false
                             self.stopListenCountdown()
+                            self.transition(to: .error(self.lastError!))
                         }
                     }
                 }
@@ -1122,81 +1583,14 @@ public final class PSPortalPluginManager {
         }
     }
 
-    private func startStandardRelay(engine: String, sessionID: UInt64) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: engine)
-        var args = [
-            "--interface", selectedInterface,
-            "--bitrate", targetBitrate.shortTag,
-            "--mode", relayMode.rawValue
-        ]
-        if !ps5IP.isEmpty { args.append(contentsOf: ["--ps5", ps5IP]) }
-        if !portalIP.isEmpty { args.append(contentsOf: ["--portal", portalIP]) }
-        proc.arguments = args
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        self.outputPipe = pipe
-        self.relayProcess = proc
-
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let self = self else { return }
-            Task { @MainActor in
-                guard self.relaySessionID == sessionID else { return }
-                self.ingestLogData(data, sessionID: sessionID)
-            }
-        }
-
-        proc.terminationHandler = { [weak self] p in
-            Task { @MainActor in
-                guard let self = self, self.relaySessionID == sessionID else { return }
-                self.flushRemainingLogBuffer(sessionID: sessionID)
-                self.resetWorkItem?.cancel()
-                self.resetWorkItem = nil
-                self.isRunning = false
-                self.isListening = false
-                self.isStreamActive = false
-                self.stopListenCountdown()
-                self.relayProcess = nil
-                self.appendLog("[SysPulse] 插件进程已安全退出 (退出码: \(p.terminationStatus))")
-            }
-        }
-
-        do {
-            try proc.run()
-        } catch {
-            isRunning = false
-            isListening = false
-            isStreamActive = false
+    private func startStandardRelay(engine: String, sessionID: UInt64, watchMode: Bool) {
+        let args = buildEngineArguments(watchMode: watchMode)
+        if !launchEngineProcess(executablePath: engine, arguments: args, sessionID: sessionID, watchMode: watchMode, isSudo: false) {
             stopListenCountdown()
-            lastError = "无法启动原生引擎进程: \(error.localizedDescription)"
+        stopCooldownCountdown()
+            lastError = "无法启动原生引擎进程"
             appendLog("[错误] \(lastError!)")
-        }
-    }
-
-    private func startTailingLogFile(sessionID: UInt64) {
-        logWatchTimer?.invalidate()
-        lastLogOffset = 0
-        logLineBuffer.removeAll()
-        logWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            Task { @MainActor in
-                guard self.relaySessionID == sessionID else { return }
-                self.pollLogFile(sessionID: sessionID)
-            }
-        }
-    }
-
-    private func pollLogFile(sessionID: UInt64) {
-        guard let handle = FileHandle(forReadingAtPath: logFilePath) else { return }
-        defer { try? handle.close() }
-        handle.seek(toFileOffset: lastLogOffset)
-        let data = handle.readDataToEndOfFile()
-        if !data.isEmpty {
-            lastLogOffset += UInt64(data.count)
-            ingestLogData(data, sessionID: sessionID)
+            transition(to: .error(lastError!))
         }
     }
 
@@ -1211,8 +1605,7 @@ public final class PSPortalPluginManager {
         let text = String(decoding: completeSlice, as: UTF8.self)
         let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
         for line in lines {
-            appendLog(line)
-            evaluateProcessOutput(line, sessionID: sessionID)
+            processIncomingEngineLine(line, sessionID: sessionID)
         }
     }
 
@@ -1222,26 +1615,44 @@ public final class PSPortalPluginManager {
         logLineBuffer.removeAll()
         let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
         for line in lines {
-            appendLog(line)
-            evaluateProcessOutput(line, sessionID: sessionID)
+            processIncomingEngineLine(line, sessionID: sessionID)
         }
     }
 
-    public func stopRelay() {
-        guard isRunning && !isStopping else { return }
-        appendLog("[SysPulse] 正在停止插件监听与中继...")
+    private func processIncomingEngineLine(_ line: String, sessionID: UInt64) {
+        if line.hasPrefix("[EVENT] ") {
+            let jsonPart = String(line.dropFirst("[EVENT] ".count))
+            handleEngineEventJSON(jsonPart, sessionID: sessionID)
+            return
+        }
+        appendLog(line)
+        evaluateProcessOutput(line, sessionID: sessionID)
+    }
 
-        let sessionID = relaySessionID
-        isStopping = true
-        isListening = false
-        isStreamActive = false
+    public func stopRelay() {
+        let fallbackState: PortalEngineState = FeatureToggleManager.shared.enablePluginPSPortal
+            ? ((ps5IP.isEmpty || portalIP.isEmpty) ? .needsConfiguration : .idle)
+            : .disabled
+        terminateCurrentEngineProcess(transitionTo: fallbackState)
+    }
+
+    private func terminateCurrentEngineProcess(transitionTo targetState: PortalEngineState) {
+        guard isRunning || isStopping || relayProcess != nil else {
+            transition(to: targetState)
+            return
+        }
+        appendLog("[SysPulse] 正在停止插件监听与引擎...")
+
+        relaySessionID &+= 1
+        let stopSessionID = relaySessionID
+        transition(to: .stopping)
         stopListenCountdown()
+        stopCooldownCountdown()
 
         resetWorkItem?.cancel()
         resetWorkItem = nil
-
-        logWatchTimer?.invalidate()
-        logWatchTimer = nil
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
 
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
@@ -1250,6 +1661,7 @@ public final class PSPortalPluginManager {
             ? Self.privilegedEnginePath
             : engineFileURL.path
         let activeProc = relayProcess
+        relayProcess = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var stoppedViaSudo = false
@@ -1267,21 +1679,16 @@ public final class PSPortalPluginManager {
 
             if !stoppedViaSudo, let activeProc, activeProc.isRunning {
                 activeProc.interrupt()
-                Thread.sleep(forTimeInterval: 0.5)
+                Thread.sleep(forTimeInterval: 0.4)
                 if activeProc.isRunning {
                     activeProc.terminate()
                 }
             }
 
             DispatchQueue.main.async {
-                guard let self = self, self.relaySessionID == sessionID else { return }
-                self.pollLogFile(sessionID: sessionID)
-                self.flushRemainingLogBuffer(sessionID: sessionID)
-                self.relayProcess = nil
-                self.isStopping = false
-                self.isRunning = false
-                self.isListening = false
-                self.isStreamActive = false
+                guard let self, self.relaySessionID == stopSessionID else { return }
+                self.flushRemainingLogBuffer(sessionID: stopSessionID)
+                self.transition(to: targetState)
                 if !stoppedViaSudo && FileManager.default.fileExists(atPath: self.pidFilePath) {
                     self.appendLog("[提示] 免密停止通道未就绪，若直连未恢复可点击右上角「恢复直连」。")
                 } else {
@@ -1296,11 +1703,12 @@ public final class PSPortalPluginManager {
         let hasPidFile = FileManager.default.fileExists(atPath: pidFilePath)
         guard isRunning || isListening || hasPidFile else { return }
 
-        logWatchTimer?.invalidate()
-        logWatchTimer = nil
         stopListenCountdown()
+        stopCooldownCountdown()
         resetWorkItem?.cancel()
         resetWorkItem = nil
+        streamPresenceTask?.cancel()
+        streamPresenceTask = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
 
@@ -1328,9 +1736,7 @@ public final class PSPortalPluginManager {
             }
         }
         relayProcess = nil
-        isRunning = false
-        isListening = false
-        isStreamActive = false
+        transition(to: .disabled)
     }
 
     public func restoreNetworkDirect() {
@@ -1372,11 +1778,10 @@ public final class PSPortalPluginManager {
                     for line in text.components(separatedBy: .newlines) where !line.isEmpty {
                         self?.appendLog(line)
                     }
-                    self?.isRunning = false
-                    self?.isStopping = false
-                    self?.isListening = false
-                    self?.isStreamActive = false
                     self?.stopListenCountdown()
+                    if let self {
+                        self.transition(to: (self.ps5IP.isEmpty || self.portalIP.isEmpty) ? .needsConfiguration : .idle)
+                    }
                 }
             } else {
                 var shellCmd = "\(Self.shellSingleQuoted(engine)) --restore --interface \(Self.shellSingleQuoted(iface))"
@@ -1387,11 +1792,10 @@ public final class PSPortalPluginManager {
                 DispatchQueue.main.async {
                     if errDict == nil {
                         self?.appendLog("[SysPulse] 网络直连路由已复原。")
-                        self?.isRunning = false
-                        self?.isStopping = false
-                        self?.isListening = false
-                        self?.isStreamActive = false
                         self?.stopListenCountdown()
+                        if let self {
+                            self.transition(to: (self.ps5IP.isEmpty || self.portalIP.isEmpty) ? .needsConfiguration : .idle)
+                        }
                     } else {
                         self?.appendLog("[提示] 网络复原未完成或已取消授权。")
                     }
@@ -1400,41 +1804,248 @@ public final class PSPortalPluginManager {
         }
     }
 
+    // MARK: - 网络变化监听 / 状态事件 / 通知 / 串流生命周期监测
+
+    private func startNetworkPathMonitor() {
+        pathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pathDebounceTask?.cancel()
+                self.pathDebounceTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(1.5))
+                    guard let self, !Task.isCancelled else { return }
+                    self.handleNetworkPathStabilized()
+                }
+            }
+        }
+        monitor.start(queue: pathMonitorQueue)
+        pathMonitor = monitor
+    }
+
+    private func isPS5OnDirectLAN() -> Bool {
+        let trimmedPS5 = ps5IP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidUnicastIPv4(trimmedPS5) else { return false }
+        guard let subnet = ActiveInterfaceInfo.ipv4SubnetInfo(for: selectedInterface) else {
+            return false
+        }
+        let targetVal = LanDeviceSnifferEngine.ipToComparable(trimmedPS5)
+        return targetVal != 0 && (targetVal & subnet.mask) == (subnet.ip & subnet.mask)
+    }
+
+    private func handleNetworkPathStabilized() {
+        guard FeatureToggleManager.shared.enablePluginPSPortal else { return }
+        detectInterfaces()
+        guard autoWatchEnabled else { return }
+
+        if isPS5OnDirectLAN() {
+            if case .suspendedOutOfLAN = engineState {
+                appendLog("[守望] ✅ 已回到家庭局域网直连子网，正在自动恢复旁路守望...")
+                ensureAutoWatchRunning(reason: "重新连入家庭局域网")
+            }
+        } else {
+            suspendAutoWatchForOutOfLAN(reason: "检测到当前网络已切换或脱离家庭子网（VPN 下只要 PS5 路由仍直连不会误休眠）")
+        }
+    }
+
+    private func handleEngineEventJSON(_ rawJSON: String, sessionID: UInt64) {
+        guard sessionID == relaySessionID,
+              let data = rawJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+
+        switch type {
+        case "state":
+            guard let stateName = obj["state"] as? String else { return }
+            switch stateName {
+            case "watching":
+                let result = obj["result"] as? String
+                stopListenCountdown()
+                if result == "timeout" {
+                    let cooldown = (obj["cooldown"] as? Int) ?? 20
+                    startCooldownCountdown(seconds: cooldown)
+                }
+                if result == "enhanced", case .enhancingActive = engineState {
+                    // 刚注入成功并返回静默旁路，UI 保持「画质增强中」直至串流结束探测确认
+                    return
+                }
+                if case .autoBursting = engineState {
+                    transition(to: .autoWatching)
+                } else if case .starting = engineState {
+                    transition(to: .autoWatching)
+                } else if case .authorizing = engineState {
+                    transition(to: .autoWatching)
+                }
+            case "bursting":
+                let seconds = (obj["seconds"] as? Int) ?? 120
+                stopCooldownCountdown()
+                transition(to: .autoBursting)
+                startListenCountdown(seconds: seconds)
+            case "listening":
+                let seconds = (obj["seconds"] as? Int) ?? 120
+                stopCooldownCountdown()
+                transition(to: .manualListening(remainingSeconds: seconds))
+                startListenCountdown(seconds: seconds)
+            case "out_of_lan":
+                stopListenCountdown()
+                stopCooldownCountdown()
+                transition(to: .suspendedOutOfLAN)
+            default:
+                break
+            }
+
+        case "cooldown_ended":
+            stopCooldownCountdown()
+
+        case "stream_enhanced":
+            let bitrateInt = (obj["bitrate"] as? Int) ?? Int((obj["bitrate"] as? String) ?? "") ?? 100
+            let tag = "\(bitrateInt)M"
+            stopListenCountdown()
+            stopCooldownCountdown()
+            saveConfig()
+            transition(to: .enhancingActive(bitrateTag: tag))
+            sendEnhancementNotification(bitrateTag: tag)
+            startStreamPresenceMonitor()
+
+        case "already_streaming":
+            appendLog("[提示] 💡 检测到已有串流会话在运行，请断开当前串流后重新连接即可生效高码率。")
+            if !isStreamActive {
+                transition(to: .alreadyStreamingHint)
+            }
+
+        case "route_mismatch":
+            if autoWatchEnabled {
+                transition(to: .suspendedOutOfLAN)
+            }
+
+        case "error":
+            let code = (obj["code"] as? String) ?? "unknown"
+            lastError = "引擎运行异常 (\(code))"
+            transition(to: .error(lastError!))
+
+        default:
+            break
+        }
+    }
+
+    private func startStreamPresenceMonitor() {
+        streamPresenceTask?.cancel()
+        consecutivePortalMisses = 0
+        let iface = selectedInterface
+        let ps5 = ps5IP
+        let portal = portalIP
+
+        streamPresenceTask = Task.detached { [weak self] in
+            // 刚注入后等待 20s 进入稳态后再定期低开销检查串流是否结束
+            try? await Task.sleep(for: .seconds(20))
+            while !Task.isCancelled {
+                let ddp = LanDeviceSnifferEngine.probePlayStationDDP(
+                    targetIPs: ps5.isEmpty ? [] : [ps5],
+                    broadcastIPs: [],
+                    interfaceName: iface,
+                    timeoutMs: 320
+                )
+                let ps5Standby = (ddp[ps5]?.isStandby == true)
+
+                if !portal.isEmpty {
+                    LanDeviceSnifferEngine.probeHostsViaICMP(
+                        ips: [portal],
+                        interfaceName: iface,
+                        batchSize: 1,
+                        batchDelayUs: 0
+                    )
+                }
+                try? await Task.sleep(for: .milliseconds(350))
+                let arpNow = Self.collectPortalScanArpSnapshot(
+                    targetIface: iface,
+                    activeIfaceNames: [iface],
+                    localIP: "",
+                    gatewayIP: ""
+                )
+                let portalAlive = !portal.isEmpty && arpNow[portal] != nil
+
+                let shouldEnd = await MainActor.run { [weak self] () -> Bool in
+                    guard let self else { return true }
+                    guard case .enhancingActive = self.engineState else { return true }
+                    if ps5Standby {
+                        self.endEnhancementSession(reason: "检测到 PS5 已进入待机状态，自动恢复待命")
+                        return true
+                    }
+                    if portalAlive {
+                        self.consecutivePortalMisses = 0
+                        return false
+                    } else {
+                        self.consecutivePortalMisses += 1
+                        if self.consecutivePortalMisses >= 2 {
+                            self.endEnhancementSession(reason: "连续两次未检测到 Portal 在线（串流已退出），自动恢复待命")
+                            return true
+                        }
+                        return false
+                    }
+                }
+                if shouldEnd { break }
+                try? await Task.sleep(for: .seconds(20))
+            }
+        }
+    }
+
+    private func sendEnhancementNotification(bitrateTag: String) {
+        guard notificationsEnabled,
+              Bundle.main.bundleIdentifier != nil,
+              Bundle.main.bundleURL.pathExtension == "app" else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "PS Portal 画质增强已自动激活"
+            content.body = "已将本次串流切换至 \(bitrateTag) 高画质 · 视频直连不经过 Mac"
+            content.sound = .default
+            let req = UNNotificationRequest(identifier: "syspulse.portal.enhanced.\(UUID().uuidString)", content: content, trigger: nil)
+            center.add(req, withCompletionHandler: nil)
+        }
+    }
+
     private func evaluateProcessOutput(_ line: String, sessionID: UInt64) {
-        if line.contains("网络协商就绪") || line.contains("READY: connect Portal") || line.contains("EXPERIMENT READY") || line.contains("BASELINE READY") {
-            isListening = true
-            isStreamActive = false
+        guard sessionID == relaySessionID else { return }
+        if line.contains("增强通道已就绪") || line.contains("网络协商就绪") || line.contains("READY: connect Portal") || line.contains("EXPERIMENT READY") || line.contains("BASELINE READY") {
+            stopCooldownCountdown()
+            transition(to: .manualListening(remainingSeconds: 120))
             startListenCountdown(seconds: 120)
         } else if line.contains("PS5 reported high target bitrate") || line.contains("Target confirmed") || line.contains("[ACCEPTED]") || line.contains("已确认并接受高码率协商") || line.contains("并保持视频直连") || line.contains("已提前交还直连") {
-            isStreamActive = true
-            isListening = false
             stopListenCountdown()
-            scheduleRelayReset(after: 1.5, sessionID: sessionID)
+            stopCooldownCountdown()
+            saveConfig()
+            transition(to: .enhancingActive(bitrateTag: targetBitrate.shortTag))
+            startStreamPresenceMonitor()
+            if !autoWatchEnabled {
+                scheduleRelayReset(after: 1.5, sessionID: sessionID)
+            }
         } else if line.contains("检测到设备 MAC 冲突") || line.contains("已中止中继以保护网络") || line.hasPrefix("[错误]") {
-            isListening = false
-            isStreamActive = false
             stopListenCountdown()
+        stopCooldownCountdown()
             lastError = line
+            transition(to: .error(line))
             scheduleRelayReset(after: 0.4, sessionID: sessionID)
         } else if line.contains("未生效") || line.contains("未检测到 PS Portal 握手请求") || line.contains("NOT APPLIED") {
-            isListening = false
-            isStreamActive = false
             stopListenCountdown()
+        stopCooldownCountdown()
             lastError = "未检测到 PS Portal 握手请求（120 秒内未收到连接，或 Portal 仍处于休眠状态）。"
+            transition(to: .idle)
             scheduleRelayReset(after: 0.8, sessionID: sessionID)
         } else if line.contains("未确认目标码率") || line.contains("UNCONFIRMED") {
-            isListening = false
-            isStreamActive = false
             stopListenCountdown()
+        stopCooldownCountdown()
             lastError = "握手修改已发送，但未能在规定时间内检测到 PS5 连续 3 次高码率遥测确认。"
+            transition(to: .idle)
             scheduleRelayReset(after: 0.8, sessionID: sessionID)
         } else if line.contains("RESTORATION FAILED") || line.contains("路由恢复异常") {
-            isListening = false
-            isStreamActive = false
             stopListenCountdown()
+        stopCooldownCountdown()
             lastError = "网络恢复异常，请检查网络配置。"
+            transition(to: .error(lastError!))
             scheduleRelayReset(after: 0.8, sessionID: sessionID)
-        } else if line.contains("报告存档:") || line.contains("report.json") || line.contains("引擎模式:") {
+        } else if !autoWatchEnabled && (line.contains("报告存档:") || line.contains("report.json") || line.contains("引擎模式:")) {
             scheduleRelayReset(after: 1.0, sessionID: sessionID)
         }
     }
@@ -1444,23 +2055,55 @@ public final class PSPortalPluginManager {
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.relaySessionID == sessionID else { return }
             self.flushRemainingLogBuffer(sessionID: sessionID)
-            self.isRunning = false
-            self.isStopping = false
-            self.isListening = false
             self.stopListenCountdown()
             self.relayProcess = nil
-            self.logWatchTimer?.invalidate()
-            self.logWatchTimer = nil
             self.resetWorkItem = nil
+            if case .enhancingActive = self.engineState {
+                // 保持画质增强中状态由 presence monitor 收尾
+                return
+            }
+            if case .error = self.engineState { return }
+            self.transition(to: (self.ps5IP.isEmpty || self.portalIP.isEmpty) ? .needsConfiguration : .idle)
         }
         resetWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     public func appendLog(_ text: String) {
-        logs.append(PortalLogEntry(text: text))
-        if logs.count > 300 {
-            logs.removeFirst(logs.count - 300)
+        lastLogAppendAt = Date()
+        let formattedLine: String
+        if debugModeEnabled {
+            let df = DateFormatter()
+            df.dateFormat = "HH:mm:ss.SSS"
+            formattedLine = text.hasPrefix("[DEBUG") ? text : "[\(df.string(from: Date()))] \(text)"
+        } else {
+            formattedLine = text
+        }
+        logs.append(PortalLogEntry(text: formattedLine))
+        let maxLogs = debugModeEnabled ? 2000 : 300
+        if logs.count > maxLogs {
+            logs.removeFirst(logs.count - maxLogs)
+        }
+
+        // Debug 模式下同步追加写入本地磁盘日志文件 ~/Library/Logs/SysPulse/psportal.log
+        if debugModeEnabled {
+            let path = logFilePath
+            let fm = FileManager.default
+            if let attrs = try? fm.attributesOfItem(atPath: path),
+               let sz = attrs[.size] as? Int64, sz > 2 * 1024 * 1024 {
+                let bak = path + ".old"
+                try? fm.removeItem(atPath: bak)
+                try? fm.moveItem(atPath: path, toPath: bak)
+            }
+            if let data = (formattedLine + "\n").data(using: .utf8) {
+                if fm.fileExists(atPath: path), let fh = FileHandle(forWritingAtPath: path) {
+                    _ = try? fh.seekToEnd()
+                    try? fh.write(contentsOf: data)
+                    try? fh.close()
+                } else {
+                    try? data.write(to: URL(fileURLWithPath: path))
+                }
+            }
         }
     }
 

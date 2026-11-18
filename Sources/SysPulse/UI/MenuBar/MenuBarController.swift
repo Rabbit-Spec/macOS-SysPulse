@@ -506,13 +506,14 @@ public final class MenuBarController: NSObject {
         hostingController = nil
         popoverPanel = nil
 
-        if !MainStudioWindowController.shared.isWindowVisible {
+        if !MainStudioWindowController.shared.isWindowActivelyVisible {
             PowerSourceEngine.shared.setPanelVisible(false)
         }
         PanelCoordinator.shared.activeScreen = .dashboard
         PanelCoordinator.shared.isEventsExpanded = false
         StudioWindowNavigationState.shared.isNetworkDetailPresented = false
         SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
 
         statusItem.button?.highlight(false)
         statusItem.button?.window?.resignKey()
@@ -578,6 +579,7 @@ public final class MenuBarController: NSObject {
         popoverShownAt = Date()
         installDismissMonitors(for: panel)
         SystemResourceMonitor.shared.refreshNow()
+        AccessoryBatteryManager.shared.updateVisibilityState()
     }
 
     private func statusButtonScreenRect() -> NSRect? {

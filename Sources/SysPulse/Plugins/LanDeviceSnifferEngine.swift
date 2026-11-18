@@ -639,33 +639,51 @@ public final class LanDeviceSnifferEngine {
     /// 根据选中网卡的真实子网掩码推算待探测主机 IP 列表（超大子网自动收敛至所属 /24）
     nonisolated public static func resolveScanTargetHosts(
         interfaceName: String,
-        fallbackGatewayIP: String
+        fallbackGatewayIP: String,
+        extraIPs: [String] = []
     ) -> (hosts: [String], broadcastIPs: [String]) {
         if let info = ActiveInterfaceInfo.ipv4SubnetInfo(for: interfaceName) {
             let network = info.ip & info.mask
             let broadcast = network | ~info.mask
             let totalRange = broadcast > network ? (broadcast - network) : 0
-            let rangeStart: UInt32
-            let rangeEnd: UInt32
+            var hostSet = Set<UInt32>()
+
             if totalRange > 1 && totalRange <= 1024 {
-                rangeStart = network + 1
-                rangeEnd = broadcast - 1
+                hostSet.reserveCapacity(Int(totalRange))
+                for cursor in (network + 1)...(broadcast - 1) where cursor != info.ip {
+                    hostSet.insert(cursor)
+                }
             } else {
-                let slash24Net = info.ip & 0xFFFFFF00
-                rangeStart = slash24Net + 1
-                rangeEnd = slash24Net + 254
+                // 大子网（如 /16 /22）优先覆盖本机、网关与已发现设备所在的 /24 网段（最多 4 个 /24），避免盲扫卡顿
+                var anchors: [UInt32] = [info.ip]
+                for extra in [fallbackGatewayIP] + extraIPs where !extra.isEmpty {
+                    var inAddr = in_addr()
+                    if inet_pton(AF_INET, extra, &inAddr) == 1 {
+                        let ipHost = UInt32(bigEndian: inAddr.s_addr)
+                        if (ipHost & info.mask) == network {
+                            anchors.append(ipHost)
+                        }
+                    }
+                }
+                var slash24Nets: [UInt32] = []
+                for a in anchors {
+                    let net24 = a & 0xFFFFFF00
+                    if !slash24Nets.contains(net24) {
+                        slash24Nets.append(net24)
+                        if slash24Nets.count >= 4 { break }
+                    }
+                }
+                for net24 in slash24Nets {
+                    let lo = max(network + 1, net24 + 1)
+                    let hi = min(broadcast - 1, net24 + 254)
+                    guard lo <= hi else { continue }
+                    for cursor in lo...hi where cursor != info.ip {
+                        hostSet.insert(cursor)
+                    }
+                }
             }
 
-            var hosts: [String] = []
-            hosts.reserveCapacity(Int(rangeEnd - rangeStart + 1))
-            var cursor = rangeStart
-            while cursor <= rangeEnd {
-                if cursor != info.ip {
-                    hosts.append(ipv4String(fromHostOrder: cursor))
-                }
-                if cursor == UInt32.max { break }
-                cursor += 1
-            }
+            let hosts = hostSet.sorted().map { ipv4String(fromHostOrder: $0) }
             return (hosts, Array(Set(["255.255.255.255", info.broadcast])))
         }
 
@@ -869,6 +887,84 @@ public final class LanDeviceSnifferEngine {
     }
 
     /// 轻量非阻塞 TCP SYN 试探，分批唤醒休眠移动端/Web 设备并触发二层 ARP 解析
+    /// 并发检测指定 TCP 端口是否开放（用于识别 PS5 9295 Remote Play 与电视 AirPlay/Cast 端口）
+    nonisolated public static func probeHostsViaTCPWithResults(
+        ips: [String],
+        port: UInt16,
+        interfaceName: String?,
+        timeoutMs: Int = 260,
+        batchSize: Int = 32,
+        isCancelled: (() -> Bool)? = nil
+    ) -> Set<String> {
+        guard !ips.isEmpty else { return [] }
+        var reachable = Set<String>()
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+
+        for startIdx in stride(from: 0, to: ips.count, by: max(1, batchSize)) {
+            if isCancelled?() == true { break }
+            let endIdx = min(startIdx + max(1, batchSize), ips.count)
+            var pending: [(ip: String, fd: Int32)] = []
+            pending.reserveCapacity(endIdx - startIdx)
+
+            for idx in startIdx..<endIdx {
+                let ip = ips[idx]
+                guard inet_pton(AF_INET, ip, &addr.sin_addr) == 1 else { continue }
+                let sock = socket(AF_INET, SOCK_STREAM, 0)
+                guard sock >= 0 else { continue }
+                bindSocket(sock, toInterface: interfaceName)
+                _ = fcntl(sock, F_SETFL, O_NONBLOCK)
+                let rc = withUnsafePointer(to: &addr) { saPtr in
+                    saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                        connect(sock, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                if rc == 0 {
+                    reachable.insert(ip)
+                    close(sock)
+                } else if errno == EINPROGRESS {
+                    pending.append((ip, sock))
+                } else {
+                    close(sock)
+                }
+            }
+
+            if !pending.isEmpty {
+                let deadlineNs = DispatchTime.now().uptimeNanoseconds + UInt64(max(60, timeoutMs)) * 1_000_000
+                var remaining = pending
+                while !remaining.isEmpty && DispatchTime.now().uptimeNanoseconds < deadlineNs {
+                    if isCancelled?() == true { break }
+                    var pfds = remaining.map { pollfd(fd: $0.fd, events: Int16(POLLOUT), revents: 0) }
+                    let waitMs = Int32(min(50, max(1, Int((deadlineNs - DispatchTime.now().uptimeNanoseconds) / 1_000_000))))
+                    let ready = poll(&pfds, nfds_t(pfds.count), waitMs)
+                    if ready <= 0 { continue }
+
+                    var nextRemaining: [(ip: String, fd: Int32)] = []
+                    for (i, item) in remaining.enumerated() {
+                        let revents = pfds[i].revents
+                        if revents == 0 {
+                            nextRemaining.append(item)
+                            continue
+                        }
+                        var sockErr: Int32 = -1
+                        var errLen = socklen_t(MemoryLayout<Int32>.size)
+                        _ = getsockopt(item.fd, SOL_SOCKET, SO_ERROR, &sockErr, &errLen)
+                        if sockErr == 0 && (revents & Int16(POLLOUT)) != 0 {
+                            reachable.insert(item.ip)
+                        }
+                        close(item.fd)
+                    }
+                    remaining = nextRemaining
+                }
+                for item in remaining {
+                    close(item.fd)
+                }
+            }
+        }
+        return reachable
+    }
+
     nonisolated public static func probeHostsViaTCP(
         ips: [String],
         ports: [UInt16],
@@ -1071,7 +1167,19 @@ public final class LanDeviceSnifferEngine {
 
     nonisolated public static func isPortalOUI(_ mac: String) -> Bool {
         let oui = String((LanOuiDatabase.normalizeMAC(mac) ?? mac).prefix(8)).lowercased()
-        return oui == "98:fa:2e" || oui == "a8:47:4a"
+        // PS Portal (CFI-Y1000 / CFI-Y1001) 已观测 SIE 无线模块号段 + 午夜黑/后续批次号段
+        return oui == "98:fa:2e" || oui == "a8:47:4a" || oui == "d4:4b:5e"
+    }
+
+    /// 根据主机名 / 服务名排除非掌机类的 Sony 家电与外设（Bravia 电视 / Xperia 手机 / Soundbar 等）
+    nonisolated public static func isNonHandheldSonyText(_ text: String) -> Bool {
+        let low = text.lowercased()
+        let blockedKeywords = [
+            "bravia", "xperia", "walkman", "alpha", "ilce-",
+            "soundbar", "ht-a", "ht-s", "ht-g", "ht-z", "str-",
+            "wh-1000", "wf-1000", "xr-", "kd-", "kdl-", "psvr"
+        ]
+        return blockedKeywords.contains { low.contains($0) }
     }
 
     /// 识别 Sony Interactive Entertainment (SIE 互动娱乐) 专属游戏硬件号段（PS5 / PS Portal / PS4 等）
@@ -1107,25 +1215,36 @@ public final class LanDeviceSnifferEngine {
 
         let payload = Array("SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n".utf8)
         let allTargets = Array(Set(targetIPs + broadcastIPs))
-        for ip in allTargets {
-            var addr = sockaddr_in()
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = in_port_t(9302).bigEndian
-            guard inet_pton(AF_INET, ip, &addr.sin_addr) == 1 else { continue }
-            withUnsafePointer(to: &addr) { saPtr in
-                saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
-                    _ = sendto(sock, payload, payload.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let sendBurst = {
+            for ip in allTargets {
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = in_port_t(9302).bigEndian
+                guard inet_pton(AF_INET, ip, &addr.sin_addr) == 1 else { continue }
+                withUnsafePointer(to: &addr) { saPtr in
+                    saPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                        _ = sendto(sock, payload, payload.count, 0, ptr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
                 }
             }
         }
+        sendBurst()
 
         var found: [String: PlayStationDDPInfo] = [:]
         var recvBuf = [UInt8](repeating: 0, count: 2048)
-        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(50, timeoutMs)) * 1_000_000
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        let deadline = startNs + UInt64(max(50, timeoutMs)) * 1_000_000
+        let retryAtNs = startNs + 180_000_000
+        var retried = timeoutMs < 450
 
         while DispatchTime.now().uptimeNanoseconds < deadline {
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            if !retried && nowNs >= retryAtNs {
+                retried = true
+                sendBurst()
+            }
             var pfd = pollfd(fd: sock, events: Int16(POLLIN), revents: 0)
-            let remMs = Int32(min(50, max(1, Int((deadline - DispatchTime.now().uptimeNanoseconds) / 1_000_000))))
+            let remMs = Int32(min(50, max(1, Int((deadline - nowNs) / 1_000_000))))
             let ready = poll(&pfd, 1, remMs)
             if ready <= 0 { continue }
 

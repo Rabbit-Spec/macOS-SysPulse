@@ -376,6 +376,10 @@ private struct StorybookArtworkFraming {
             return isDark ? .init(scale: 1.40, offsetYFraction: 0.0) : .init(scale: 1.42, offsetYFraction: 0.0)
         case "AntigravityContextIcon":
             return isDark ? .init(scale: 1.50, offsetYFraction: 0.0) : .init(scale: 1.78, offsetYFraction: 0.020)
+        case "AIToolCleanerIcon":
+            return isDark ? .init(scale: 1.40, offsetYFraction: 0.0) : .init(scale: 1.54, offsetYFraction: 0.012)
+        case "SoftwareUpdaterIcon":
+            return isDark ? .init(scale: 1.36, offsetYFraction: 0.0) : .init(scale: 1.40, offsetYFraction: 0.0)
         default:
             return .init(scale: 1.40, offsetYFraction: 0.0)
         }
@@ -588,6 +592,8 @@ public enum PluginArtworkKind: String, Sendable {
     case arpSniffer
     case upsManager
     case antigravityContext
+    case aiToolCleaner
+    case softwareUpdater
 
     public var resourceBaseName: String {
         switch self {
@@ -596,6 +602,8 @@ public enum PluginArtworkKind: String, Sendable {
         case .arpSniffer: return "LanSnifferIcon"
         case .upsManager: return "UPSPowerIcon"
         case .antigravityContext: return "AntigravityContextIcon"
+        case .aiToolCleaner: return "AIToolCleanerIcon"
+        case .softwareUpdater: return "SoftwareUpdaterIcon"
         }
     }
 
@@ -606,6 +614,8 @@ public enum PluginArtworkKind: String, Sendable {
         case .arpSniffer: return "network"
         case .upsManager: return "battery.100.bolt"
         case .antigravityContext: return "sparkles"
+        case .aiToolCleaner: return "wand.and.sparkles.inverse"
+        case .softwareUpdater: return "arrow.triangle.2.circlepath.circle.fill"
         }
     }
 
@@ -616,6 +626,8 @@ public enum PluginArtworkKind: String, Sendable {
         case .arpSniffer: return .purple
         case .upsManager: return .orange
         case .antigravityContext: return .indigo
+        case .aiToolCleaner: return .mint
+        case .softwareUpdater: return .cyan
         }
     }
 }

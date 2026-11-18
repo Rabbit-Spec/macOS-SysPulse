@@ -14,7 +14,6 @@ public final class SystemUPSSettingsManager {
     private let logger = Logger(subsystem: "com.apple.powerglass", category: "UPSSettings")
     private let syncQueue = DispatchQueue(label: "com.apple.powerglass.upssync", qos: .userInitiated)
     private var isReadingFromSystem = false
-    private var refreshExtensionWorkItem: DispatchWorkItem?
     public var hasPendingChanges = false
 
     public static let validMinuteOptions = [1, 5, 10, 15]
@@ -177,39 +176,16 @@ public final class SystemUPSSettingsManager {
 
         syncQueue.async { [weak self] in
             if Self.runInstalledHelperSilently(args: args) {
-                Self.terminateCachedPowerPreferencesExtension()
                 Task { @MainActor in
                     self?.hasPendingChanges = false
-                    self?.scheduleSystemSettingsLiveRefresh()
                 }
             }
         }
     }
 
-    /// If macOS System Settings is currently open in the background, refreshes its Energy Saver -> UPS pane
-    /// after user modifications settle so the open System Settings window immediately reflects the new state.
-    private func scheduleSystemSettingsLiveRefresh() {
-        refreshExtensionWorkItem?.cancel()
-        let item = DispatchWorkItem {
-            let isSystemSettingsRunning = NSWorkspace.shared.runningApplications.contains {
-                $0.bundleIdentifier == "com.apple.systempreferences"
-            }
-            guard isSystemSettingsRunning,
-                  let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension?ups") else {
-                return
-            }
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = false
-            NSWorkspace.shared.open(url, configuration: config)
-        }
-        refreshExtensionWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
-    }
-
     /// Commits changes to macOS System UPS settings when clicking "同步写入系统" or "完成" (Done).
     /// If the setuid helper is not yet installed, requests one-time macOS administrator authorization.
     public func commitChangesToSystem(forceAuthorize: Bool = false, completion: @escaping @MainActor @Sendable () -> Void) {
-        refreshExtensionWorkItem?.cancel()
         let args = currentHelperArguments()
         let shouldAuthorize = forceAuthorize || self.hasPendingChanges
         let bundledPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/SysPulseUPSHelper").path
@@ -219,11 +195,9 @@ public final class SystemUPSSettingsManager {
         syncQueue.async { [weak self] in
             // 1. Try silent setuid helper first
             if Self.runInstalledHelperSilently(args: args) {
-                Self.terminateCachedPowerPreferencesExtension()
                 Task { @MainActor in
                     self?.hasPendingChanges = false
                     self?.readSystemDefaults()
-                    self?.scheduleSystemSettingsLiveRefresh()
                     completion()
                 }
                 return
@@ -245,13 +219,11 @@ public final class SystemUPSSettingsManager {
                 proc.arguments = ["-e", appleScript]
                 try? proc.run()
                 proc.waitUntilExit()
-                Self.terminateCachedPowerPreferencesExtension()
             }
 
             Task { @MainActor in
                 self?.hasPendingChanges = false
                 self?.readSystemDefaults()
-                self?.scheduleSystemSettingsLiveRefresh()
                 completion()
             }
         }
@@ -288,30 +260,11 @@ public final class SystemUPSSettingsManager {
         }
     }
 
-    /// Terminates macOS's `PowerPreferences` ExtensionKit process so `System Settings.app` drops its stale
-    /// in-memory `ADMPowerActivityManager` / `UPSViewModel` cache and reloads fresh values from `IOPMCopyUPSShutdownLevels`.
-    nonisolated private static func terminateCachedPowerPreferencesExtension() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        proc.arguments = ["PowerPreferences"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        try? proc.run()
-        proc.waitUntilExit()
-    }
-
     public func openSystemPreferencesUPS() {
-        refreshExtensionWorkItem?.cancel()
-        syncQueue.async {
-            Self.terminateCachedPowerPreferencesExtension()
-            Thread.sleep(forTimeInterval: 0.12)
-            Task { @MainActor in
-                if let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension?ups") {
-                    let config = NSWorkspace.OpenConfiguration()
-                    config.activates = true
-                    NSWorkspace.shared.open(url, configuration: config)
-                }
-            }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension?ups") {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            NSWorkspace.shared.open(url, configuration: config)
         }
     }
 }

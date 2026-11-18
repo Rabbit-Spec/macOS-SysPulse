@@ -1,10 +1,12 @@
 import SwiftUI
 import AppKit
 
-// MARK: - 应用卸载视图
+// MARK: - 应用卸载、CLI 工具与启动项管理视图
 
 public struct AppUninstallerSection: View {
     @Bindable var uninstaller = AppUninstallerEngine.shared
+    @Bindable var startupManager = StartupItemManager.shared
+    @Bindable var protectionStore = CleanProtectionStore.shared
     @Bindable var navState = StudioWindowNavigationState.shared
     let theme: LiquidGlassTheme
     var canvasWidth: CGFloat = 1200
@@ -13,7 +15,7 @@ public struct AppUninstallerSection: View {
 
     private var contentW: CGFloat { max(1152, canvasWidth - 48) }
     private var contentH: CGFloat { max(684, canvasHeight - 79 - 59) }
-    private var reviewCardH: CGFloat { max(380, contentH - 52 - 14 - 78 - 14 - 132 - 14) }
+    private var reviewCardH: CGFloat { max(380, contentH - 52 - 14 - 78 - 14 - 138 - 14) }
 
     public init(theme: LiquidGlassTheme, canvasWidth: CGFloat = 1200, canvasHeight: CGFloat = 822) {
         self.theme = theme
@@ -21,59 +23,55 @@ public struct AppUninstallerSection: View {
         self.canvasHeight = canvasHeight
     }
 
-    public var body: some View {
-        VStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("卸载应用")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
-
-                Text("深度穿透沙盒容器、群组配置、运行缓存与自启项，一次扫描彻底清除应用与无主残留。")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
-            }
-            .frame(width: contentW, height: 52, alignment: .leading)
-
-            primaryActionCard
-                .frame(width: contentW, height: 78)
-
-            section2Group
-                .frame(width: contentW, height: 132)
-
-            if !uninstaller.installedApps.isEmpty || !uninstaller.orphanedResidues.isEmpty {
-                appReviewItemsCard
-                    .frame(width: contentW, height: reviewCardH)
-            } else {
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 35)
-        .padding(.bottom, 24)
-        .onAppear {
-            if uninstaller.installedApps.isEmpty && !uninstaller.isScanning {
-                uninstaller.startScan()
-            }
-        }
+    private var hasAnyContent: Bool {
+        !uninstaller.installedApps.isEmpty
+            || !uninstaller.orphanedResidues.isEmpty
+            || !uninstaller.commandLineTools.isEmpty
+            || !startupManager.items.isEmpty
     }
 
-    // MARK: - 卸载说明与应用分类卡片
+    public var body: some View {
+        ZStack {
+            VStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("软件管理")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.primaryText)
 
-    private var section2Group: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text("卸载说明")
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
+                    Text("深度穿透沙盒容器、命令行工具与 LaunchAgents 启动项，精准识别关联证据、缺失程序与无主残留。")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(theme.secondaryText)
+                }
+                .frame(width: contentW, height: 52, alignment: .leading)
 
-                Text("· 涵盖 5 类范围与安全机制")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
+                primaryActionCard
+                    .frame(width: contentW, height: 78)
+
+                section2Group
+                    .frame(width: contentW, height: 138)
+
+                if hasAnyContent {
+                    appReviewItemsCard
+                        .frame(width: contentW, height: reviewCardH)
+                } else {
+                    Spacer(minLength: 0)
+                }
             }
-            .frame(width: contentW, height: 22, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 35)
+            .padding(.bottom, 24)
+            .onAppear {
+                if uninstaller.installedApps.isEmpty && !uninstaller.isScanning {
+                    uninstaller.startScan()
+                }
+                if startupManager.items.isEmpty && !startupManager.isScanning {
+                    startupManager.startScan()
+                }
+            }
 
-            categoriesAndSafetyCard
-                .frame(width: contentW, height: 100)
+            if startupManager.isBtmSheetPresented {
+                btmReportOverlay
+            }
         }
     }
 
@@ -84,7 +82,7 @@ public struct AppUninstallerSection: View {
             HStack(spacing: 0) {
                 AnimatedModuleArtworkBadgeView(
                     size: 58,
-                    isActive: uninstaller.isScanning || uninstaller.isUninstalling,
+                    isActive: uninstaller.isScanning || uninstaller.isUninstalling || startupManager.isScanning,
                     accentColor: Color(red: 0.45, green: 0.65, blue: 0.98)
                 ) {
                     UninstallerArtworkIconView(size: 58, forcedColorScheme: colorScheme)
@@ -98,7 +96,7 @@ public struct AppUninstallerSection: View {
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundStyle(theme.primaryText)
 
-                        if uninstaller.isScanning || uninstaller.isUninstalling {
+                        if uninstaller.isScanning || uninstaller.isUninstalling || startupManager.isScanning {
                             ProgressView()
                                 .controlSize(.small)
                         }
@@ -120,14 +118,25 @@ public struct AppUninstallerSection: View {
     }
 
     private var primaryStatusTitle: String {
+        if uninstaller.selectedTab == .startupItems {
+            if startupManager.isScanning { return "正在检索后台自启项与 LaunchAgents…" }
+            let alerts = startupManager.issuesCount
+            return alerts > 0
+                ? "已发现 \(startupManager.items.count) 项启动服务，含 \(alerts) 项缺失/异常"
+                : "共检测到 \(startupManager.items.count) 项自启代理与登录项（\(startupManager.enabledCount) 项已启用）"
+        }
+        if uninstaller.selectedTab == .commandLineTools {
+            let cliBytes = uninstaller.commandLineTools.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            return "已发现 \(uninstaller.commandLineTools.count) 项命令行工具，共占用 \(uninstaller.formatBytes(cliBytes))"
+        }
         switch uninstaller.status {
         case .idle:
             return uninstaller.lastUninstallDescription
         case .scanning:
-            return "正在全面排查应用与残留…"
+            return "正在全面排查应用、CLI 与残留…"
         case .completed:
-            let totalCount = uninstaller.installedApps.count + uninstaller.orphanedResidues.count
-            return "已检索 \(totalCount) 项，预计可清理 \(uninstaller.formattedSelectedBytes)"
+            let totalCount = uninstaller.installedApps.count + uninstaller.visibleOrphanedResidues.count
+            return "已检索 \(totalCount) 项，当前选中释放 \(uninstaller.formattedSelectedBytes)"
         case .uninstalling:
             return "正在安全卸载选定项目…"
         case .finished(let freed, _):
@@ -136,98 +145,146 @@ public struct AppUninstallerSection: View {
     }
 
     private var primaryStatusSubtitle: String {
+        if uninstaller.selectedTab == .startupItems {
+            return startupManager.statusMessage.isEmpty ? "支持实时禁用用户自启代理、清理失效 Plist 或调用系统设置登录项。" : startupManager.statusMessage
+        }
+        if uninstaller.selectedTab == .commandLineTools {
+            return uninstaller.statusMessage.isEmpty ? "覆盖 Homebrew Cellar、~/.local/bin、/usr/local/bin 与 uv/pipx 独立环境。" : uninstaller.statusMessage
+        }
         switch uninstaller.status {
         case .idle:
-            return "扫描不会删除任何内容。"
+            return "扫描不会删除任何内容，系统核心与白名单目录受永久保护。"
         case .scanning(_, let currentApp):
-            return currentApp.isEmpty ? "正在分析应用足迹与沙盒残留…" : currentApp
+            return currentApp.isEmpty ? "正在分析应用足迹、共享群组与沙盒残留…" : currentApp
         case .completed:
-            let selectedCount = uninstaller.selectedItemIDs.count
-            return "已选中 \(selectedCount) 项，包含应用本体、沙盒容器与无主残留。"
+            if !uninstaller.statusMessage.isEmpty {
+                return uninstaller.statusMessage
+            }
+            return "已选中 \(uninstaller.selectedItemIDs.count) 项，支持展开逐项复核或单独清理应用数据。"
         case .uninstalling(_, let currentApp):
-            return currentApp.isEmpty ? "正在移至废纸篓并清理关联残留…" : currentApp
+            return currentApp.isEmpty ? "正在注销自启代理并安全清理文件…" : currentApp
         case .finished:
             return "应用及关联残留已彻底清理，系统空间已恢复清爽。"
         }
     }
 
     private var actionButtonsGroup: some View {
-        HStack(spacing: 12) {
-            switch uninstaller.status {
-            case .idle:
-                scanButton
-                optionsButton
-
-            case .scanning:
+        HStack(spacing: 10) {
+            if uninstaller.selectedTab == .startupItems {
                 Button {
-                    uninstaller.cancelScan()
+                    startupManager.loadPrivilegedBtmDump()
                 } label: {
-                    Text("取消")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(theme.secondaryText)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
-                        .background(
-                            Capsule().fill(theme.pillFill)
-                                .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
-                        )
+                    HStack(spacing: 5) {
+                        Image(systemName: "shield.lefthalf.filled")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("系统 BTM 诊断")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Capsule().fill(Color.orange.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+                .disabled(startupManager.isBusy)
+
+                Button {
+                    startupManager.openSystemLoginItemsSettings()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("系统登录项设置")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(theme.secondaryText)
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Capsule().fill(theme.pillFill).overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8)))
                 }
                 .buttonStyle(.plain)
                 .pointingHandOnHover()
 
-            case .completed, .finished:
                 Button {
-                    uninstaller.startScan()
+                    startupManager.startScan()
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 11, weight: .bold))
-                        Text("重新扫描")
+                        Text("刷新启动项")
                             .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     }
-                    .foregroundStyle(theme.secondaryText)
+                    .foregroundStyle(theme.primaryText)
                     .padding(.horizontal, 14)
                     .frame(height: 34)
-                    .background(
-                        Capsule().fill(theme.pillFill)
-                            .overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8))
-                    )
+                    .background(Capsule().fill(theme.pillFill).overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8)))
                 }
                 .buttonStyle(.plain)
                 .pointingHandOnHover()
-
-                if uninstaller.selectedBytes > 0 {
+                .disabled(startupManager.isScanning)
+            } else {
+                switch uninstaller.status {
+                case .idle:
+                    scanButton
+                    optionsButton
+                case .scanning:
                     Button {
-                        uninstaller.executeUninstall()
+                        uninstaller.cancelScan()
                     } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "trash.fill")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("立即卸载 (\(uninstaller.formattedSelectedBytes))")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                        }
-                        .foregroundStyle(Color.black)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
-                        .background(
-                            Capsule()
-                                .fill(LinearGradient(
-                                    colors: [Color.cyan, Color(red: 0.35, green: 0.90, blue: 0.85)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                ))
-                                .shadow(color: Color.cyan.opacity(0.35), radius: 4, y: 1.5)
-                        )
+                        Text("取消")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(theme.secondaryText)
+                            .padding(.horizontal, 16)
+                            .frame(height: 34)
+                            .background(Capsule().fill(theme.pillFill).overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8)))
                     }
                     .buttonStyle(.plain)
                     .pointingHandOnHover()
+                case .completed, .finished:
+                    Button {
+                        uninstaller.startScan()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("重新扫描")
+                                .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(theme.secondaryText)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .background(Capsule().fill(theme.pillFill).overlay(Capsule().strokeBorder(theme.cardBorder, lineWidth: 0.8)))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandOnHover()
+
+                    if uninstaller.selectedBytes > 0 {
+                        Button {
+                            uninstaller.executeUninstall()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "trash.fill")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("立即卸载 (\(uninstaller.formattedSelectedBytes))")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(Color.black)
+                            .padding(.horizontal, 16)
+                            .frame(height: 34)
+                            .background(
+                                Capsule()
+                                    .fill(LinearGradient(colors: [Color.cyan, Color(red: 0.35, green: 0.90, blue: 0.85)], startPoint: .leading, endPoint: .trailing))
+                                    .shadow(color: Color.cyan.opacity(0.35), radius: 4, y: 1.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandOnHover()
+                    }
+                    optionsButton
+                case .uninstalling:
+                    ProgressView().controlSize(.small)
                 }
-
-                optionsButton
-
-            case .uninstalling:
-                ProgressView()
-                    .controlSize(.small)
             }
         }
     }
@@ -237,10 +294,8 @@ public struct AppUninstallerSection: View {
             uninstaller.startScan()
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "eye.fill")
-                    .font(.system(size: 12, weight: .bold))
-                Text("扫描")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                Image(systemName: "eye.fill").font(.system(size: 12, weight: .bold))
+                Text("扫描").font(.system(size: 13, weight: .bold, design: .rounded))
             }
             .foregroundStyle(theme.primaryText)
             .padding(.horizontal, 18)
@@ -248,9 +303,7 @@ public struct AppUninstallerSection: View {
             .background(
                 Capsule()
                     .fill(colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
-                    .overlay(
-                        Capsule().strokeBorder(colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.12), lineWidth: 0.8)
-                    )
+                    .overlay(Capsule().strokeBorder(colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.12), lineWidth: 0.8))
             )
         }
         .buttonStyle(.plain)
@@ -267,33 +320,131 @@ public struct AppUninstallerSection: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(theme.secondaryText)
                 .frame(width: 34, height: 34)
-                .background(
-                    Circle().fill(theme.pillFill)
-                        .overlay(Circle().strokeBorder(theme.cardBorder, lineWidth: 0.8))
-                )
+                .background(Circle().fill(theme.pillFill).overlay(Circle().strokeBorder(theme.cardBorder, lineWidth: 0.8)))
         }
         .buttonStyle(.plain)
         .pointingHandOnHover()
     }
 
-    // MARK: - 2. 应用分类与安全说明卡片
+    // MARK: - 2. 顶部 4 子视图切换与分类过滤卡片
+
+    private var section2Group: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(UninstallerSubTab.allCases) { tab in
+                    subTabPill(tab)
+                }
+                Spacer()
+                Text("支持 launchctl 自动注销 · 白名单保护 · 废纸篓安全回收")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(theme.secondaryText)
+            }
+            .frame(width: contentW, height: 28, alignment: .leading)
+
+            categoriesAndSafetyCard
+                .frame(width: contentW, height: 100)
+        }
+    }
+
+    private func subTabPill(_ tab: UninstallerSubTab) -> some View {
+        let isSelected = (uninstaller.selectedTab == tab)
+        let badgeCount: Int = {
+            switch tab {
+            case .installedApps: return uninstaller.installedApps.count
+            case .commandLineTools: return uninstaller.commandLineTools.count
+            case .orphanedResidues: return uninstaller.visibleOrphanedResidues.count
+            case .startupItems: return startupManager.items.count
+            }
+        }()
+        let hasIssueBadge = (tab == .startupItems && startupManager.issuesCount > 0)
+
+        return Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                uninstaller.selectedTab = tab
+                if tab == .startupItems && startupManager.items.isEmpty && !startupManager.isScanning {
+                    startupManager.startScan()
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: tab.iconName)
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundStyle(isSelected ? Color.cyan : theme.secondaryText)
+                Text(tab.rawValue)
+                    .font(.system(size: 12.5, weight: isSelected ? .bold : .semibold, design: .rounded))
+                    .foregroundStyle(isSelected ? theme.primaryText : theme.secondaryText)
+                if badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(hasIssueBadge ? Color.orange : (isSelected ? Color.cyan : theme.secondaryText))
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(hasIssueBadge ? Color.orange.opacity(0.16) : (isSelected ? Color.cyan.opacity(0.14) : theme.pillFill)))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(isSelected ? (colorScheme == .dark ? Color.white.opacity(0.11) : Color.black.opacity(0.07)) : Color.clear)
+                    .overlay(Capsule().strokeBorder(isSelected ? Color.cyan.opacity(0.5) : theme.studioCardBorder, lineWidth: 0.8))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandOnHover()
+    }
 
     private var categoriesAndSafetyCard: some View {
         cardContainer {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    ForEach(AppCategoryFilter.allCases) { cat in
-                        categoryPill(cat)
+                if uninstaller.selectedTab == .startupItems {
+                    HStack(spacing: 10) {
+                        ForEach(StartupFilterOption.allCases) { filter in
+                            startupFilterPill(filter)
+                        }
+                        Spacer()
+                    }
+                } else if uninstaller.selectedTab == .commandLineTools {
+                    HStack(spacing: 18) {
+                        guaranteeItem(icon: "shippingbox.circle.fill", title: "自动关联 Homebrew Cellar 公式与版本")
+                        guaranteeItem(icon: "terminal.fill", title: "覆盖 ~/.local/bin 与 uv / pipx 独立工具")
+                        guaranteeItem(icon: "waveform.path.ecg", title: "实时识别正在运行的 CLI 进程")
+                        Spacer()
+                    }
+                } else if uninstaller.selectedTab == .orphanedResidues {
+                    HStack(spacing: 18) {
+                        guaranteeItem(icon: "magnifyingglass.circle.fill", title: "涵盖沙盒/群组/HTTP/WebKit/自启代理")
+                        guaranteeItem(icon: "eye.slash.fill", title: "误报项支持一键忽略（不再提示）")
+                        if !uninstaller.ignoredOrphanPaths.isEmpty {
+                            Button {
+                                uninstaller.clearIgnoredOrphans()
+                            } label: {
+                                Text("恢复已忽略残留 (\(uninstaller.ignoredOrphanPaths.count))")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Color.cyan)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.cyan.opacity(0.12)))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandOnHover()
+                        }
+                        Spacer()
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        ForEach(AppCategoryFilter.allCases) { cat in
+                            categoryPill(cat)
+                        }
                     }
                 }
 
-                Divider()
-                    .overlay(theme.dividerColor)
+                Divider().overlay(theme.dividerColor)
 
                 HStack(spacing: 24) {
-                    guaranteeItem(icon: "eye", title: "先扫描再卸载")
+                    guaranteeItem(icon: "checkmark.seal", title: "展示关联证据与高置信/复核标签")
                     guaranteeItem(icon: "lock.shield", title: "系统应用防误删")
-                    guaranteeItem(icon: "shippingbox", title: "关联残留全覆盖")
+                    guaranteeItem(icon: "bolt.slash", title: "卸载前自动 bootout 自启代理")
                     guaranteeItem(icon: "trash", title: "默认移至废纸篓")
                     Spacer()
                 }
@@ -302,6 +453,39 @@ public struct AppUninstallerSection: View {
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func startupFilterPill(_ filter: StartupFilterOption) -> some View {
+        let isSelected = (startupManager.selectedFilter == filter)
+        let count = startupManager.count(for: filter)
+        let tint: Color = (filter == .issues) ? .orange : .cyan
+
+        return Button {
+            startupManager.selectedFilter = filter
+        } label: {
+            HStack(spacing: 6) {
+                Text(filter.rawValue)
+                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium, design: .rounded))
+                    .foregroundStyle(isSelected ? theme.primaryText : theme.secondaryText)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(tint.opacity(0.14)))
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(isSelected ? (colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)) : Color.clear)
+                    .overlay(Capsule().strokeBorder(isSelected ? tint.opacity(0.45) : theme.studioCardBorder, lineWidth: 0.8))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandOnHover()
     }
 
     private func categoryPill(_ cat: AppCategoryFilter) -> some View {
@@ -318,11 +502,9 @@ public struct AppUninstallerSection: View {
                 Image(systemName: cat.iconName)
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(cat.themeColor)
-
                 Text(cat.displayName)
                     .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium, design: .rounded))
                     .foregroundStyle(isSelected ? theme.primaryText : theme.secondaryText)
-
                 if count > 0 {
                     Text("\(count)")
                         .font(.system(size: 10.5, weight: .bold, design: .monospaced))
@@ -331,7 +513,6 @@ public struct AppUninstallerSection: View {
                         .padding(.vertical, 1.5)
                         .background(Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)))
                 }
-
                 if bytes > 0 {
                     Text(uninstaller.formatBytes(bytes))
                         .font(.system(size: 10.5, weight: .bold, design: .monospaced))
@@ -346,9 +527,7 @@ public struct AppUninstallerSection: View {
             .background(
                 Capsule()
                     .fill(isSelected ? (colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)) : Color.clear)
-                    .overlay(
-                        Capsule().strokeBorder(isSelected ? (colorScheme == .dark ? Color.white.opacity(0.15) : Color.black.opacity(0.10)) : Color.white.opacity(0.05), lineWidth: 0.8)
-                    )
+                    .overlay(Capsule().strokeBorder(isSelected ? (colorScheme == .dark ? Color.white.opacity(0.15) : Color.black.opacity(0.10)) : Color.white.opacity(0.05), lineWidth: 0.8))
             )
         }
         .buttonStyle(.plain)
@@ -360,109 +539,42 @@ public struct AppUninstallerSection: View {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(theme.secondaryText)
-
             Text(title)
                 .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(theme.secondaryText)
         }
     }
 
-    // MARK: - 3. 应用与残留列表卡片
+    // MARK: - 3. 主列表工作区卡片 (4 模式统一对齐列)
 
     private var appReviewItemsCard: some View {
         cardContainer {
             VStack(spacing: 0) {
-                HStack(spacing: 16) {
-                    let displayItems = uninstaller.filteredDisplayItems
-                    let selectableCount = displayItems.filter { !$0.isSystemApp }.count
-                    let selectedInCurrent = displayItems.filter { uninstaller.isItemSelected($0.id) && !$0.isSystemApp }.count
+                toolbarHeader
+                    .padding(.horizontal, 16)
+                    .frame(height: 38)
 
-                    Button {
-                        if selectedInCurrent == selectableCount && selectableCount > 0 {
-                            uninstaller.deselectAll()
-                        } else {
-                            uninstaller.selectAll()
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: (selectedInCurrent == selectableCount && selectableCount > 0)
-                                  ? "checkmark.circle.fill"
-                                  : (selectedInCurrent == 0 ? "circle" : "minus.circle.fill"))
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(selectedInCurrent == 0 ? theme.secondaryText : Color.cyan)
-
-                            Text("全部 (\(displayItems.count))")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundStyle(theme.primaryText)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
-
-                    HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.secondaryText)
-                        TextField("搜索应用名称或 Bundle ID…", text: $uninstaller.searchQuery)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11.5))
-                        if !uninstaller.searchQuery.isEmpty {
-                            Button {
-                                uninstaller.searchQuery = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(theme.secondaryText)
-                            }
-                            .buttonStyle(.plain)
-                            .pointingHandOnHover()
-                        }
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .frame(width: 240)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.pillFill))
-
-                    Spacer()
-
-                    Menu {
-                        ForEach(AppSortOption.allCases) { opt in
-                            Button {
-                                uninstaller.toggleSort(option: opt)
-                            } label: {
-                                HStack {
-                                    Text(opt.rawValue)
-                                    if uninstaller.sortOption == opt {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(uninstaller.sortOption.rawValue)
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                            Image(systemName: uninstaller.sortOrder == .descending ? "chevron.down" : "chevron.up")
-                                .font(.system(size: 9.5, weight: .bold))
-                        }
-                        .foregroundStyle(theme.secondaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(Capsule().fill(theme.pillFill))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .pointingHandOnHover()
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 38)
-
-                Divider()
-                    .overlay(theme.dividerColor)
+                Divider().overlay(theme.dividerColor)
 
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 4) {
-                        ForEach(uninstaller.filteredDisplayItems) { item in
-                            uninstallerRow(item: item)
+                        switch uninstaller.selectedTab {
+                        case .installedApps:
+                            ForEach(uninstaller.filteredDisplayItems) { item in
+                                uninstallerRow(item: item)
+                            }
+                        case .commandLineTools:
+                            ForEach(uninstaller.filteredCommandLineTools) { tool in
+                                cliToolRow(tool)
+                            }
+                        case .orphanedResidues:
+                            ForEach(uninstaller.visibleOrphanedResidues) { res in
+                                uninstallerRow(item: .residue(res))
+                            }
+                        case .startupItems:
+                            ForEach(startupManager.filteredItems) { item in
+                                startupItemRow(item)
+                            }
                         }
                     }
                     .padding(.vertical, 4.5)
@@ -473,7 +585,111 @@ public struct AppUninstallerSection: View {
         }
     }
 
-    // MARK: - Row Rendering for Card 3
+    private var toolbarHeader: some View {
+        HStack(spacing: 16) {
+            if uninstaller.selectedTab == .installedApps {
+                let displayItems = uninstaller.filteredDisplayItems
+                let selectableCount = displayItems.filter { !$0.isSystemApp }.count
+                let selectedInCurrent = displayItems.filter { uninstaller.isItemSelected($0.id) && !$0.isSystemApp }.count
+
+                Button {
+                    if selectedInCurrent == selectableCount && selectableCount > 0 {
+                        uninstaller.deselectAll()
+                    } else {
+                        uninstaller.selectAll()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: (selectedInCurrent == selectableCount && selectableCount > 0)
+                              ? "checkmark.circle.fill"
+                              : (selectedInCurrent == 0 ? "circle" : "minus.circle.fill"))
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(selectedInCurrent == 0 ? theme.secondaryText : Color.cyan)
+                        Text("全部 (\(displayItems.count))")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                    }
+                }
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+            } else if uninstaller.selectedTab == .orphanedResidues {
+                Text("共 \(uninstaller.visibleOrphanedResidues.count) 项可排查无主残留")
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+            } else if uninstaller.selectedTab == .commandLineTools {
+                Text("共 \(uninstaller.filteredCommandLineTools.count) 项已识别命令行工具")
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+            } else {
+                Text("共 \(startupManager.filteredItems.count) 项系统与用户启动服务")
+                    .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.primaryText)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText)
+                if uninstaller.selectedTab == .startupItems {
+                    TextField("搜索服务 Label、应用名或可执行路径…", text: $startupManager.searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11.5))
+                    if !startupManager.searchQuery.isEmpty {
+                        Button { startupManager.searchQuery = "" } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
+                    TextField("搜索名称、Bundle ID 或命令行工具…", text: $uninstaller.searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11.5))
+                    if !uninstaller.searchQuery.isEmpty {
+                        Button { uninstaller.searchQuery = "" } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .frame(width: 260)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.pillFill))
+
+            Spacer()
+
+            if uninstaller.selectedTab == .installedApps {
+                Menu {
+                    ForEach(AppSortOption.allCases) { opt in
+                        Button {
+                            uninstaller.toggleSort(option: opt)
+                        } label: {
+                            HStack {
+                                Text(opt.rawValue)
+                                if uninstaller.sortOption == opt { Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(uninstaller.sortOption.rawValue)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                        Image(systemName: uninstaller.sortOrder == .descending ? "chevron.down" : "chevron.up")
+                            .font(.system(size: 9.5, weight: .bold))
+                    }
+                    .foregroundStyle(theme.secondaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(theme.pillFill))
+                }
+                .menuStyle(.borderlessButton)
+                .pointingHandOnHover()
+            }
+        }
+    }
+
+    // MARK: - App & Residue Rows
 
     @ViewBuilder
     private func uninstallerRow(item: UninstallerRowItem) -> some View {
@@ -485,362 +701,588 @@ public struct AppUninstallerSection: View {
             let isExpanded = uninstaller.expandedAppIDs.contains(app.id)
 
             VStack(spacing: 0) {
-                    HStack(spacing: 14) {
-                        if !app.isSystemApp {
-                            Button {
-                                uninstaller.toggleSelection(for: app.id)
-                            } label: {
-                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(isSelected ? Color.cyan : theme.secondaryText)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .pointingHandOnHover()
-                        } else {
-                            Image(systemName: "lock.shield.fill")
-                                .font(.system(size: 13))
-                                .foregroundStyle(theme.secondaryText.opacity(0.4))
+                HStack(spacing: 12) {
+                    if !app.isSystemApp {
+                        Button {
+                            uninstaller.toggleSelection(for: app.id)
+                        } label: {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(isSelected ? Color.cyan : theme.secondaryText)
                                 .frame(width: 20, height: 20)
-                                .help("macOS 系统原生保护组件，禁止卸载")
-                        }
-
-                        NativeAppIconThumbnail(bundleURL: app.bundleURL)
-                            .frame(width: 24, height: 24)
-
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 6) {
-                                Text(app.name)
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(theme.primaryText)
-                                    .lineLimit(1)
-
-                                if app.isRunning {
-                                    Text("活跃中")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                        .foregroundStyle(.green)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.green.opacity(0.15)))
-                                }
-
-                                if app.isUnused && !app.isSystemApp {
-                                    Text("长期未使用")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                        .foregroundStyle(.orange)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.orange.opacity(0.15)))
-                                }
-                            }
-
-                            HStack(spacing: 6) {
-                                Text("v\(app.version)")
-                                    .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundStyle(theme.secondaryText)
-
-                                Text("·")
-                                    .foregroundStyle(theme.secondaryText.opacity(0.5))
-
-                                Text(app.formattedLastUsed)
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(theme.secondaryText)
-
-                                Text("·")
-                                    .foregroundStyle(theme.secondaryText.opacity(0.5))
-
-                                Text(app.bundleID)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(theme.secondaryText.opacity(0.75))
-                                    .lineLimit(1)
-                            }
-                        }
-
-                        Spacer()
-
-                        Text("\(app.components.count) 项关联")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.cyan)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(Capsule().fill(Color.cyan.opacity(0.12)))
-
-                        Text(app.formattedTotalSize)
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundStyle(theme.primaryText)
-                            .frame(width: 85, alignment: .trailing)
-
-                        if app.isSystemApp {
-                            Text("系统原生")
-                                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Color.purple)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.purple.opacity(0.12)))
-                        } else {
-                            Text("可安全卸载")
-                                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Color(red: 0.25, green: 0.85, blue: 0.55))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color(red: 0.25, green: 0.85, blue: 0.55).opacity(0.12)))
-                        }
-
-                        Button {
-                            uninstaller.toggleAppExpanded(app.id)
-                        } label: {
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 10.5, weight: .bold))
-                                .foregroundStyle(theme.secondaryText)
-                                .frame(width: 22, height: 22)
                         }
                         .buttonStyle(.plain)
                         .pointingHandOnHover()
-
-                        Button {
-                            NSWorkspace.shared.selectFile(app.bundleURL.path, inFileViewerRootedAtPath: app.bundleURL.deletingLastPathComponent().path)
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.up.forward.square")
-                                    .font(.system(size: 10.5, weight: .bold))
-                                Text("定位")
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                            }
-                            .foregroundStyle(theme.secondaryText)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .pointingHandOnHover()
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(height: 44)
-
-                    // Granular footprint details accordion
-                    if isExpanded {
-                        VStack(spacing: 4) {
-                            ForEach(app.components) { comp in
-                                HStack(spacing: 8) {
-                                    Image(systemName: comp.type.iconName)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(Color.cyan)
-                                        .frame(width: 14)
-
-                                    Text(comp.type.rawValue)
-                                        .font(.system(size: 10.5, weight: .semibold))
-                                        .foregroundStyle(theme.primaryText)
-                                        .frame(width: 80, alignment: .leading)
-
-                                    Text(comp.path.path)
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundStyle(theme.secondaryText)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-
-                                    Spacer()
-
-                                    Text(comp.formattedSize)
-                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(Color.cyan)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 3.5)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .fill(theme.pillFill)
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 48)
-                        .padding(.bottom, 6)
-                    }
-                }
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
-                )
-                .onHover { hovering in
-                    uninstaller.hoveredItemID = hovering ? app.id : nil
-                }
-                .contentShape(Rectangle())
-
-        case .residue(let res):
-            HStack(spacing: 14) {
-                    Button {
-                        uninstaller.toggleSelection(for: res.id)
-                    } label: {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(isSelected ? Color.purple : theme.secondaryText)
+                    } else {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.secondaryText.opacity(0.4))
                             .frame(width: 20, height: 20)
                     }
-                    .buttonStyle(.plain)
-                    .pointingHandOnHover()
 
-                    Image(systemName: res.componentType.iconName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.purple)
+                    NativeAppIconThumbnail(bundleURL: app.bundleURL)
                         .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.purple.opacity(0.15)))
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(res.originalAppName)
+                            Text(app.name)
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                                 .foregroundStyle(theme.primaryText)
                                 .lineLimit(1)
 
-                            Text(res.componentType.rawValue)
-                                .font(.system(size: 9.5, weight: .medium))
-                                .foregroundStyle(Color.purple)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.purple.opacity(0.15)))
+                            if app.isRunning {
+                                Text("活跃中")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.green.opacity(0.15)))
+                            }
+
+                            if app.caskMatch != nil {
+                                Text("Brew Cask")
+                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.orange.opacity(0.14)))
+                            }
+
+                            if app.isUnused && !app.isSystemApp {
+                                Text("长期未使用")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.orange.opacity(0.15)))
+                            }
                         }
 
-                        Text(res.path.path)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(theme.secondaryText.opacity(0.85))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        HStack(spacing: 6) {
+                            Text("v\(app.version)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(theme.secondaryText)
+                            Text("·").foregroundStyle(theme.secondaryText.opacity(0.5))
+                            Text(app.formattedLastUsed)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(theme.secondaryText)
+                            Text("·").foregroundStyle(theme.secondaryText.opacity(0.5))
+                            Text(app.bundleID)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.secondaryText.opacity(0.75))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // 固定右对齐控制列（保证所有行完全纵向对齐）
+                    Text("\(app.components.count) 项关联")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.cyan)
+                        .frame(width: 82, height: 22)
+                        .background(Capsule().fill(Color.cyan.opacity(0.12)))
+
+                    Text(app.formattedTotalSize)
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundStyle(theme.primaryText)
+                        .frame(width: 82, alignment: .trailing)
+
+                    if app.isSystemApp {
+                        Text("系统原生")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.purple)
+                            .frame(width: 82, height: 22)
+                            .background(Capsule().fill(Color.purple.opacity(0.12)))
+                    } else {
+                        Text("可安全卸载")
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.25, green: 0.85, blue: 0.55))
+                            .frame(width: 82, height: 22)
+                            .background(Capsule().fill(Color(red: 0.25, green: 0.85, blue: 0.55).opacity(0.12)))
                     }
 
-                    Spacer()
-
-                    Text("无主残留")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.95, green: 0.45, blue: 0.45))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3.5)
-                        .background(Capsule().fill(Color(red: 0.95, green: 0.45, blue: 0.45).opacity(0.12)))
-
-                    Text(res.formattedSize)
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Color.purple)
-                        .frame(width: 85, alignment: .trailing)
-
-                    Text("可安全清理")
-                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.25, green: 0.85, blue: 0.55))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color(red: 0.25, green: 0.85, blue: 0.55).opacity(0.12)))
-
                     Button {
-                        NSWorkspace.shared.selectFile(res.path.path, inFileViewerRootedAtPath: res.path.deletingLastPathComponent().path)
+                        uninstaller.toggleAppExpanded(app.id)
                     } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.up.forward.square")
-                                .font(.system(size: 10.5, weight: .bold))
-                            Text("定位")
-                                .font(.system(size: 11, weight: .medium, design: .rounded))
-                        }
-                        .foregroundStyle(theme.secondaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
-                        )
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(theme.secondaryText)
+                            .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.plain)
                     .pointingHandOnHover()
+
+                    uninstallerLocateButton(for: app.bundleURL)
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 44)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
-                )
-                .onHover { hovering in
-                    uninstaller.hoveredItemID = hovering ? res.id : nil
+
+                // 展开抽屉：逐项关联证据 + 仅清数据模式
+                if isExpanded {
+                    VStack(spacing: 6) {
+                        HStack(spacing: 10) {
+                            Text("本体 \(app.formattedBinarySize) · 数据与关联项 \(app.formattedDataSize)")
+                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                .foregroundStyle(theme.secondaryText)
+
+                            Spacer()
+
+                            if !app.isSystemApp && app.dataSizeBytes > 1024 * 64 {
+                                Button {
+                                    uninstaller.clearDataOnly(for: app)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 10, weight: .bold))
+                                        Text("仅清理数据 (保留本体)")
+                                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                                    }
+                                    .foregroundStyle(Color.orange)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 3.5)
+                                    .background(Capsule().fill(Color.orange.opacity(0.14)))
+                                }
+                                .buttonStyle(.plain)
+                                .pointingHandOnHover()
+                            }
+                        }
+
+                        ForEach(app.components) { comp in
+                            let isProtected = !comp.isSafeToTrash || protectionStore.isProtected(path: comp.path.path)
+                            let included = uninstaller.isComponentIncluded(comp)
+                            HStack(spacing: 8) {
+                                if comp.type == .appBundle {
+                                    Image(systemName: "app.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.cyan)
+                                        .frame(width: 16)
+                                } else {
+                                    Button {
+                                        uninstaller.toggleComponentIncluded(comp)
+                                    } label: {
+                                        Image(systemName: included ? "checkmark.square.fill" : "square")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(included ? Color.cyan : theme.secondaryText)
+                                            .frame(width: 16)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                Text(comp.type.rawValue)
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(theme.primaryText)
+                                    .frame(width: 72, alignment: .leading)
+
+                                Text(comp.path.path)
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(theme.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Text(comp.confidence.rawValue)
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(comp.confidence == .auto ? Color.green : Color.orange)
+                                    .frame(width: 54, height: 18)
+                                    .background(Capsule().fill((comp.confidence == .auto ? Color.green : Color.orange).opacity(0.13)))
+
+                                Text(comp.formattedSize)
+                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(Color.cyan)
+                                    .frame(width: 74, alignment: .trailing)
+
+                                if isProtected {
+                                    Text("清理保护")
+                                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(Color.orange)
+                                        .frame(width: 60, height: 18)
+                                        .background(Capsule().fill(Color.orange.opacity(0.14)))
+                                } else {
+                                    Button {
+                                        protectionStore.addPath(comp.path.path)
+                                    } label: {
+                                        Text("清理保护")
+                                            .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                                            .foregroundStyle(Color.cyan)
+                                            .frame(width: 60, height: 18)
+                                            .background(Capsule().fill(Color.cyan.opacity(0.10)))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .pointingHandOnHover()
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 3.5)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.pillFill))
+                        }
+                    }
+                    .padding(.horizontal, 48)
+                    .padding(.bottom, 6)
                 }
-                .contentShape(Rectangle())
-        }
-    }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
+            )
+            .onHover { hovering in uninstaller.hoveredItemID = hovering ? app.id : nil }
+            .contentShape(Rectangle())
 
-    // MARK: - 4. Options & Protection Settings Popover
-
-    private var uninstallerSettingsPopover: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("卸载设置与安全机制", systemImage: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
-
-                Spacer()
-
+        case .residue(let res):
+            HStack(spacing: 12) {
                 Button {
-                    uninstaller.isOptionsPresented = false
+                    uninstaller.toggleSelection(for: res.id)
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(theme.secondaryText)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.purple : theme.secondaryText)
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
                 .pointingHandOnHover()
-            }
 
-            Divider()
+                Image(systemName: res.componentType.iconName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.purple)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.purple.opacity(0.15)))
 
-            // Delete Mode Selector (移到废纸篓 vs 永久删除)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("卸载删除方式")
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(theme.primaryText)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(res.originalAppName)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(theme.primaryText)
+                            .lineLimit(1)
 
-                Picker("", selection: $uninstaller.deleteMode) {
-                    ForEach(UninstallerDeleteMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                        Text(res.componentType.rawValue)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Color.purple)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.purple.opacity(0.15)))
+
+                        Text(res.evidenceLabel)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(theme.secondaryText)
                     }
+
+                    Text(res.path.path)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText.opacity(0.85))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(res.confidence.rawValue)
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(res.confidence == .auto ? Color(red: 0.95, green: 0.45, blue: 0.45) : Color.orange)
+                    .frame(width: 82, height: 22)
+                    .background(Capsule().fill((res.confidence == .auto ? Color(red: 0.95, green: 0.45, blue: 0.45) : Color.orange).opacity(0.12)))
+
+                Text(res.formattedSize)
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.purple)
+                    .frame(width: 82, alignment: .trailing)
+
+                Button {
+                    uninstaller.muteOrphanedResidue(res)
+                } label: {
+                    Text("忽略此项")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(theme.secondaryText)
+                        .frame(width: 82, height: 22)
+                        .background(Capsule().fill(theme.pillFill))
+                }
+                .buttonStyle(.plain)
                 .pointingHandOnHover()
 
-                Text(uninstaller.deleteMode.subtitle)
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
+                Color.clear.frame(width: 22, height: 22)
+
+                uninstallerLocateButton(for: res.path)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
+            )
+            .onHover { hovering in uninstaller.hoveredItemID = hovering ? res.id : nil }
+            .contentShape(Rectangle())
+        }
+    }
+
+    // MARK: - 命令行工具卸载行
+
+    private func cliToolRow(_ tool: CommandLineToolItem) -> some View {
+        let isHovered = (uninstaller.hoveredCliToolID == tool.id)
+        let cliImg = CommandLineToolIconStore.shared.icon(forToolName: tool.name)
+
+        return HStack(spacing: 12) {
+            if let cliImg {
+                Image(nsImage: cliImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.cyan)
+                    .frame(width: 26, height: 26)
+                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.cyan.opacity(0.14)))
             }
 
-            Divider()
-
-            // System App Protection Summary
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("系统原生应用防误删保护")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(tool.displayTitle)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(theme.primaryText)
-                    Spacer()
-                    Text("永久生效")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.green)
+                        .lineLimit(1)
+
+                    if tool.isRunning {
+                        Text("正在运行")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.green.opacity(0.15)))
+                    }
                 }
 
-                Text("macOS 系统原生组件、系统守护进程及系统核心组件受到永久保护，禁止勾选卸载，确保系统运行绝对稳健。")
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Text("v\(tool.version)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText)
+                    Text("·").foregroundStyle(theme.secondaryText.opacity(0.5))
+                    Text(tool.installURL.path)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText.opacity(0.8))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(tool.source.rawValue)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.mint)
+                .frame(width: 96, height: 22)
+                .background(Capsule().fill(Color.mint.opacity(0.12)))
+
+            Text(tool.formattedSize)
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(theme.primaryText)
+                .frame(width: 82, alignment: .trailing)
+
+            Button {
+                uninstaller.uninstallCommandLineTool(tool)
+            } label: {
+                Text("卸载")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.95, green: 0.45, blue: 0.45))
+                    .frame(width: 68, height: 22)
+                    .background(Capsule().fill(Color(red: 0.95, green: 0.45, blue: 0.45).opacity(0.14)))
+            }
+            .buttonStyle(.plain)
+            .pointingHandOnHover()
+
+            uninstallerLocateButton(for: tool.installURL)
         }
-        .padding(16)
-        .frame(width: 320)
+        .padding(.horizontal, 16)
+        .frame(height: 46)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
+        )
+        .onHover { hovering in uninstaller.hoveredCliToolID = hovering ? tool.id : nil }
+    }
+
+    // MARK: - 启动项管理行
+
+    private func startupItemRow(_ item: StartupItem) -> some View {
+        let isHovered = (startupManager.hoveredItemID == item.id)
+        let statusColor: Color = {
+            switch item.runtimeStatus {
+            case .running: return .green
+            case .loadedIdle: return .cyan
+            case .disabled: return .gray
+            case .missingBinary, .errorExit: return .red
+            }
+        }()
+
+        return HStack(spacing: 12) {
+            if let appURL = item.ownerBundleURL {
+                NativeAppIconThumbnail(bundleURL: appURL)
+                    .frame(width: 24, height: 24)
+            } else {
+                Image(systemName: item.kind.iconName)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(item.runtimeStatus.isAlert ? Color.red : Color.orange)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill((item.runtimeStatus.isAlert ? Color.red : Color.orange).opacity(0.14)))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(item.label)
+                        .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(theme.primaryText)
+                        .lineLimit(1)
+
+                    Text(item.ownerAppName)
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(Color.cyan)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.cyan.opacity(0.12)))
+
+                    if item.keepAlive {
+                        Text("常驻守护")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(.purple)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.purple.opacity(0.13)))
+                    }
+                }
+
+                Text(item.programPath ?? item.plistURL.path)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(item.runtimeStatus == .missingBinary ? Color.red : theme.secondaryText.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(item.kind.rawValue)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.secondaryText)
+                .frame(width: 96, height: 22)
+                .background(Capsule().fill(theme.pillFill))
+
+            Text(item.runtimeStatus.label)
+                .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                .foregroundStyle(statusColor)
+                .frame(width: 108, height: 22)
+                .background(Capsule().fill(statusColor.opacity(0.13)))
+
+            // 启用/禁用开关
+            Group {
+                if item.kind == .embeddedLoginItem {
+                    Button {
+                        startupManager.openSystemLoginItemsSettings()
+                    } label: {
+                        Text("系统设置")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(theme.secondaryText)
+                            .frame(width: 56, height: 22)
+                            .background(Capsule().fill(theme.pillFill))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Toggle("", isOn: Binding(
+                        get: { item.isEnabled },
+                        set: { _ in startupManager.toggleItem(item) }
+                    ))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .tint(.cyan)
+                    .frame(width: 56)
+                }
+            }
+
+            if item.kind != .embeddedLoginItem {
+                Button {
+                    startupManager.trashStartupItem(item)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color(red: 0.95, green: 0.45, blue: 0.45))
+                        .frame(width: 26, height: 22)
+                        .background(Capsule().fill(Color(red: 0.95, green: 0.45, blue: 0.45).opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .pointingHandOnHover()
+                .help("注销服务并移出此启动配置 Plist")
+            } else {
+                Color.clear.frame(width: 26, height: 22)
+            }
+
+            uninstallerLocateButton(for: item.plistURL)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 46)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)) : Color.clear)
+        )
+        .onHover { hovering in startupManager.hoveredItemID = hovering ? item.id : nil }
+    }
+
+    // MARK: - BTM 系统诊断弹窗
+
+    private var btmReportOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("macOS Background Task Management (BTM) 注册快照", systemImage: "shield.lefthalf.filled")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.primaryText)
+                    Spacer()
+                    Button {
+                        startupManager.isBtmSheetPresented = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 16)).foregroundStyle(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                    Text(startupManager.btmRawReport)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(theme.secondaryText)
+                        .textSelection(.enabled)
+                        .padding(12)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(RoundedRectangle(cornerRadius: 12).fill(colorScheme == .dark ? Color.black.opacity(0.32) : Color.black.opacity(0.05)))
+            }
+            .padding(20)
+            .frame(width: 780, height: 520)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(colorScheme == .dark ? Color(red: 0.14, green: 0.15, blue: 0.18) : Color.white)
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 1))
+            )
+        }
+    }
+
+    private func uninstallerLocateButton(for url: URL) -> some View {
+        Button {
+            NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.system(size: 10.5, weight: .bold))
+                Text("定位")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+            }
+            .foregroundStyle(theme.secondaryText)
+            .frame(width: 60, height: 22)
+            .background(Capsule().fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)))
+        }
+        .buttonStyle(.plain)
+        .pointingHandOnHover()
     }
 
     // MARK: - 通用卡片容器
 
     private func cardContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(theme.studioCardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(theme.studioCardBorder, lineWidth: 0.8)
-            )
+            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.studioCardFill))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.studioCardBorder, lineWidth: 0.8))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }

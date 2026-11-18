@@ -441,9 +441,11 @@ public final class SystemResourceMonitor {
     public func refreshDemandFromMain() {
         let toggles = FeatureToggleManager.shared
         let nav = StudioWindowNavigationState.shared
-        let isMainVisible = MainStudioWindowController.shared.isWindowVisible || nav.isMainWindowVisible
-        let isPopoverOrPanelVisible = PowerSourceEngine.shared.isPanelVisible
-            || (MenuBarController.shared?.isPopoverShown ?? false)
+        let sleepCoord = SystemSleepCoordinator.shared
+        let isAwakeScreen = !sleepCoord.isSystemAsleep && !sleepCoord.isScreenAsleep
+        let isMainVisible = isAwakeScreen && MainStudioWindowController.shared.isWindowActivelyVisible
+        let isPopoverOrPanelVisible = isAwakeScreen && (PowerSourceEngine.shared.isPanelVisible
+            || (MenuBarController.shared?.isPopoverShown ?? false))
         let isOverviewTabActive = isMainVisible && !nav.isModalPresented && nav.selectedTab == .status
         let isNetworkTabActive = isMainVisible && !nav.isModalPresented && nav.selectedTab == .network
         let isOverviewOrPopoverVisible = isOverviewTabActive || isPopoverOrPanelVisible

@@ -75,6 +75,12 @@ public final class FeatureToggleManager {
     public var enablePluginAntigravityContext: Bool {
         didSet { save("SP_Plugin_AntigravityContext", enablePluginAntigravityContext) }
     }
+    public var enablePluginAIToolCleaner: Bool {
+        didSet { save("SP_Plugin_AIToolCleaner", enablePluginAIToolCleaner) }
+    }
+    public var enablePluginSoftwareUpdater: Bool {
+        didSet { save("SP_Plugin_SoftwareUpdater", enablePluginSoftwareUpdater) }
+    }
 
     private static let pluginOrderKey = "SP_Plugins_CardOrder"
 
@@ -109,7 +115,9 @@ public final class FeatureToggleManager {
             enablePluginWiFiLatency,
             enablePluginARPSniffer,
             enablePluginUPSManager,
-            enablePluginAntigravityContext
+            enablePluginAntigravityContext,
+            enablePluginAIToolCleaner,
+            enablePluginSoftwareUpdater
         ].filter { $0 }.count
     }
 
@@ -120,6 +128,8 @@ public final class FeatureToggleManager {
         case .arpSniffer: return enablePluginARPSniffer
         case .upsManager: return enablePluginUPSManager
         case .antigravityContext: return enablePluginAntigravityContext
+        case .aiToolCleaner: return enablePluginAIToolCleaner
+        case .softwareUpdater: return enablePluginSoftwareUpdater
         }
     }
 
@@ -165,6 +175,18 @@ public final class FeatureToggleManager {
             enablePluginAntigravityContext = enabled
             if enabled {
                 AntigravityContextManager.shared.checkOnEntry()
+            }
+        case .aiToolCleaner:
+            guard enablePluginAIToolCleaner != enabled else { return }
+            enablePluginAIToolCleaner = enabled
+            if enabled {
+                AIToolCleanerManager.shared.scanAITools()
+            }
+        case .softwareUpdater:
+            guard enablePluginSoftwareUpdater != enabled else { return }
+            enablePluginSoftwareUpdater = enabled
+            if enabled {
+                SoftwareUpdaterManager.shared.scanAllIfNeeded()
             }
         }
     }
@@ -220,6 +242,8 @@ public final class FeatureToggleManager {
         self.enablePluginARPSniffer = readBool("SP_Plugin_ARPSniffer", defaultValue: false)
         self.enablePluginUPSManager = readBool("SP_Plugin_UPSManager", defaultValue: false)
         self.enablePluginAntigravityContext = readBool("SP_Plugin_AntigravityContext", defaultValue: false)
+        self.enablePluginAIToolCleaner = readBool("SP_Plugin_AIToolCleaner", defaultValue: false)
+        self.enablePluginSoftwareUpdater = readBool("SP_Plugin_SoftwareUpdater", defaultValue: false)
 
         let storedOrder = d.stringArray(forKey: Self.pluginOrderKey) ?? []
         var parsedOrder: [PluginModuleType] = []
@@ -264,7 +288,9 @@ public final class FeatureToggleManager {
             "SP_Plugin_WiFiLatency": enablePluginWiFiLatency,
             "SP_Plugin_ARPSniffer": enablePluginARPSniffer,
             "SP_Plugin_UPSManager": enablePluginUPSManager,
-            "SP_Plugin_AntigravityContext": enablePluginAntigravityContext
+            "SP_Plugin_AntigravityContext": enablePluginAntigravityContext,
+            "SP_Plugin_AIToolCleaner": enablePluginAIToolCleaner,
+            "SP_Plugin_SoftwareUpdater": enablePluginSoftwareUpdater
         ]
         if let data = try? JSONEncoder().encode(dict) {
             try? data.write(to: Self.settingsFileURL, options: .atomic)
@@ -293,6 +319,8 @@ public final class FeatureToggleManager {
         setPluginEnabled(.arpSniffer, false)
         setPluginEnabled(.upsManager, false)
         setPluginEnabled(.antigravityContext, false)
+        setPluginEnabled(.aiToolCleaner, false)
+        setPluginEnabled(.softwareUpdater, false)
         pluginModuleOrder = PluginModuleType.allCases
         saveAllToDisk()
     }

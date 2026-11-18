@@ -14,6 +14,7 @@ public final class CleanProtectionStore: @unchecked Sendable {
     public var customPatterns: [String] = []
     public var isProtectionSheetPresented: Bool = false
     public var lastErrorMessage: String? = nil
+    public var isWhitelistReadBlocked: Bool = false
 
     // UI state for CleanProtectionListView
     public var showingProtectionList: Bool = false
@@ -97,6 +98,13 @@ $HOME/Library/Caches/CloudKit*
         return activePatterns.count
     }
 
+    /// Thread-safe fail-closed check used by background cleaning engines before deleting files.
+    public func readFailureReason() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return isWhitelistReadBlocked ? (lastErrorMessage ?? "清理保护名单异常，已阻止自动清理") : nil
+    }
+
     public var configFilePath: String {
         primaryConfigURL.path
     }
@@ -115,27 +123,51 @@ $HOME/Library/Caches/CloudKit*
             try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
         }
 
-        // 2. Read from primary or fallback
+        // 2. Read from primary or fallback (fail-closed if an existing file cannot be read)
         var content: String? = nil
-        if fm.fileExists(atPath: primaryConfigURL.path),
-           let str = try? String(contentsOf: primaryConfigURL, encoding: .utf8) {
-            content = str
-        } else if fm.fileExists(atPath: secondaryConfigURL.path),
-                  let str = try? String(contentsOf: secondaryConfigURL, encoding: .utf8) {
-            content = str
-        }
-
-        // 3. If file didn't exist, populate with defaults
-        if content == nil || content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-            content = Self.defaultContent
-            try? content?.write(to: primaryConfigURL, atomically: true, encoding: .utf8)
-            let secDir = secondaryConfigURL.deletingLastPathComponent()
-            if !fm.fileExists(atPath: secDir.path) {
-                try? fm.createDirectory(at: secDir, withIntermediateDirectories: true)
+        if fm.fileExists(atPath: primaryConfigURL.path) {
+            do {
+                content = try String(contentsOf: primaryConfigURL, encoding: .utf8)
+            } catch {
+                self.isWhitelistReadBlocked = true
+                self.lastErrorMessage = "清理保护名单存在但无法读取 (\(error.localizedDescription))，已强制阻断自动清理。"
+                self.activePatterns = []
+                self.customPatterns = []
+                return
             }
-            try? content?.write(to: secondaryConfigURL, atomically: true, encoding: .utf8)
+        } else if fm.fileExists(atPath: secondaryConfigURL.path) {
+            do {
+                content = try String(contentsOf: secondaryConfigURL, encoding: .utf8)
+            } catch {
+                self.isWhitelistReadBlocked = true
+                self.lastErrorMessage = "备份保护名单无法读取 (\(error.localizedDescription))，已强制阻断自动清理。"
+                self.activePatterns = []
+                self.customPatterns = []
+                return
+            }
         }
 
+        // 3. Only if neither file existed yet, populate with defaults
+        if content == nil {
+            content = Self.defaultContent
+            do {
+                try content?.write(to: primaryConfigURL, atomically: true, encoding: .utf8)
+                let secDir = secondaryConfigURL.deletingLastPathComponent()
+                if !fm.fileExists(atPath: secDir.path) {
+                    try fm.createDirectory(at: secDir, withIntermediateDirectories: true)
+                }
+                try? content?.write(to: secondaryConfigURL, atomically: true, encoding: .utf8)
+            } catch {
+                self.isWhitelistReadBlocked = true
+                self.lastErrorMessage = "初始化默认清理保护名单失败 (\(error.localizedDescription))，已阻断自动清理。"
+                self.activePatterns = []
+                self.customPatterns = []
+                return
+            }
+        }
+
+        self.isWhitelistReadBlocked = false
+        self.lastErrorMessage = nil
         self.rawText = content ?? Self.defaultContent
         self.protectionEditorContent = self.rawText
         parsePatterns(from: self.rawText)
@@ -158,6 +190,7 @@ $HOME/Library/Caches/CloudKit*
             try text.write(to: primaryConfigURL, atomically: true, encoding: .utf8)
             try? text.write(to: secondaryConfigURL, atomically: true, encoding: .utf8)
             self.lastErrorMessage = nil
+            self.isWhitelistReadBlocked = false
         } catch {
             self.lastErrorMessage = "保存保护名单失败: \(error.localizedDescription)"
         }
@@ -169,9 +202,10 @@ $HOME/Library/Caches/CloudKit*
         save(text: Self.defaultContent)
     }
 
-    public func addPath(_ path: String) {
+    @discardableResult
+    public func addPath(_ path: String) -> String? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return nil }
 
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         var patternToAdd = trimmed
@@ -179,6 +213,11 @@ $HOME/Library/Caches/CloudKit*
             patternToAdd = "$HOME" + patternToAdd.dropFirst(homePath.count)
         } else if patternToAdd.hasPrefix("~") {
             patternToAdd = "$HOME" + patternToAdd.dropFirst(1)
+        }
+
+        // 避免重复写入相同规则
+        if activePatterns.contains(patternToAdd) {
+            return patternToAdd
         }
 
         var updated = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,6 +229,7 @@ $HOME/Library/Caches/CloudKit*
         updated += patternToAdd + "\n"
 
         save(text: updated)
+        return patternToAdd
     }
 
     public func removePattern(_ pattern: String) {
@@ -231,6 +271,11 @@ $HOME/Library/Caches/CloudKit*
 
     /// Fast safe protection evaluation across any thread
     public func isProtected(path: String) -> Bool {
+        matchedPattern(for: path) != nil
+    }
+
+    /// Returns the first matching whitelist rule pattern if protected, otherwise nil.
+    public func matchedPattern(for path: String) -> String? {
         lock.lock()
         let patterns = self.activePatterns
         lock.unlock()
@@ -247,26 +292,26 @@ $HOME/Library/Caches/CloudKit*
             if expandedPattern.hasSuffix("*") {
                 let prefix = String(expandedPattern.dropLast())
                 if standardizedTarget.hasPrefix(prefix) {
-                    return true
+                    return pattern
                 }
             }
 
             // 2. Exact match
             if standardizedTarget == expandedPattern {
-                return true
+                return pattern
             }
 
             // 3. Directory containment match
             if standardizedTarget.hasPrefix(expandedPattern + "/") {
-                return true
+                return pattern
             }
 
             // 4. In case pattern is a Bundle ID or specific folder name
             if !expandedPattern.contains("/") && standardizedTarget.contains(expandedPattern) {
-                return true
+                return pattern
             }
         }
 
-        return false
+        return nil
     }
 }
