@@ -1,0 +1,567 @@
+/* ============================================================================
+ * core/styles/35-quota.css — Model Quota (Ink): sidebar block and telemetry
+ * panel footer. Current pool: segments | bar | rings | gauge | dots | compact.
+ * Other pools: lines | text | segments | rings | rows | hidden.
+ * ============================================================================ */
+
+/* Light mode — Ink */
+#ag-quota,
+.ag-quota-tt {
+  --ag-q-mut: var(--muted-foreground, #8b8b92);
+  --ag-q-fg: var(--foreground, #18181b);
+  --ag-q-fg-2: var(--secondary-foreground, #3c3c42);
+  --ag-q-card: var(--card, #ffffff);
+  --ag-q-tile: transparent;
+  --ag-q-tile-other: transparent;
+  --ag-q-tile-border: transparent;
+  --ag-q-line: rgba(15, 23, 42, 0.08);
+  --ag-q-badge-bg: #18181b;
+  --ag-q-badge-fg: #ffffff;
+  --ag-q-wl-bg: rgba(0, 0, 0, 0.055);
+  --ag-q-track: rgba(0, 0, 0, 0.085);
+  --ag-q-fill: #2a2a2e;
+  --ag-q-low: #c49a4f;
+  --ag-q-low-text: #a8803a;
+  --ag-q-crit: #c4513f;
+  --ag-q-font: var(--font-sans, Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", system-ui, sans-serif);
+}
+
+/* Dark mode — Ink */
+:is(html[data-ag-theme-mode="dark"] body, html.dark body, body.dark, body.theme-dark, body[data-agy-theme].dark) :is(#ag-quota, .ag-quota-tt) {
+  --ag-q-mut: var(--muted-foreground, #84848c);
+  --ag-q-fg: var(--foreground, #ececef);
+  --ag-q-fg-2: var(--secondary-foreground, #c4c4ca);
+  --ag-q-card: var(--card, #202024);
+  --ag-q-tile: transparent;
+  --ag-q-tile-other: transparent;
+  --ag-q-tile-border: transparent;
+  --ag-q-line: rgba(255, 255, 255, 0.08);
+  --ag-q-badge-bg: #e6e6ea;
+  --ag-q-badge-fg: #141417;
+  --ag-q-wl-bg: rgba(255, 255, 255, 0.085);
+  --ag-q-track: rgba(255, 255, 255, 0.1);
+  --ag-q-fill: #e6e6ea;
+  --ag-q-low: #c3a05e;
+  --ag-q-low-text: #d2b273;
+  --ag-q-crit: #d8735f;
+}
+
+#ag-quota *,
+.ag-quota-tt * {
+  box-sizing: border-box;
+}
+
+:is(#ag-quota, .ag-quota-tt) [data-level] {
+  --ag-q-c: var(--ag-q-fill);
+  --ag-q-tc: var(--ag-q-fg);
+  --ag-q-sc: var(--ag-q-mut);
+}
+:is(#ag-quota, .ag-quota-tt) [data-level="low"] {
+  --ag-q-c: var(--ag-q-low);
+  --ag-q-tc: var(--ag-q-low-text);
+  --ag-q-sc: var(--ag-q-low-text);
+}
+:is(#ag-quota, .ag-quota-tt) [data-level="crit"] {
+  --ag-q-c: var(--ag-q-crit);
+  --ag-q-tc: var(--ag-q-crit);
+  --ag-q-sc: var(--ag-q-crit);
+}
+
+/* ---------- shared atoms ---------- */
+.ag-quota-wl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--ag-q-wl-bg);
+  color: var(--ag-q-fg-2);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-quota-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--ag-q-badge-bg);
+  color: var(--ag-q-badge-fg);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+}
+
+.ag-quota-hd-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ag-q-c);
+}
+
+.ag-quota-cbar {
+  position: relative;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--ag-q-track);
+  overflow: hidden;
+}
+.ag-quota-cbar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--ag-q-c);
+  transition: width 220ms ease, background-color 150ms ease;
+}
+.ag-quota-cbar.ag-quota-cbar-main {
+  height: 4px;
+}
+.ag-quota-cbar.ag-quota-mb {
+  height: 2px;
+  flex: 1;
+  min-width: 14px;
+}
+
+.ag-quota-bar {
+  display: flex;
+  gap: 3px;
+}
+.ag-quota-seg {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--ag-q-track);
+  overflow: hidden;
+}
+.ag-quota-seg-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--ag-q-c);
+  transition: width 220ms ease, background-color 150ms ease;
+}
+
+.ag-quota-dots {
+  display: grid;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: 3px;
+}
+.ag-quota-dot {
+  aspect-ratio: 1;
+  max-width: 6px;
+  border-radius: 50%;
+  background: var(--ag-q-track);
+}
+.ag-quota-dot[data-state="full"] {
+  background: var(--ag-q-c);
+}
+
+.ag-quota-ring-svg {
+  flex: none;
+  display: block;
+}
+.ag-quota-ring-svg circle {
+  fill: none;
+  stroke-width: 3.4;
+}
+.ag-quota-ring-track {
+  stroke: var(--ag-q-track);
+}
+.ag-quota-ring-arc {
+  stroke: var(--ag-q-c);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+}
+
+.ag-quota-gauge-svg {
+  display: block;
+}
+.ag-quota-gauge-svg path {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+.ag-quota-gauge-track {
+  stroke: var(--ag-q-track);
+}
+.ag-quota-gauge-arc {
+  stroke: var(--ag-q-c);
+}
+
+.ag-quota-vticks,
+.ag-quota-mseg {
+  display: flex;
+  gap: 2px;
+}
+.ag-quota-vtick {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 1.5px;
+  background: var(--ag-q-track);
+  overflow: hidden;
+}
+.ag-quota-vtick-fill,
+.ag-quota-ms > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--ag-q-c);
+}
+.ag-quota-mseg {
+  flex: 1;
+  min-width: 24px;
+  gap: 2px;
+}
+.ag-quota-ms {
+  position: relative;
+  flex: 1;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--ag-q-track);
+  overflow: hidden;
+}
+
+/* ---------- sidebar block ---------- */
+#ag-quota {
+  position: relative;
+  display: block;
+  margin: 4px 0 2px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  color: var(--ag-q-mut);
+  font-family: var(--ag-q-font);
+  font-size: 11px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+}
+#ag-quota em,
+.ag-quota-tt em {
+  font-style: normal !important;
+}
+
+#ag-quota .ag-quota-hd {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  font-size: 11.5px;
+  line-height: 16px;
+  min-width: 0;
+}
+#ag-quota .ag-quota-hd-name {
+  color: var(--ag-q-fg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+#ag-quota .ag-quota-hd-model {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ag-q-mut);
+  font-size: 10.5px;
+}
+
+#ag-quota .ag-quota-row + .ag-quota-row {
+  margin-top: 5px;
+}
+#ag-quota .ag-quota-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+}
+#ag-quota .ag-quota-pct {
+  color: var(--ag-q-tc);
+  font-size: 12px;
+  font-weight: 650;
+}
+#ag-quota .ag-quota-pct small {
+  margin-left: 1px;
+  color: var(--ag-q-mut);
+  font-size: 9.5px;
+  font-weight: 500;
+}
+#ag-quota .ag-quota-time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--ag-q-sc);
+  white-space: nowrap;
+}
+
+#ag-quota .ag-quota-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+#ag-quota .ag-quota-tile {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 2px;
+  border-radius: 6px;
+  background: var(--ag-q-tile);
+  border: none;
+}
+#ag-quota .ag-quota-tile-tv {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.2;
+}
+#ag-quota .ag-quota-tile-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+#ag-quota .ag-quota-tile b {
+  color: var(--ag-q-tc);
+  font-size: 12px;
+  font-weight: 650;
+}
+#ag-quota .ag-quota-tile em {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--ag-q-sc);
+  white-space: nowrap;
+}
+#ag-quota .ag-quota-gtile {
+  flex-direction: column;
+  gap: 3px;
+  padding: 3px 2px 2px;
+  text-align: center;
+}
+#ag-quota .ag-quota-gauge-dial {
+  position: relative;
+  width: 48px;
+  height: 25px;
+}
+#ag-quota .ag-quota-gauge-pct {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  font-size: 11.5px;
+  text-align: center;
+}
+#ag-quota .ag-quota-gmeta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+#ag-quota .ag-quota-crow {
+  display: grid;
+  grid-template-columns: 22px 1fr 30px 54px;
+  align-items: center;
+  gap: 6px;
+}
+#ag-quota .ag-quota-crow + .ag-quota-crow {
+  margin-top: 4px;
+}
+#ag-quota .ag-quota-crow b {
+  color: var(--ag-q-tc);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: right;
+}
+#ag-quota .ag-quota-crow em {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--ag-q-sc);
+  text-align: right;
+  white-space: nowrap;
+}
+
+#ag-quota .ag-quota-sep {
+  height: 0;
+  margin: 7px 0 0;
+  background: transparent;
+}
+
+/* other pools */
+#ag-quota .ag-quota-o + .ag-quota-o {
+  margin-top: 5px;
+}
+#ag-quota .ag-quota-o {
+  font-size: 10.5px;
+}
+#ag-quota .ag-quota-o-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 3px;
+  line-height: 14px;
+}
+#ag-quota .ag-quota-o-hd em {
+  font-style: normal;
+  font-size: 10px;
+}
+#ag-quota .ag-quota-o-name {
+  color: var(--ag-q-fg-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+#ag-quota .ag-quota-o-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+#ag-quota .ag-quota-o-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px 0;
+  border-radius: 6px;
+  background: var(--ag-q-tile-other);
+  border: none;
+}
+#ag-quota .ag-quota-o-col .ag-quota-oi {
+  width: 100%;
+}
+#ag-quota .ag-quota-o-col .ag-quota-o-time {
+  text-align: center;
+}
+#ag-quota .ag-quota-o-tcol {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px 0;
+  border-radius: 6px;
+  background: var(--ag-q-tile-other);
+  border: none;
+}
+#ag-quota .ag-quota-o-tcol .ag-quota-wl {
+  width: 20px;
+}
+#ag-quota .ag-quota-o-tcol b {
+  flex: 1;
+  text-align: center;
+  color: var(--ag-q-tc);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#ag-quota .ag-quota-o-tcol .ag-quota-o-time {
+  flex: none;
+  font-size: 9px;
+}
+#ag-quota .ag-quota-o[data-ostyle="lines"] .ag-quota-o-col .ag-quota-oi b,
+#ag-quota .ag-quota-o[data-ostyle="segments"] .ag-quota-o-col .ag-quota-oi b {
+  min-width: 24px;
+  text-align: right;
+}
+#ag-quota .ag-quota-o-rcol {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  border-radius: 6px;
+  background: var(--ag-q-tile-other);
+  border: none;
+}
+#ag-quota .ag-quota-o-ring {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+#ag-quota .ag-quota-o-rtv {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.2;
+}
+#ag-quota .ag-quota-o-time {
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 1.2;
+  color: var(--ag-q-sc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:is(#ag-quota, .ag-quota-tt) .ag-quota-oi {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+:is(#ag-quota, .ag-quota-tt) .ag-quota-oi b {
+  color: var(--ag-q-tc);
+  font-weight: 600;
+  font-size: 10.5px;
+}
+#ag-quota .ag-quota-orow {
+  display: grid;
+  grid-template-columns: 22px 1fr 30px 54px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+#ag-quota .ag-quota-orow b {
+  color: var(--ag-q-tc);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-align: right;
+}
+#ag-quota .ag-quota-orow em {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--ag-q-sc);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---------- telemetry panel footer ---------- */
+.ag-quota-tt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--ag-q-line);
+  color: var(--ag-q-mut);
+  font-family: var(--ag-q-font);
+  font-size: 10.5px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.ag-quota-tt .ag-quota-tt-name {
+  color: var(--ag-q-fg-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ag-quota-tt .ag-quota-oi {
+  flex: 1;
+}
+.ag-quota-tt .ag-quota-oi em {
+  font-style: normal;
+  color: var(--ag-q-sc);
+  white-space: nowrap;
+}
+.ag-quota-tt .ag-quota-oi em:empty {
+  display: none;
+}

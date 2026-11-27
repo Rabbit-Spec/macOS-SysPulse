@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "channel": "auto",
+  "preset": "codex-pure-white",
+  "telemetryLayout": "compact",
+  "telemetryCacheMode": "session",
+  "quotaStyle": "segments",
+  "quotaOtherStyle": "lines",
+  "fonts": {
+    "mode": "global",
+    "global": "",
+    "ui": "",
+    "chat": "",
+    "code": ""
+  },
+  "contextLimit": "auto",
+  "modules": {
+    "theme": true,
+    "i18n": true,
+    "metrics": true,
+    "quota": true,
+    "quotaSidebar": true,
+    "sshRemote": false,
+    "promptSuggestions": false,
+    "deadlockHealer": true,
+    "zoomShortcuts": true,
+    "cdpAutoRelaunch": true,
+    "customCss": true,
+    "customJs": true
+  },
+  "sshHosts": [],
+  "themeVars": {}
+}

@@ -1,0 +1,12 @@
+/*
+ * antigravity-codex-theme · User Custom CSS Overrides (Hot-Reloaded)
+ *
+ * Add your custom rules below. Changes are automatically picked up by the
+ * daemon within ~2.5s without restarting Antigravity.
+ *
+ * Useful selectors / tokens:
+ *   html[data-ag-preset="codex-pure-white"]   (Light Codex pure-white mode)
+ *   html[data-ag-theme-mode="dark"]           (Codex Charcoal Dark mode)
+ *   #ag-live-metrics-pill                     (Centered status & telemetry bar)
+ *   #ag-live-metrics-tooltip                  (Bento detail card)
+ */

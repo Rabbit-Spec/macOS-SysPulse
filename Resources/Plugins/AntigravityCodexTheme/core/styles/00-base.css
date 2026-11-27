@@ -1,0 +1,348 @@
+/* ============================================================================
+ * core/styles/00-base.css — Shared Typography, Geometry & Compatibility Layer
+ * ============================================================================ */
+
+:root,
+html,
+body,
+body[data-agy-theme],
+body[data-agy-theme] :where(.font-sans),
+body[data-agy-font],
+body[data-agy-font="google-sans"],
+body[data-agy-font="inter"],
+body[data-agy-font] :where(.font-sans),
+body[data-agy-theme] :where(.font-mono),
+body[data-agy-font] :where(.font-mono) {
+  --vscode-font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif !important;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif !important;
+  --default-font-family: var(--font-sans) !important;
+  --font-mono: 'SF Mono', 'Fira Code', Menlo, Monaco, ui-monospace, SFMono-Regular, 'PingFang SC', Consolas, monospace !important;
+  --editor-font-family: var(--font-mono) !important;
+  --vscode-editor-font-family: var(--font-mono) !important;
+  --default-mono-font-family: var(--font-mono) !important;
+  --font-weight-light: 300 !important;
+  --font-weight-normal: 400 !important;
+  --font-weight-medium: 500 !important;
+  --font-weight-semibold: 600 !important;
+  --font-weight-bold: 700 !important;
+  --font-weight-black: 900 !important;
+  --agy-gsf-h1-wght: 600 !important;
+  --agy-gsf-h3-wght: 600 !important;
+  --agy-gsf-bold-wght: 600 !important;
+  --agy-gsf-italic: italic !important;
+  --agy-gsf-slnt: 0 !important;
+}
+
+:root {
+  --ag-chat-font-size: 15px;
+}
+
+body,
+body[data-agy-font],
+body[data-agy-font="google-sans"] {
+  font-weight: 400 !important;
+  font-variation-settings: normal !important;
+  color: var(--foreground) !important;
+}
+
+/* Antigravity 2.31.0+ compatibility: keep embedded browser WebContentsView hole transparent */
+body:not([data-has-browser-hole="true"]),
+body[data-agy-font]:not([data-has-browser-hole="true"]),
+body[data-agy-font="google-sans"]:not([data-has-browser-hole="true"]) {
+  background-color: var(--background) !important;
+}
+
+.bg-sidebar:not([data-has-browser-hole="true"]) {
+  background-color: var(--sidebar) !important;
+}
+
+body[data-agy-font] :where(.font-sans, h1, h2, h3, h4, h5, h6, b, strong, i, em, .italic) {
+  --agy-gsf-bold-wght: 600 !important;
+  font-variation-settings: normal !important;
+}
+
+body[data-agy-font] :where(i, em, .italic):not(.codicon, .google-symbols) {
+  font-style: italic !important;
+}
+
+html, body, body[data-agy-font], button, select, nav, header, aside {
+  font-family: var(--font-sans) !important;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-markdown-root],
+[data-testid="user-message-content"],
+.agy-user-bubble,
+.select-text,
+.prose,
+.markdown,
+article,
+div[contenteditable="true"],
+textarea:not([role="dialog"] textarea),
+[data-lexical-editor="true"],
+[data-lexical-editor="true"] :is(p, span, div),
+[data-lexical-editor="true"] ~ p.pointer-events-none,
+#antigravity\.agentSidePanelInputBox div:has(> [data-lexical-editor="true"]) > p.pointer-events-none,
+:is([data-markdown-root], .select-text, .prose, .markdown, article) :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th),
+[data-markdown-root] :is(bdi, .context-scope-mention, .context-scope-mention button, .context-scope-mention span) {
+  font-family: var(--ag-chat-font, var(--font-sans)) !important;
+  letter-spacing: -0.01em !important;
+}
+
+:is([data-markdown-root], .select-text, .prose, .markdown) :is(p, li, blockquote) {
+  line-height: 1.62;
+}
+
+html[data-ag-custom-font-size="true"] :is([data-markdown-root], [data-testid="user-message-content"], [data-testid="user-message-content"] .select-text, .agy-user-bubble, .prose, .markdown, [class*="chat-message"]) {
+  font-size: var(--ag-chat-font-size) !important;
+}
+
+code, pre, kbd, samp, .font-mono, .code-block, .code-block *, [class*="language-"], .monaco-editor, .cm-editor, .cm-content, .cm-line, .xterm, pre *,
+.code-line, .code-line .line-content, .code-line .line-content *, [data-testid="code-gutter-diff"],
+[class*="group/file-title"], [class*="group/file-title"] *, [class*="file-title"], [class*="file-path"],
+[data-path], [data-file-path], :is([data-markdown-root], .select-text) :is(code, pre, kbd, samp, .font-mono) {
+  font-family: var(--font-mono) !important;
+}
+
+#antigravity\.agentSidePanelInputBox [data-lexical-editor="true"],
+#antigravity\.agentSidePanelInputBox [data-lexical-editor="true"] span[data-lexical-text="true"] {
+  font-weight: 400 !important;
+  letter-spacing: normal !important;
+}
+
+/* Disable costly backdrop blur filters & fix card inset hairlines */
+.surface-glass,
+.agy-fastpick.surface-glass,
+.quick-input-widget.surface-glass,
+.agy-user-bubble {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.agy-inset-shell {
+  --card-edge: var(--card-border, rgba(0, 0, 0, 0.08)) !important;
+  --sash-line: var(--card-border, rgba(0, 0, 0, 0.08)) !important;
+}
+
+.agy-sheet[data-sheet-inset] [data-main-content-body]::after,
+.agy-inset-shell [data-side-panel-body]::after {
+  box-shadow: inset 0 0 0 1px var(--card-edge, rgba(0, 0, 0, 0.08)) !important;
+}
+
+/* Codex Composer Tray & Floating Inner Card Geometry
+ * Concentric corner invariant: outer radius (21px) = inner radius (20px) + outer padding (1px) + outer border (0px)
+ */
+:is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"], .surface-composer, .surface-composer.bg-card-border) {
+  --nux-composer-frame-radius: 21px;
+  --nux-composer-radius: 20px;
+  padding: 1px !important;
+  background-color: var(--ag-composer-tray-bg, #F7F7F8) !important;
+  border: 0 !important;
+  border-radius: 21px !important;
+  box-shadow: none !important;
+  outline: none !important;
+  transition: border-color 180ms ease, box-shadow 180ms ease !important;
+}
+
+.surface-composer > .surface-composer-card,
+body[data-agy-theme] .surface-composer > .surface-composer-card,
+body[data-agy-theme][data-newux-theme="onyx"] .surface-composer > .surface-composer-card,
+.surface-composer-card.bg-card,
+[id="antigravity.agentSidePanelInputBox"] .surface-composer-card,
+[id="antigravity.agentSidePanelInputBox"] > div.bg-card {
+  background-color: var(--ag-composer-card-bg, #FFFFFF) !important;
+  border: 1px solid var(--ag-composer-card-border, rgba(0, 0, 0, 0.07)) !important;
+  border-radius: 20px !important;
+  box-shadow: var(--ag-composer-card-shadow, 0 2px 10px rgba(0, 0, 0, 0.035), 0 1px 2px rgba(0, 0, 0, 0.02)) !important;
+  outline: none !important;
+  transition: box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1), border-color 220ms ease !important;
+}
+
+body[data-agy-theme] .surface-composer:focus-within > .surface-composer-card,
+body[data-agy-theme][data-newux-theme="onyx"] .surface-composer:focus-within > .surface-composer-card,
+.surface-composer:focus-within > .surface-composer-card,
+.surface-composer-card:focus-within,
+[id="antigravity.agentSidePanelInputBox"]:focus-within .surface-composer-card {
+  border-color: var(--ag-composer-card-focus-border, rgba(0, 0, 0, 0.10)) !important;
+  box-shadow: var(--ag-composer-card-focus-shadow, 0 4px 16px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.03)) !important;
+}
+
+/* Composer header pills, bottom controls, and primary action button */
+[id="antigravity.agentSidePanelInputBox"] > div:first-child:not(.surface-composer-card) :is(button, span, svg) {
+  color: var(--ag-composer-top-fg, #171717) !important;
+}
+
+[id="antigravity.agentSidePanelInputBox"] > div:first-child:not(.surface-composer-card) button:is(:hover, :focus-visible, [data-state="open"], [aria-expanded="true"]) {
+  background-color: var(--ag-composer-top-hover-bg, rgba(0, 0, 0, 0.06)) !important;
+  color: var(--ag-composer-top-hover-fg, #0D0D0D) !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is([class*="text-secondary-foreground"], button, span):not([data-lexical-editor="true"]):not([data-lexical-editor="true"] *) {
+  font-weight: 500 !important;
+  letter-spacing: -0.012em !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is([class*="text-secondary-foreground"]:not(#ag-live-metrics-pill *):not(.ag-live-metrics-pill *), button:not([data-testid="send-button"]):not(.agy-send-button):not([data-testid="voice-start-button"]):not([data-testid="input-cancel-button"]), span:not([data-testid="voice-live-pill"]):not([data-testid="voice-live-pill"] *):not(.agy-send-button):not(.agy-send-button *):not([data-testid="input-cancel-button"] *):not(#ag-live-metrics-pill):not(#ag-live-metrics-pill *):not(.ag-live-metrics-pill):not(.ag-live-metrics-pill *), svg:not([data-testid="voice-live-pill"] *):not([data-testid="send-button"] *):not(.agy-send-button *):not([data-testid="input-cancel-button"] *)):not([data-lexical-editor="true"]):not([data-lexical-editor="true"] *) {
+  color: var(--ag-composer-ctrl-fg, #171717) !important;
+  opacity: 1 !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is([data-testid="voice-live-pill"], button[data-testid="send-button"], .agy-send-button),
+:is([data-testid="voice-live-pill"], button[data-testid="send-button"], .agy-send-button) {
+  background-color: var(--ag-send-btn-bg, #2B7FFF) !important;
+  color: #FFFFFF !important;
+  border: 1px solid var(--ag-send-btn-border, #2B7FFF) !important;
+  box-shadow: var(--ag-send-btn-shadow, 0 2px 6px rgba(43, 127, 255, 0.28)) !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is([data-testid="voice-live-pill"], button[data-testid="send-button"], .agy-send-button):hover,
+:is([data-testid="voice-live-pill"], button[data-testid="send-button"], .agy-send-button):hover {
+  background-color: var(--ag-send-btn-hover-bg, #1D6FEF) !important;
+  opacity: 1 !important;
+}
+
+#antigravity\.agentSidePanelInputBox :is([data-testid="voice-live-pill"], button[data-testid="send-button"], .agy-send-button) * {
+  color: #FFFFFF !important;
+  fill: #FFFFFF !important;
+}
+
+/* Single-ring search input focus while preserving checkbox/radio/range accessibility */
+input[placeholder*="Search"],
+input[data-ag-orig-placeholder*="Search"],
+[data-testid="new-tab-search-input"],
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"])[class*="focus:border-primary"],
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"])[class*="focus:border-ring"] {
+  --nux-focus-ring: transparent !important;
+}
+
+input[placeholder*="Search"]:is(:focus, :focus-visible),
+input[data-ag-orig-placeholder*="Search"]:is(:focus, :focus-visible),
+[data-testid="new-tab-search-input"]:is(:focus, :focus-visible),
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"])[class*="focus:border-primary"]:is(:focus, :focus-visible),
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"])[class*="focus:border-ring"]:is(:focus, :focus-visible) {
+  outline: none !important;
+  outline-offset: 0 !important;
+  border-color: var(--primary, #2B7FFF) !important;
+  box-shadow: none !important;
+}
+
+/* Preserve voice-live-pill internal animated icon visibility */
+html[data-ag-preset] #antigravity\.agentSidePanelInputBox [data-testid="voice-live-pill"] :is(.opacity-0, [class*="opacity-0"], [class*="opacity-0"] *),
+[data-testid="voice-live-pill"] :is(.opacity-0, [class*="opacity-0"], [class*="opacity-0"] *) {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  display: none !important;
+}
+
+html[data-ag-preset] #antigravity\.agentSidePanelInputBox [data-testid="voice-live-pill"] :is(.opacity-100, [class*="opacity-100"]),
+[data-testid="voice-live-pill"] :is(.opacity-100, [class*="opacity-100"]) {
+  opacity: 1 !important;
+  visibility: visible !important;
+  display: flex !important;
+}
+
+/* Sidebar, menus & dialogs typography */
+.bg-sidebar :is(a, button, [class*="truncate"], [class*="text-sm"], [class*="text-xs"]),
+aside :is(a, button) {
+  font-weight: 450 !important;
+  letter-spacing: -0.012em !important;
+  color: var(--ag-sidebar-fg, #171717) !important;
+}
+
+[data-testid="conversation-row-sidebar"]:not([data-selected="true"]) span.truncate,
+.bg-sidebar [data-testid="conversation-row-sidebar"]:not([data-selected="true"]) [class*="truncate"],
+.agy-sidebar-row:not([data-selected="true"]) span.truncate,
+aside [data-testid="conversation-row-sidebar"]:not([data-selected="true"]) span {
+  font-weight: 400 !important;
+  letter-spacing: -0.005em !important;
+  color: var(--ag-sidebar-row-fg, #262626) !important;
+}
+
+button[data-testid="project-header"],
+button[data-project-card="true"],
+[data-project-label],
+[data-subtext] span[class*="text-muted"],
+.bg-sidebar span:has(> svg) + span {
+  font-weight: 450 !important;
+  color: var(--ag-sidebar-header-fg, #404040) !important;
+}
+
+button[data-testid="project-header"] span,
+button[data-project-card="true"] span {
+  font-weight: 450 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-sidebar-header-title-fg, #171717) !important;
+}
+
+[data-testid="conversation-row-sidebar"][data-selected="true"],
+[data-testid="conversation-row-sidebar"][data-selected="true"] span,
+.bg-sidebar [data-testid="conversation-row-sidebar"][data-selected="true"] [class*="truncate"],
+.bg-sidebar [data-active="true"],
+.bg-sidebar [data-active="true"] span,
+.bg-sidebar [aria-selected="true"] {
+  font-weight: 520 !important;
+  color: var(--ag-sidebar-selected-fg, #0D0D0D) !important;
+}
+
+.bg-sidebar :is([class*="text-muted"], [class*="text-[11px]"], [class*="uppercase"]) {
+  font-weight: 500 !important;
+  letter-spacing: -0.005em !important;
+  color: var(--ag-sidebar-muted-fg, #676767) !important;
+}
+
+button, [role="button"], select {
+  letter-spacing: -0.012em;
+}
+
+[role="menu"], [role="menuitem"], [role="listbox"], [role="option"], [data-select-popup],
+[data-testid="title-menu-bar"], [data-testid="title-menu-bar-item"], [data-testid="title-menu-bar-option"],
+.agy-overlay, .agy-overlay-item, [data-radix-menu-content], [data-radix-popper-content-wrapper],
+[data-side="top"]:not(.code-line), [data-side="bottom"]:not(.code-line), [data-side="left"]:not(.code-line), [data-side="right"]:not(.code-line) {
+  font-family: var(--font-sans) !important;
+}
+
+[role="option"]:not([data-disabled]),
+[data-testid="title-menu-bar-option"] {
+  font-weight: 450 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-menu-item-fg, #171717) !important;
+}
+
+[role="menu"] :is([role="menuitem"], .agy-overlay-item, [class*="truncate"], [class*="text-xs"], [class*="text-[13px]"], span),
+.agy-overlay .agy-overlay-item {
+  font-weight: 400 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-menu-item-fg, #171717) !important;
+}
+
+[role="menu"] :is([role="menuitem"], .agy-overlay-item) > span,
+[role="menu"] :is([role="menuitem"], .agy-overlay-item) :is(span[class*="flex-1"], span.truncate),
+.agy-overlay .agy-overlay-item > span,
+.agy-overlay .agy-overlay-item :is(span[class*="flex-1"], span.truncate) {
+  font-weight: 450 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-menu-item-fg, #171717) !important;
+}
+
+[role="menu"] :is([class*="font-medium"], [class*="text-muted-foreground"], h2, h3, h4),
+.agy-overlay :is([class*="font-medium"], [class*="text-muted-foreground"]) {
+  font-weight: 500 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-menu-header-fg, #171717) !important;
+}
+
+[role="dialog"] {
+  font-family: var(--font-sans) !important;
+}
+
+[role="dialog"] :is(h2, h3) {
+  font-weight: 500 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-dialog-title-fg, #0D0D0D) !important;
+}
+
+[role="dialog"] :is(.agy-card, [class*="agy-card"], [class*="divide-border"]) span.text-sm {
+  font-weight: 450 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--ag-dialog-item-fg, #171717) !important;
+}

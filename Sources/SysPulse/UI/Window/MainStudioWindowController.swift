@@ -1,0 +1,658 @@
+import AppKit
+import SwiftUI
+import Observation
+import Darwin.malloc
+
+public enum StudioTopTab: String, CaseIterable, Identifiable, Sendable {
+    case status = "状态"
+    case network = "网络"
+    case cleaner = "清理"
+    case optimizer = "优化"
+    case software = "软件"
+    case space = "空间"
+    case plugins = "模块"
+
+    public var id: String { rawValue }
+}
+
+public enum StudioModalTab: String, CaseIterable, Identifiable, Sendable {
+    case cleaner = "清理设置"
+    case settings = "系统设置"
+    case about = "关于 SysPulse"
+
+    public var id: String { rawValue }
+}
+
+public enum StudioWindowSection: String, CaseIterable, Identifiable, Sendable {
+    case overview = "overview"
+    case smartCleaner = "smartCleaner"
+    case systemOptimizer = "systemOptimizer"
+    case appManager = "appManager"
+    case spaceAnalysis = "spaceAnalysis"
+    case networkMonitor = "networkMonitor"
+    case plugins = "plugins"
+    case upsCenter = "upsCenter"
+    case customization = "customization"
+    case about = "about"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .overview: return "状态"
+        case .smartCleaner: return "清理"
+        case .systemOptimizer: return "优化"
+        case .appManager: return "软件"
+        case .spaceAnalysis: return "空间"
+        case .networkMonitor: return "网络"
+        case .plugins: return "模块"
+        case .upsCenter: return "UPS 电源管理"
+        case .customization: return "设置"
+        case .about: return "关于 SysPulse"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .overview: return "实时硬件状态、整机功耗与进程排行"
+        case .smartCleaner: return "应用缓存、系统日志、开发产物与废纸篓安全清理"
+        case .systemOptimizer: return "系统数据库整理、配置修复、内存回收与常见小故障急救"
+        case .appManager: return "应用空间占用分析、一键彻底卸载与残留垃圾扫描"
+        case .spaceAnalysis: return "目录层级深度钻取、巨量大文件穿透与容易漏掉的空间解读"
+        case .networkMonitor: return "实时掌控上下行带宽、链路延迟与应用流量分布，内置硬件级链路遥测与测速诊断"
+        case .plugins: return "PS Portal 串流画质增强与独立模块化扩展中心"
+        case .upsCenter: return "外接 UPS 监控、断电保护与外接盘安全推出"
+        case .customization: return "开启或关闭监测模块、菜单栏显示与弹窗项目"
+        case .about: return "连接 UPS 与版本信息"
+        }
+    }
+
+    public var iconName: String {
+        switch self {
+        case .overview: return "gauge.with.dots.needle.67percent"
+        case .smartCleaner: return "sparkles.rectangle.stack.fill"
+        case .systemOptimizer: return "wand.and.stars.inverse"
+        case .appManager: return "app.badge.checkmark.fill"
+        case .spaceAnalysis: return "circle.hexagongrid.fill"
+        case .networkMonitor: return "network"
+        case .plugins: return "puzzlepiece.extension.fill"
+        case .upsCenter: return "bolt.shield.fill"
+        case .customization: return "gearshape.fill"
+        case .about: return "info.circle.fill"
+        }
+    }
+}
+
+public enum ProcessSortField: String, CaseIterable, Sendable {
+    case name = "名称"
+    case memory = "内存"
+    case cpu = "% CPU"
+    case energy = "能耗"
+    case pid = "PID"
+}
+
+public enum ProcessSortOrder: Sendable {
+    case ascending
+    case descending
+}
+
+@Observable
+@MainActor
+public final class StudioWindowNavigationState {
+    public static let shared = StudioWindowNavigationState()
+    public var selectedTab: StudioTopTab = .status {
+        didSet {
+            if oldValue != selectedTab {
+                SystemResourceMonitor.shared.refreshDemandFromMain()
+                AccessoryBatteryManager.shared.updateVisibilityState()
+            }
+        }
+    }
+    public var isMainWindowVisible: Bool = false
+    public var isMainWindowVisuallyActive: Bool = true
+    public var isModalPresented: Bool = false {
+        didSet {
+            if oldValue != isModalPresented {
+                SystemResourceMonitor.shared.refreshDemandFromMain()
+                AccessoryBatteryManager.shared.updateVisibilityState()
+            }
+        }
+    }
+    public var activeModalTab: StudioModalTab = .settings
+    public var isIconMenuPresented: Bool = false
+    public var fanMode: String = "自动"
+    public var isProcessTableHovered: Bool = false
+    public var displayedProcesses: [EnergyAppItem] = [] {
+        didSet {
+            recomputeSortedProcesses()
+        }
+    }
+    public private(set) var sortedProcesses: [EnergyAppItem] = []
+    public var processSortField: ProcessSortField = .energy
+    public var processSortOrder: ProcessSortOrder = .descending
+    public var cleanerSortField: CleanerSortField = .size
+    public var cleanerSortOrder: ProcessSortOrder = .descending
+    public var hoveredCleanerItemID: UUID? = nil
+    public var cleanerBucketFilter: CleanReviewBucket? = nil
+    public var isCleanerOptionsPresented: Bool = false
+    public var isNetworkDetailPresented: Bool = false
+    public var isDiagnosticsModalPresented: Bool = false
+    public var isUpdateModalPresented: Bool = false
+    public var hoveredOverviewCardID: String? = nil
+    public var hoveredPluginCard: PluginModuleType? = nil
+    public var draggingPluginCard: PluginModuleType? = nil
+    public var dragPluginBaseOrigin: CGPoint = .zero
+    public var dragPluginTranslation: CGSize = .zero
+    public var hoveredPopoverCardID: String? = nil
+    public var hoveredTopTab: StudioTopTab? = nil
+    public var activeOverviewPopover: String? = nil {
+        didSet {
+            if activeOverviewPopover == nil {
+                popoverDismissWorkItem?.cancel()
+                popoverDismissWorkItem = nil
+                isOverviewPopoverContentHovered = false
+            }
+        }
+    }
+    public var isOverviewPopoverContentHovered: Bool = false
+    private var popoverDismissWorkItem: DispatchWorkItem? = nil
+    public var copiedPopoverField: String? = nil
+    public var hoveredProcessPID: Int32? = nil
+    public var inspectorViewModel: ProcessInspectorViewModel? = nil
+    public var isProcessSearchExpanded: Bool = false
+    public var processSearchText: String = "" {
+        didSet {
+            recomputeSortedProcesses()
+        }
+    }
+    public var pinnedProcessKeys: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: "SP_Overview_PinnedProcessKeys") ?? []
+    ) {
+        didSet {
+            UserDefaults.standard.set(Array(pinnedProcessKeys), forKey: "SP_Overview_PinnedProcessKeys")
+            recomputeSortedProcesses()
+        }
+    }
+
+    public func popoverBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { self.activeOverviewPopover == id },
+            set: { isPresented in
+                if isPresented {
+                    self.activeOverviewPopover = id
+                } else if self.activeOverviewPopover == id {
+                    self.activeOverviewPopover = nil
+                }
+            }
+        )
+    }
+
+    public func handleOverviewCardHover(id: String, isInteractive: Bool, hovering: Bool) {
+        popoverDismissWorkItem?.cancel()
+        popoverDismissWorkItem = nil
+
+        if hovering {
+            hoveredOverviewCardID = isInteractive ? id : nil
+            if let active = activeOverviewPopover, active != id {
+                activeOverviewPopover = nil
+            }
+        } else {
+            if hoveredOverviewCardID == id {
+                hoveredOverviewCardID = nil
+            }
+            if activeOverviewPopover == id {
+                scheduleOverviewPopoverAutoDismiss(expectedID: id)
+            }
+        }
+    }
+
+    public func handleOverviewPopoverContentHover(_ hovering: Bool) {
+        isOverviewPopoverContentHovered = hovering
+        popoverDismissWorkItem?.cancel()
+        popoverDismissWorkItem = nil
+        if !hovering, let active = activeOverviewPopover {
+            scheduleOverviewPopoverAutoDismiss(expectedID: active)
+        }
+    }
+
+    private func scheduleOverviewPopoverAutoDismiss(expectedID: String) {
+        popoverDismissWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.activeOverviewPopover == expectedID else { return }
+                if self.hoveredOverviewCardID != expectedID && !self.isOverviewPopoverContentHovered {
+                    self.activeOverviewPopover = nil
+                }
+            }
+        }
+        popoverDismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    public func copyPopoverValue(key: String, value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        self.copiedPopoverField = key
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            if self?.copiedPopoverField == key {
+                self?.copiedPopoverField = nil
+            }
+        }
+    }
+
+    public func inspectProcess(_ item: EnergyAppItem) {
+        self.inspectorViewModel = ProcessInspectorViewModel(app: item)
+    }
+
+    public func closeProcessInspector() {
+        self.inspectorViewModel = nil
+    }
+
+    public func processPinKey(for item: EnergyAppItem) -> String {
+        if let bid = item.bundleIdentifier, !bid.isEmpty {
+            return bid
+        }
+        return item.name
+    }
+
+    public func isPinned(_ item: EnergyAppItem) -> Bool {
+        pinnedProcessKeys.contains(processPinKey(for: item))
+    }
+
+    public func togglePin(_ item: EnergyAppItem) {
+        let key = processPinKey(for: item)
+        if pinnedProcessKeys.contains(key) {
+            pinnedProcessKeys.remove(key)
+        } else {
+            pinnedProcessKeys.insert(key)
+        }
+    }
+
+    public func toggleSort(field: ProcessSortField) {
+        if processSortField == field {
+            processSortOrder = (processSortOrder == .ascending) ? .descending : .ascending
+        } else {
+            processSortField = field
+            processSortOrder = (field == .name) ? .ascending : .descending
+        }
+        recomputeSortedProcesses()
+    }
+
+    private func recomputeSortedProcesses() {
+        let query = processSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let list: [EnergyAppItem]
+        if query.isEmpty {
+            list = displayedProcesses
+        } else {
+            list = displayedProcesses.filter { item in
+                item.name.localizedCaseInsensitiveContains(query)
+                    || (item.activeSubprocessName?.localizedCaseInsensitiveContains(query) == true)
+                    || (item.bundleIdentifier?.localizedCaseInsensitiveContains(query) == true)
+                    || "\(item.pid)".contains(query)
+            }
+        }
+        let field = processSortField
+        let order = processSortOrder
+        let pinned = pinnedProcessKeys
+        sortedProcesses = list.sorted { a, b in
+            let pinA = pinned.contains(processPinKey(for: a))
+            let pinB = pinned.contains(processPinKey(for: b))
+            if pinA != pinB {
+                return pinA
+            }
+            switch field {
+            case .name:
+                let comp = a.name.localizedStandardCompare(b.name)
+                return order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
+            case .memory:
+                return order == .ascending ? (a.memoryBytes < b.memoryBytes) : (a.memoryBytes > b.memoryBytes)
+            case .cpu:
+                return order == .ascending ? (a.cpuPercent < b.cpuPercent) : (a.cpuPercent > b.cpuPercent)
+            case .energy:
+                return order == .ascending ? (a.energyImpactScore < b.energyImpactScore) : (a.energyImpactScore > b.energyImpactScore)
+            case .pid:
+                return order == .ascending ? (a.pid < b.pid) : (a.pid > b.pid)
+            }
+        }
+    }
+
+    public func toggleCleanerSort(field: CleanerSortField) {
+        if cleanerSortField == field {
+            cleanerSortOrder = (cleanerSortOrder == .ascending) ? .descending : .ascending
+        } else {
+            cleanerSortField = field
+            cleanerSortOrder = (field == .name) ? .ascending : .descending
+        }
+    }
+
+    public func updateDisplayedProcesses(from apps: [EnergyAppItem]) {
+        if displayedProcesses.isEmpty || !isProcessTableHovered {
+            displayedProcesses = apps
+        } else {
+            // 悬停时原地批量更新指标：避免在循环内逐条触发 didSet 导致反复重排卡顿
+            let byPID = Dictionary(uniqueKeysWithValues: apps.map { ($0.pid, $0) })
+            var updated = displayedProcesses
+            for i in 0..<updated.count {
+                if let latest = byPID[updated[i].pid] {
+                    updated[i] = latest
+                }
+            }
+            displayedProcesses = updated
+        }
+    }
+
+    public func openModal(tab: StudioModalTab) {
+        self.isDiagnosticsModalPresented = false
+        self.isUpdateModalPresented = false
+        self.activeModalTab = tab
+        self.isModalPresented = true
+    }
+
+    public func openUpdateModal() {
+        self.isDiagnosticsModalPresented = false
+        self.isUpdateModalPresented = true
+        self.isModalPresented = true
+    }
+
+    public func closeModal() {
+        self.isDiagnosticsModalPresented = false
+        self.isUpdateModalPresented = false
+        self.isModalPresented = false
+    }
+
+    public var selectedSection: StudioWindowSection {
+        get {
+            if isModalPresented {
+                switch activeModalTab {
+                case .cleaner: return .smartCleaner
+                case .settings: return .customization
+                case .about: return .about
+                }
+            }
+            switch selectedTab {
+            case .status: return .overview
+            case .cleaner: return .smartCleaner
+            case .optimizer: return .systemOptimizer
+            case .software: return .appManager
+            case .space: return .spaceAnalysis
+            case .network: return .networkMonitor
+            case .plugins: return .plugins
+            }
+        }
+        set {
+            switch newValue {
+            case .overview:
+                selectedTab = .status
+                isModalPresented = false
+            case .smartCleaner:
+                selectedTab = .cleaner
+                isModalPresented = false
+            case .systemOptimizer:
+                selectedTab = .optimizer
+                isModalPresented = false
+            case .appManager:
+                selectedTab = .software
+                isModalPresented = false
+            case .spaceAnalysis:
+                selectedTab = .space
+                isModalPresented = false
+            case .networkMonitor:
+                selectedTab = .network
+                isModalPresented = false
+            case .plugins:
+                selectedTab = .plugins
+                isModalPresented = false
+            case .customization:
+                openModal(tab: .settings)
+            case .upsCenter:
+                selectedTab = .plugins
+                isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = .upsManager
+            case .about:
+                openModal(tab: .about)
+            }
+        }
+    }
+
+    private init() {}
+}
+
+@MainActor
+public final class MainStudioWindowController: NSObject, NSWindowDelegate {
+    public static let shared = MainStudioWindowController()
+
+    private var window: NSWindow?
+    public private(set) var isWindowVisible: Bool = false
+    public private(set) var isWindowActivelyVisible: Bool = false
+
+    private override init() {
+        super.init()
+    }
+
+    public func showWindow(section: StudioWindowSection? = nil) {
+        if let section {
+            StudioWindowNavigationState.shared.selectedSection = section
+        }
+
+        // Close popover cleanly without deactivating app
+        MenuBarController.shared?.closePopover(deactivateApp: false)
+
+        // Refresh telemetry & hardware monitors immediately
+        PowerSourceEngine.shared.setPanelVisible(true)
+        SystemResourceMonitor.shared.refreshNow()
+        if FeatureToggleManager.shared.enablePluginUPSManager {
+            DiskGuardian.shared.refreshDisks()
+        }
+
+        let defaultWidth: CGFloat = 1200
+        let defaultHeight: CGFloat = 822
+
+        let targetScreen: NSScreen = {
+            let mouseLoc = NSEvent.mouseLocation
+            if let screenUnderMouse = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) {
+                return screenUnderMouse
+            }
+            return NSScreen.main ?? NSScreen.screens.first ?? NSScreen()
+        }()
+
+        let screenRect = targetScreen.visibleFrame
+        let centerX = screenRect.origin.x + max(0, (screenRect.width - defaultWidth) / 2.0)
+        let centerY = screenRect.origin.y + max(0, (screenRect.height - defaultHeight) / 2.0)
+        let centeredRect = NSRect(x: centerX, y: centerY, width: defaultWidth, height: defaultHeight)
+
+        if window == nil {
+            let containerView = NSView(frame: NSRect(x: 0, y: 0, width: defaultWidth, height: defaultHeight))
+            containerView.autoresizesSubviews = true
+
+            // 单层窗口后背景模糊（失焦时暂停桌面采样）
+            let backdropView = MainBackdropVisualEffectView(frame: containerView.bounds)
+            backdropView.translatesAutoresizingMaskIntoConstraints = true
+            backdropView.autoresizingMask = [.width, .height]
+            containerView.addSubview(backdropView)
+
+            let hostingView = NSHostingView(rootView: MainStudioWindowView())
+            hostingView.sizingOptions = []
+            hostingView.translatesAutoresizingMaskIntoConstraints = true
+            hostingView.autoresizingMask = [.width, .height]
+            hostingView.frame = containerView.bounds
+            containerView.addSubview(hostingView)
+
+            let newWindow = NSWindow(
+                contentRect: centeredRect,
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            newWindow.title = "SysPulse"
+            newWindow.titlebarAppearsTransparent = true
+            newWindow.titleVisibility = .hidden
+            newWindow.titlebarSeparatorStyle = .none
+            newWindow.isMovableByWindowBackground = true
+            newWindow.isOpaque = false
+            newWindow.backgroundColor = .clear
+            newWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary, .moveToActiveSpace]
+            newWindow.isReleasedWhenClosed = false
+            newWindow.delegate = self
+            newWindow.contentView = containerView
+            newWindow.minSize = NSSize(width: defaultWidth, height: defaultHeight)
+            newWindow.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            newWindow.setFrame(centeredRect, display: true)
+            self.window = newWindow
+        }
+
+        isWindowVisible = true
+        isWindowActivelyVisible = true
+        StudioWindowNavigationState.shared.isMainWindowVisible = true
+        StudioWindowNavigationState.shared.isMainWindowVisuallyActive = true
+        SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
+        if let win = window {
+            win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
+            win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            if !win.isVisible {
+                win.setFrame(centeredRect, display: true)
+            }
+        }
+        window?.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary, .moveToActiveSpace]
+
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        AppIconManager.shared.applyCurrentAppearanceIcon(force: true)
+
+        if let win = self.window {
+            win.minSize = NSSize(width: defaultWidth, height: defaultHeight)
+            win.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    public func refreshEffectiveVisibility() {
+        let sleepCoord = SystemSleepCoordinator.shared
+        let visibleOnScreen: Bool = {
+            guard isWindowVisible,
+                  let win = window,
+                  win.isVisible,
+                  !win.isMiniaturized,
+                  win.occlusionState.contains(.visible),
+                  !sleepCoord.isScreenAsleep,
+                  !sleepCoord.isSystemAsleep else {
+                return false
+            }
+            return true
+        }()
+        isWindowActivelyVisible = visibleOnScreen
+        StudioWindowNavigationState.shared.isMainWindowVisible = visibleOnScreen
+        let visuallyActive = visibleOnScreen && (window?.isKeyWindow == true) && NSApp.isActive
+        StudioWindowNavigationState.shared.isMainWindowVisuallyActive = visuallyActive
+        let popoverShown = MenuBarController.shared?.isPopoverShown ?? false
+        PowerSourceEngine.shared.setPanelVisible(visibleOnScreen || popoverShown)
+        SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
+    }
+
+    public func windowDidChangeOcclusionState(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidBecomeKey(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidResignKey(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidMiniaturize(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowDidDeminiaturize(_ notification: Notification) {
+        refreshEffectiveVisibility()
+    }
+
+    public func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        return NSSize(
+            width: max(1200, frameSize.width),
+            height: max(822, frameSize.height)
+        )
+    }
+
+    public func windowWillClose(_ notification: Notification) {
+        isWindowVisible = false
+        isWindowActivelyVisible = false
+        StudioWindowNavigationState.shared.isMainWindowVisible = false
+        StudioWindowNavigationState.shared.isMainWindowVisuallyActive = false
+        let popoverShown = MenuBarController.shared?.isPopoverShown ?? false
+        PowerSourceEngine.shared.setPanelVisible(popoverShown)
+        SystemResourceMonitor.shared.refreshDemandFromMain()
+        AccessoryBatteryManager.shared.updateVisibilityState()
+        // Return to lightweight menu bar agent mode so Full Screen menu bar auto-hide is never blocked
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.deactivate()
+
+        let closingWindow = notification.object as? NSWindow ?? self.window
+        DispatchQueue.main.async { [weak self, weak closingWindow] in
+            guard let self, !self.isWindowVisible else { return }
+            if let win = closingWindow {
+                win.orderOut(nil)
+                win.contentView = nil
+                win.delegate = nil
+                if self.window === win {
+                    self.window = nil
+                }
+            }
+            StorageAnalysisEngine.shared.releaseInMemoryTreeIfIdle()
+            if !LanDeviceSnifferEngine.shared.isScanning {
+                LanOuiDatabase.shared.unloadMemoryCache()
+            }
+            let cleanerBusy: Bool = {
+                switch SystemCleanerEngine.shared.status {
+                case .scanning, .cleaning:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            let uninstallerBusy: Bool = {
+                switch AppUninstallerEngine.shared.status {
+                case .scanning, .uninstalling:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            if !StorageAnalysisEngine.shared.isScanning && !cleanerBusy && !uninstallerBusy {
+                FolderNotesCatalog.shared.unloadMemoryCache()
+            }
+            malloc_zone_pressure_relief(nil, 0)
+        }
+    }
+}
+
+/// 单层 `.headerView` 窗口后背景模糊宿主视图（失焦时暂停桌面采样）
+private final class MainBackdropVisualEffectView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureBlur()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureBlur()
+    }
+
+    private func configureBlur() {
+        wantsLayer = true
+        blendingMode = .behindWindow
+        state = .followsWindowActiveState
+        material = .headerView
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        material = .headerView
+    }
+}
