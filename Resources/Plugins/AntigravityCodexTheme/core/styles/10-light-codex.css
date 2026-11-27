@@ -1,0 +1,94 @@
+/* ============================================================================
+ * core/styles/10-light-codex.css — Default Light Theme: Codex Pure White
+ * ============================================================================ */
+
+html:not([data-ag-theme-mode="dark"]):not(:has(> body.dark)),
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) {
+  --primary: #2B7FFF !important;
+  --primary-foreground: #FFFFFF !important;
+  --editor-selection-background: rgba(43, 127, 255, 0.22) !important;
+  --background: #FFFFFF !important;
+  --content: #FFFFFF !important;
+  --foreground: #0D0D0D !important;
+  --secondary-foreground: #171717 !important;
+  --muted-foreground: #676767 !important;
+  --sidebar: #F9F9F9 !important;
+  --shell: #F9F9F9 !important;
+  --vscode-sideBar-background: #F9F9F9 !important;
+  --sidebar-secondary: #EFEFEF !important;
+  --sidebar-muted: #F4F4F4 !important;
+  --sidebar-border: rgba(0, 0, 0, 0.06) !important;
+  --border: rgba(0, 0, 0, 0.08) !important;
+  --card: #FFFFFF !important;
+  --card-border: rgba(0, 0, 0, 0.08) !important;
+  --card-edge: rgba(0, 0, 0, 0.06) !important;
+  --sash-line: rgba(0, 0, 0, 0.06) !important;
+  --onyx-frame: #EFEFEF !important;
+  --onyx-well: #F9F9F9 !important;
+  --onyx-raised: #FFFFFF !important;
+  --onyx-selected: #EFEFEF !important;
+  --onyx-key: #FFFFFF !important;
+  --glass: #FFFFFF !important;
+  --glass-border: rgba(0, 0, 0, 0.08) !important;
+  --glass-highlight: transparent !important;
+  --home-glow: transparent !important;
+
+  --ag-composer-tray-bg: #F7F7F8;
+  --ag-composer-tray-border: transparent;
+  --ag-composer-card-bg: #FFFFFF;
+  --ag-composer-card-border: rgba(0, 0, 0, 0.07);
+  --ag-composer-card-shadow: 0 2px 10px rgba(0, 0, 0, 0.035), 0 1px 2px rgba(0, 0, 0, 0.02);
+  --ag-composer-card-focus-border: rgba(0, 0, 0, 0.10);
+  --ag-composer-card-focus-shadow: 0 4px 16px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.03);
+  --ag-composer-top-fg: #171717;
+  --ag-composer-top-hover-bg: rgba(0, 0, 0, 0.06);
+  --ag-composer-top-hover-fg: #0D0D0D;
+  --ag-composer-ctrl-fg: #171717;
+  --ag-send-btn-bg: #2B7FFF;
+  --ag-send-btn-hover-bg: #1D6FEF;
+  --ag-send-btn-border: #2B7FFF;
+  --ag-send-btn-shadow: 0 2px 6px rgba(43, 127, 255, 0.28);
+
+  --ag-sidebar-fg: #171717;
+  --ag-sidebar-row-fg: #262626;
+  --ag-sidebar-header-fg: #404040;
+  --ag-sidebar-header-title-fg: #171717;
+  --ag-sidebar-selected-fg: #0D0D0D;
+  --ag-sidebar-muted-fg: #676767;
+  --ag-menu-item-fg: #171717;
+  --ag-menu-header-fg: #171717;
+  --ag-dialog-title-fg: #0D0D0D;
+  --ag-dialog-item-fg: #171717;
+  --code-foreground: #171717 !important;
+}
+
+/* Codex rounded neutral-gray capsule on active sidebar row (compatible with 2.33.0+ removing data-newux-theme="onyx") */
+body[data-agy-theme]:not(.dark) .agy-sidebar-row[data-selected="true"],
+body[data-agy-theme][data-newux-theme="onyx"]:not(.dark) .agy-sidebar-row[data-selected="true"],
+body:not(.dark) [data-testid="conversation-row-sidebar"][data-selected="true"],
+body:not(.dark) .agy-sidebar-row[data-selected="true"] {
+  background-color: #EFEFEF !important;
+  --row-bg: #EFEFEF !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+/* Swarm plugin iframe light-mode secondary surface fallbacks */
+html[data-ag-page-type="plugin"]:not([data-ag-theme-mode="dark"]),
+html[data-ag-page-type="plugin"]:not([data-ag-theme-mode="dark"]) body {
+  --primary-foreground: #FFFFFF !important;
+  --secondary: rgba(0, 0, 0, 0.05) !important;
+  --muted: rgba(0, 0, 0, 0.04) !important;
+  --placeholder: #8C8C8C !important;
+  --error: #DC2626 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox button[data-testid="input-cancel-button"] {
+  background-color: rgba(0, 0, 0, 0.07) !important;
+  color: #171717 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark):not(.theme-dark) #antigravity\.agentSidePanelInputBox button[data-testid="input-cancel-button"]:hover {
+  background-color: rgba(0, 0, 0, 0.12) !important;
+  color: #0D0D0D !important;
+}

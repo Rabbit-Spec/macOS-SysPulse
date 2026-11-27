@@ -1,0 +1,165 @@
+/* ============================================================================
+ * core/styles/20-dark-codex.css — Dark Mode: Codex Neutral Charcoal Dark
+ * ============================================================================ */
+
+html[data-ag-theme-mode="dark"],
+html[data-ag-theme-mode="dark"] body,
+html:has(> body.dark),
+body.dark,
+body.theme-dark,
+body[data-agy-theme].dark,
+html[data-ag-preset] body.dark,
+html[data-ag-preset] body[data-agy-theme].dark {
+  --background: #181818 !important;
+  --content: #181818 !important;
+  --foreground: #FFFFFF !important;
+  --primary: #2C67C5 !important;
+  --primary-foreground: #FFFFFF !important;
+  --editor-selection-background: rgba(44, 103, 197, 0.38) !important;
+  --editor-comment-selection-background: rgba(44, 103, 197, 0.24) !important;
+  --shell: #232323 !important;
+  --sidebar: #232323 !important;
+  --vscode-sideBar-background: #232323 !important;
+  --sidebar-secondary: #353535 !important;
+  --sidebar-muted: rgba(255, 255, 255, 0.06) !important;
+  --sidebar-border: rgba(255, 255, 255, 0.08) !important;
+  --secondary: rgba(255, 255, 255, 0.08) !important;
+  --secondary-foreground: #DEDEDE !important;
+  --muted: rgba(255, 255, 255, 0.05) !important;
+  --muted-foreground: #959595 !important;
+  --placeholder: #787878 !important;
+  --card: #232323 !important;
+  --card-border: rgba(255, 255, 255, 0.09) !important;
+  --card-edge: rgba(255, 255, 255, 0.08) !important;
+  --sash-line: rgba(255, 255, 255, 0.09) !important;
+  --border: rgba(255, 255, 255, 0.08) !important;
+  --glass: #282828 !important;
+  --glass-border: rgba(255, 255, 255, 0.09) !important;
+  --glass-highlight: rgba(255, 255, 255, 0.06) !important;
+  --scrim: rgba(0, 0, 0, 0.65) !important;
+  --onyx-frame: #282828 !important;
+  --onyx-well: #232323 !important;
+  --onyx-raised: #363636 !important;
+  --onyx-selected: #353535 !important;
+  --onyx-key: #303030 !important;
+  --home-glow: transparent !important;
+  --error: #E55353 !important;
+  --warning: #FBBF24 !important;
+  --link: #60A5FA !important;
+  --success: #34D399 !important;
+
+  --ag-composer-tray-bg: #262626;
+  --ag-composer-tray-border: transparent;
+  --ag-composer-card-bg: #363636;
+  --ag-composer-card-border: rgba(255, 255, 255, 0.07);
+  --ag-composer-card-shadow: 0 3px 12px rgba(0, 0, 0, 0.24), 0 1px 3px rgba(0, 0, 0, 0.18);
+  --ag-composer-card-focus-border: rgba(255, 255, 255, 0.12);
+  --ag-composer-card-focus-shadow: 0 5px 18px rgba(0, 0, 0, 0.34), 0 2px 5px rgba(0, 0, 0, 0.22);
+  --ag-composer-top-fg: #D4D4D4;
+  --ag-composer-top-hover-bg: rgba(255, 255, 255, 0.08);
+  --ag-composer-top-hover-fg: #FFFFFF;
+  --ag-composer-ctrl-fg: #DEDEDE;
+  --ag-send-btn-bg: #2C67C5;
+  --ag-send-btn-hover-bg: #3774D6;
+  --ag-send-btn-border: rgba(255, 255, 255, 0.12);
+  --ag-send-btn-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+
+  --ag-sidebar-fg: #DEDEDE;
+  --ag-sidebar-row-fg: #CFCFCF;
+  --ag-sidebar-header-fg: #B8B8B8;
+  --ag-sidebar-header-title-fg: #EAEAEA;
+  --ag-sidebar-selected-fg: #FFFFFF;
+  --ag-sidebar-muted-fg: #8E8E8E;
+  --ag-menu-item-fg: #E8E8E8;
+  --ag-menu-header-fg: #959595;
+  --ag-dialog-title-fg: #FFFFFF;
+  --ag-dialog-item-fg: #E8E8E8;
+  --code-foreground: #ECECEC !important;
+}
+
+/* Codex neutral dark-gray rounded capsule on active sidebar row (compatible with 2.33.0+) */
+body[data-agy-theme].dark .agy-sidebar-row[data-selected="true"],
+body[data-agy-theme][data-newux-theme="onyx"].dark .agy-sidebar-row[data-selected="true"],
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is([data-testid="conversation-row-sidebar"][data-selected="true"], .agy-sidebar-row[data-selected="true"]) {
+  background-color: #353535 !important;
+  --row-bg: #353535 !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+/* Composer dark mode outer tray & inner floating card overrides */
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(#antigravity\.agentSidePanelInputBox, [id="antigravity.agentSidePanelInputBox"], .surface-composer, .surface-composer.bg-card-border) {
+  --nux-composer-frame-radius: 21px;
+  --nux-composer-radius: 20px;
+  padding: 1px !important;
+  background-color: #262626 !important;
+  border: 0 !important;
+  border-radius: 21px !important;
+  box-shadow: none !important;
+}
+
+body[data-agy-theme].dark .surface-composer > .surface-composer-card,
+body[data-agy-theme][data-newux-theme="onyx"].dark .surface-composer > .surface-composer-card,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(
+  .surface-composer > .surface-composer-card,
+  .surface-composer-card.bg-card,
+  [id="antigravity.agentSidePanelInputBox"] .surface-composer-card,
+  [id="antigravity.agentSidePanelInputBox"] > div.bg-card
+) {
+  background-color: #363636 !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  border-radius: 20px !important;
+  box-shadow: var(--ag-composer-card-shadow) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(
+  .surface-composer:focus-within > .surface-composer-card,
+  .surface-composer-card:focus-within,
+  [id="antigravity.agentSidePanelInputBox"]:focus-within .surface-composer-card
+) {
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  box-shadow: var(--ag-composer-card-focus-shadow) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox button[data-testid="input-cancel-button"] {
+  background-color: rgba(255, 255, 255, 0.11) !important;
+  color: #EAEAEA !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox button[data-testid="input-cancel-button"]:hover {
+  background-color: rgba(255, 255, 255, 0.18) !important;
+  color: #FFFFFF !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox button:not([data-testid="send-button"]):not([data-testid="voice-start-button"]):not([data-testid="input-cancel-button"]):hover,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox button:not([data-testid="send-button"]):not([data-testid="voice-start-button"]):not([data-testid="input-cancel-button"]):hover :is(span, svg) {
+  color: #FFFFFF !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is([data-testid="conversation-row-sidebar"], .agy-sidebar-row):not([data-selected="true"]):hover span.truncate {
+  color: #FFFFFF !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) :is(.bg-sidebar a[class*="border"], .bg-sidebar button[class*="border"], a[class*="inline-flex items-center"][class*="border"]) {
+  border-color: rgba(255, 255, 255, 0.10) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) .bg-border {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark, body.theme-dark) :is([data-markdown-root], [data-testid="user-message-content"], .prose, .markdown) {
+  color: #ECECEC;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark, body.theme-dark) :is([data-markdown-root], [data-testid="user-message-content"], .select-text, .prose, .markdown) :is(h1, h2, h3, h4, h5, h6, strong, b) {
+  color: #FFFFFF;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark, body.theme-dark) :is([data-markdown-root], .select-text, .prose, .markdown) :not(pre) > code {
+  background-color: rgba(255, 255, 255, 0.085);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 5px;
+  padding: 0.12em 0.36em;
+  color: #EAEAEA !important;
+}

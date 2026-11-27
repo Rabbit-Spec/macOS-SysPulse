@@ -1,0 +1,28 @@
+{
+  "name": "antigravity-codex-theme",
+  "version": "1.4.1",
+  "description": "Chinese UI localization, Codex pure-white & charcoal-dark theme, per-turn token stats, expandable usage panels, and 4-state session status indicator for Google Antigravity.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "check": "node -e \"import('node:fs').then(fs => { import('node:child_process').then(({execFileSync}) => { const walk = d => fs.existsSync(d) ? fs.readdirSync(d, {withFileTypes:true}).flatMap(e => e.isDirectory() ? walk(d+'/'+e.name) : (/\\.mjs$/.test(e.name) ? [d+'/'+e.name] : [])) : []; for (const f of ['install.mjs', ...walk('core'), ...walk('tests')]) execFileSync(process.execPath, ['--check', f], {stdio:'inherit'}); const rt = fs.readdirSync('core/runtime').filter(n => n.endsWith('.js')).sort().map(n => fs.readFileSync('core/runtime/'+n, 'utf8')).join('\\n'); execFileSync(process.execPath, ['--input-type=commonjs', '--check'], {input: 'const __AG_BOOT_PAYLOAD__ = {};\\n' + rt, stdio:['pipe','inherit','inherit']}); }); })\"",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.mjs",
+    "manifest": "node install.mjs build-manifest",
+    "install-theme": "node install.mjs install",
+    "relaunch": "node install.mjs relaunch",
+    "doctor": "node --disable-warning=ExperimentalWarning install.mjs doctor",
+    "verify": "node --disable-warning=ExperimentalWarning install.mjs verify",
+    "pack": "node install.mjs pack"
+  },
+  "keywords": [
+    "antigravity",
+    "codex-theme",
+    "theme",
+    "telemetry",
+    "cdp",
+    "localization"
+  ]
+}

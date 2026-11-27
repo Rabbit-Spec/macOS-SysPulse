@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager & Xcode
+.build/
+.swiftpm/
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# Temporary files
+*.swp
+*~.nib
+*.dmg

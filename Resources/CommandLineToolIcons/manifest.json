@@ -1,0 +1,1712 @@
+{
+ "version": 1,
+ "icons": {
+  "claude-code": {
+   "file": "claude.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Claude"
+  },
+  "claude": {
+   "file": "claude.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Claude"
+  },
+  "codex": {
+   "file": "codex.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "ChatGPT"
+  },
+  "gemini": {
+   "file": "gemini.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Google Gemini 桌面"
+  },
+  "gemini-cli": {
+   "file": "gemini-cli.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/gemini-G6cCja9fem",
+   "title": "Gemini"
+  },
+  "cursor-agent": {
+   "file": "cursor-agent.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Cursor"
+  },
+  "qwen": {
+   "file": "qwen.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "千问"
+  },
+  "qwen-code": {
+   "file": "qwen.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "千问"
+  },
+  "iflow": {
+   "file": "iflow.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://img.alicdn.com/imgextra/i4/O1CN01VFxaDc1s3EZKig0PM_!!6000000005710-0-tps-300-300.jpg",
+   "title": "iFlow CLI"
+  },
+  "iflow-cli": {
+   "file": "iflow.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://img.alicdn.com/imgextra/i4/O1CN01VFxaDc1s3EZKig0PM_!!6000000005710-0-tps-300-300.jpg",
+   "title": "iFlow CLI"
+  },
+  "grok": {
+   "file": "grok.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/grok-6oxUEA7ASv",
+   "title": "Grok"
+  },
+  "grok-cli": {
+   "file": "grok.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/grok-6oxUEA7ASv",
+   "title": "Grok"
+  },
+  "devin": {
+   "file": "devin.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Devin"
+  },
+  "devin-cli": {
+   "file": "devin.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Devin"
+  },
+  "amp": {
+   "file": "amp.webp",
+   "kind": "brand",
+   "source": "lobehub",
+   "sourceURL": "https://unpkg.com/@lobehub/icons-static-svg@1.102.0/icons/amp-color.svg",
+   "title": "Amp"
+  },
+  "goose": {
+   "file": "goose.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Goose"
+  },
+  "kimi": {
+   "file": "kimi.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Kimi"
+  },
+  "kimi-code": {
+   "file": "kimi.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Kimi"
+  },
+  "droid": {
+   "file": "droid.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://factory.com/favicon.svg",
+   "title": "Factory Droid"
+  },
+  "factory-droid": {
+   "file": "droid.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://factory.com/favicon.svg",
+   "title": "Factory Droid"
+  },
+  "copilot": {
+   "file": "copilot.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/github-copilot.svg?height=256",
+   "title": "GitHub Copilot CLI"
+  },
+  "github-copilot-cli": {
+   "file": "copilot.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/github-copilot.svg?height=256",
+   "title": "GitHub Copilot CLI"
+  },
+  "opencode": {
+   "file": "opencode.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "OpenCode"
+  },
+  "ollama": {
+   "file": "ollama.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Ollama"
+  },
+  "lms": {
+   "file": "lms.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "LM Studio"
+  },
+  "lm-studio": {
+   "file": "lms.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "LM Studio"
+  },
+  "openclaw": {
+   "file": "openclaw.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "OpenClaw"
+  },
+  "hermes": {
+   "file": "hermes.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Hermes"
+  },
+  "hermes-agent": {
+   "file": "hermes.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Hermes"
+  },
+  "pi": {
+   "file": "pi.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://pi.dev/favicon.svg?v=3df16c39-51cd-40aa-9ef5-3d6b78fd9ec6",
+   "title": "Pi"
+  },
+  "windsurf": {
+   "file": "windsurf.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/windsurf-JS6Srjibi5",
+   "title": "Windsurf"
+  },
+  "gh": {
+   "file": "gh.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/github-w8js5GGqyG",
+   "title": "GitHub"
+  },
+  "node": {
+   "file": "node.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/node-J7Jyt8qCu8",
+   "title": "node"
+  },
+  "uv": {
+   "file": "uv.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/uv.svg?height=256",
+   "title": "uv"
+  },
+  "awscli": {
+   "file": "awscli.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/aws-Z2fDMKLCSO",
+   "title": "AWS"
+  },
+  "homebrew-ffmpeg-ffmpeg-ffmpeg": {
+   "file": "ffmpeg.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/ffmpeg-pXp43K3JXU",
+   "title": "FFmpeg"
+  },
+  "ffmpeg": {
+   "file": "ffmpeg.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/ffmpeg-pXp43K3JXU",
+   "title": "FFmpeg"
+  },
+  "cmake": {
+   "file": "cmake.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/cmake-Mk1p4an1tn",
+   "title": "CMake"
+  },
+  "go": {
+   "file": "go.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/go-AgrqN6iO7J",
+   "title": "Go"
+  },
+  "git": {
+   "file": "git.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/git-fDojoOjLH3",
+   "title": "Git"
+  },
+  "pipx": {
+   "file": "pipx.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/pipx.svg?height=256",
+   "title": "pipx"
+  },
+  "python": {
+   "file": "python.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/python-2iFqorFTH6",
+   "title": "Python"
+  },
+  "coreutils": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg?height=256",
+   "title": "coreutils"
+  },
+  "mise": {
+   "file": "mise.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://mise.jdx.dev/apple-touch-icon.png",
+   "title": "mise"
+  },
+  "jq": {
+   "file": "jq.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://jqlang.org/icon.png",
+   "title": "jq"
+  },
+  "anomalyco-tap-opencode": {
+   "file": "opencode.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "OpenCode"
+  },
+  "tmux": {
+   "file": "tmux.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/tmux.svg?height=256",
+   "title": "tmux"
+  },
+  "imagemagick": {
+   "file": "imagemagick.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://imagemagick.org/image/logo.png",
+   "title": "imagemagick"
+  },
+  "pyenv": {
+   "file": "pyenv.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://github.com/pyenv.png?size=300",
+   "title": "pyenv"
+  },
+  "docker": {
+   "file": "docker.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/docker-50NmLLrKf6",
+   "title": "Docker"
+  },
+  "pnpm": {
+   "file": "pnpm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/pnpm.svg?height=256",
+   "title": "pnpm"
+  },
+  "hello": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg?height=256",
+   "title": "hello"
+  },
+  "gnupg": {
+   "file": "gnupg.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnupg-icon.svg?height=256",
+   "title": "gnupg"
+  },
+  "pandoc": {
+   "file": "pandoc.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/pandoc.svg?height=256",
+   "title": "pandoc"
+  },
+  "just": {
+   "file": "just.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/just.svg?height=256",
+   "title": "just"
+  },
+  "kubernetes-cli": {
+   "file": "kubernetes-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/kubernetes.svg?height=256",
+   "title": "kubernetes-cli"
+  },
+  "neovim": {
+   "file": "neovim.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/neovim-qnSbrUQHU9",
+   "title": "Neovim"
+  },
+  "cloudflared": {
+   "file": "cloudflared.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/cloudflare-m58YnA6l5U",
+   "title": "Cloudflare"
+  },
+  "glab": {
+   "file": "glab.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/gitlab-edoit51kw5",
+   "title": "GitLab"
+  },
+  "nvm": {
+   "file": "nvm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/nvm.svg?height=256",
+   "title": "nvm"
+  },
+  "helm": {
+   "file": "helm.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/helm-xvtIZeuWVt",
+   "title": "Helm"
+  },
+  "wget": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg?height=256",
+   "title": "wget"
+  },
+  "nmap": {
+   "file": "nmap.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/file-icons/nmap.svg?height=256",
+   "title": "nmap"
+  },
+  "rust": {
+   "file": "rust.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/rust-Tl0l22Kz5Q",
+   "title": "Rust"
+  },
+  "bash": {
+   "file": "bash.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/bash-nPBt9OjrYR",
+   "title": "Bash"
+  },
+  "openjdk": {
+   "file": "openjdk.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/openjdk.svg?height=256",
+   "title": "openjdk"
+  },
+  "git-lfs": {
+   "file": "git-lfs.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/git-lfs.svg?height=256",
+   "title": "git-lfs"
+  },
+  "graphviz": {
+   "file": "graphviz.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-graphviz.svg?height=256",
+   "title": "graphviz"
+  },
+  "docker-compose": {
+   "file": "docker.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/docker-50NmLLrKf6",
+   "title": "Docker"
+  },
+  "shellcheck": {
+   "file": "shellcheck.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-shellcheck.svg?height=256",
+   "title": "shellcheck"
+  },
+  "harfbuzz": {
+   "file": "harfbuzz.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/harfbuzz/harfbuzz/HEAD/HarfBuzz.png",
+   "title": "harfbuzz"
+  },
+  "llvm": {
+   "file": "llvm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/llvm.svg?height=256",
+   "title": "llvm"
+  },
+  "redis": {
+   "file": "redis.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/redis-0M3AUPnqby",
+   "title": "Redis"
+  },
+  "libpq": {
+   "file": "libpq.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/postgresql.svg?height=256",
+   "title": "libpq"
+  },
+  "gnu-tar": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg?height=256",
+   "title": "gnu-tar"
+  },
+  "gcc": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg?height=256",
+   "title": "gcc"
+  },
+  "cocoapods": {
+   "file": "cocoapods.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/cocoapods-0wuqJ983Ik",
+   "title": "Cocoapods"
+  },
+  "shivammathur-php-php": {
+   "file": "php.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/php-Rf2rfD04ko",
+   "title": "PHP"
+  },
+  "php": {
+   "file": "php.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/php-Rf2rfD04ko",
+   "title": "PHP"
+  },
+  "ruby": {
+   "file": "ruby.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/ruby.svg?height=256",
+   "title": "ruby"
+  },
+  "llama.cpp": {
+   "file": "llama.cpp.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/selfhst/llama-cpp.svg?height=256",
+   "title": "llama.cpp"
+  },
+  "zsh": {
+   "file": "zsh.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/zsh.svg?height=256",
+   "title": "zsh"
+  },
+  "herdr": {
+   "file": "herdr.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://herdr.dev/assets/logo.svg",
+   "title": "herdr"
+  },
+  "curl": {
+   "file": "curl.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/curl.svg?height=256",
+   "title": "curl"
+  },
+  "starship": {
+   "file": "starship.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/starship.svg?height=256",
+   "title": "starship"
+  },
+  "azure-cli": {
+   "file": "azure-cli.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/azure-MWOlVCZnDd",
+   "title": "Azure"
+  },
+  "qemu": {
+   "file": "qemu.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/qemu.svg?height=256",
+   "title": "qemu"
+  },
+  "opencode-v2": {
+   "file": "anomalyco-tap-opencode-v2.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/opencode-asORabqMmv",
+   "title": "OpenCode"
+  },
+  "anomalyco-tap-opencode-v2": {
+   "file": "anomalyco-tap-opencode-v2.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/opencode-asORabqMmv",
+   "title": "OpenCode"
+  },
+  "terraform": {
+   "file": "hashicorp-tap-terraform.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/terraform-icon.svg?height=256",
+   "title": "terraform"
+  },
+  "hashicorp-tap-terraform": {
+   "file": "hashicorp-tap-terraform.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/terraform-icon.svg?height=256",
+   "title": "terraform"
+  },
+  "htop": {
+   "file": "htop.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/htop-AiULNLoJEa",
+   "title": "htop"
+  },
+  "ansible": {
+   "file": "ansible.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/ansible.svg?height=256",
+   "title": "ansible"
+  },
+  "rclone": {
+   "file": "rclone.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/rclone-8gg9KngTnm",
+   "title": "Rclone"
+  },
+  "powershell": {
+   "file": "powershell.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/powershell-MU0nUy7Wtw",
+   "title": "PowerShell"
+  },
+  "mysql": {
+   "file": "mysql.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/mysql-workbench-Ufbl1Ad6gF",
+   "title": "MySQL Workbench"
+  },
+  "maven": {
+   "file": "maven.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/apachemaven.svg?height=256",
+   "title": "maven"
+  },
+  "rtk": {
+   "file": "rtk.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://www.rtk-ai.app/brand/favicon/apple-touch-icon.png",
+   "title": "rtk"
+  },
+  "rtk-ai-tap-rtk": {
+   "file": "rtk.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://www.rtk-ai.app/brand/favicon/apple-touch-icon.png",
+   "title": "rtk"
+  },
+  "gradle": {
+   "file": "gradle.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/gradle.svg?height=256",
+   "title": "gradle"
+  },
+  "colima": {
+   "file": "colima.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://colima.run/favicon.svg",
+   "title": "colima"
+  },
+  "rsync": {
+   "file": "rsync.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/file-icons/rsync.svg?height=256",
+   "title": "rsync"
+  },
+  "postgresql": {
+   "file": "libpq.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/postgresql.svg?height=256",
+   "title": "postgresql"
+  },
+  "atuin": {
+   "file": "atuin.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/atuin-apED8tHarW",
+   "title": "Atuin"
+  },
+  "flyctl": {
+   "file": "flyctl.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/fly-io-0zYEaVQM6Z",
+   "title": "fly.io"
+  },
+  "vim": {
+   "file": "vim.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/vim-3b8HOE9HeP",
+   "title": "Vim"
+  },
+  "sevenzip": {
+   "file": "sevenzip.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/7-zip-cxNMeNKfhw",
+   "title": "7-Zip"
+  },
+  "golangci-lint": {
+   "file": "golangci-lint.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://golangci-lint.run/images/logo.svg",
+   "title": "golangci-lint"
+  },
+  "watchman": {
+   "file": "watchman.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/watchman.svg?height=256",
+   "title": "watchman"
+  },
+  "tailscale": {
+   "file": "tailscale.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Tailscale"
+  },
+  "automake": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "automake"
+  },
+  "libomp": {
+   "file": "llvm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/llvm.svg",
+   "title": "libomp"
+  },
+  "aria2": {
+   "file": "aria2.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/selfhst/aria2.svg?height=256",
+   "title": "aria2"
+  },
+  "chezmoi": {
+   "file": "chezmoi.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/chezmoi.svg?height=256",
+   "title": "chezmoi"
+  },
+  "oras": {
+   "file": "oras.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://oras.land/img/logo.svg",
+   "title": "oras"
+  },
+  "ghostscript": {
+   "file": "ghostscript.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/file-icons/ghostscript.svg?height=256",
+   "title": "ghostscript"
+  },
+  "trivy": {
+   "file": "trivy.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/trivy.svg?height=256",
+   "title": "trivy"
+  },
+  "eza": {
+   "file": "eza.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://eza.rocks/apple-touch-icon.png",
+   "title": "eza"
+  },
+  "pango": {
+   "file": "pango.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/selfhst/pango.svg?height=256",
+   "title": "pango"
+  },
+  "rustup": {
+   "file": "rustup.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/rust.svg",
+   "title": "rustup"
+  },
+  "pre-commit": {
+   "file": "pre-commit.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/precommit.svg?height=256",
+   "title": "pre-commit"
+  },
+  "docker-buildx": {
+   "file": "docker.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/docker-50NmLLrKf6",
+   "title": "Docker"
+  },
+  "bats-core": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-core"
+  },
+  "exiftool": {
+   "file": "exiftool.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://exiftool.org/apple-touch-icon.png",
+   "title": "exiftool"
+  },
+  "ruff": {
+   "file": "ruff.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/ruff.svg?height=256",
+   "title": "ruff"
+  },
+  "lua": {
+   "file": "lua.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/lua.svg?height=256",
+   "title": "lua"
+  },
+  "podman": {
+   "file": "podman.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/podman.svg?height=256",
+   "title": "podman"
+  },
+  "jsonnet": {
+   "file": "jsonnet.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-jsonnet.svg?height=256",
+   "title": "jsonnet"
+  },
+  "dotnet": {
+   "file": "dotnet.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/dotnet.svg?height=256",
+   "title": "dotnet"
+  },
+  "ast-grep": {
+   "file": "ast-grep.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://ast-grep.github.io/logo.svg",
+   "title": "ast-grep"
+  },
+  "scrcpy": {
+   "file": "scrcpy.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/Genymobile/scrcpy/HEAD/app/data/scrcpy.svg",
+   "title": "scrcpy"
+  },
+  "supabase": {
+   "file": "supabase-tap-supabase.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/supabase-THxin3Wg5l",
+   "title": "Supabase"
+  },
+  "supabase-tap-supabase": {
+   "file": "supabase-tap-supabase.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/supabase-THxin3Wg5l",
+   "title": "Supabase"
+  },
+  "boost": {
+   "file": "boost.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/boost.svg?height=256",
+   "title": "Boost"
+  },
+  "argocd": {
+   "file": "argocd.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/devicon/argocd.svg?height=256",
+   "title": "argocd"
+  },
+  "deno": {
+   "file": "deno.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/deno.svg?height=256",
+   "title": "deno"
+  },
+  "unbound": {
+   "file": "unbound.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/selfhst/unbound.svg?height=256",
+   "title": "unbound"
+  },
+  "tilt": {
+   "file": "tilt.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/material-icon-theme/tilt.svg?height=256",
+   "title": "tilt"
+  },
+  "fastlane": {
+   "file": "fastlane.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/fastlane.svg?height=256",
+   "title": "fastlane"
+  },
+  "sonic": {
+   "file": "sonic.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://valeriansaliou.github.io/sonic/images/logo-scrumpy.png",
+   "title": "sonic"
+  },
+  "hf": {
+   "file": "hf.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/hugging-face-SMGv0QhBKq",
+   "title": "Hugging Face"
+  },
+  "cairo": {
+   "file": "cairo.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/devicon/cairo.svg?height=256",
+   "title": "cairo"
+  },
+  "hugo": {
+   "file": "hugo.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/hugo.svg?height=256",
+   "title": "hugo"
+  },
+  "flux": {
+   "file": "fluxcd-tap-flux.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/flux.svg?height=256",
+   "title": "flux"
+  },
+  "fluxcd-tap-flux": {
+   "file": "fluxcd-tap-flux.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/flux.svg?height=256",
+   "title": "flux"
+  },
+  "composer": {
+   "file": "composer.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/composer.svg?height=256",
+   "title": "composer"
+  },
+  "pi-coding-agent": {
+   "file": "pi.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://pi.dev/favicon.svg?v=3df16c39-51cd-40aa-9ef5-3d6b78fd9ec6",
+   "title": "pi-coding-agent"
+  },
+  "virtualenv": {
+   "file": "virtualenv.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://virtualenv.pypa.io/en/latest/_static/virtualenv.svg",
+   "title": "virtualenv"
+  },
+  "license-eye": {
+   "file": "license-eye.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://skywalking.apache.org/favicons/apple-touch-icon.png",
+   "title": "license-eye"
+  },
+  "libtool": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "libtool"
+  },
+  "age": {
+   "file": "age.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://github.com/FiloSottile/age/raw/main/logo/logo.svg",
+   "title": "age"
+  },
+  "swiftformat": {
+   "file": "swiftformat.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/nicklockwood/SwiftFormat/HEAD/EditorExtension/Application/Assets.xcassets/AppIcon.appiconset/icon_256x256.png",
+   "title": "swiftformat"
+  },
+  "mysql-client": {
+   "file": "mysql.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/mysql-workbench-Ufbl1Ad6gF",
+   "title": "MySQL Workbench"
+  },
+  "aom": {
+   "file": "aom.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://aomedia.googlesource.com/+static/apple-touch-icon.png",
+   "title": "aom"
+  },
+  "libimobiledevice": {
+   "file": "libimobiledevice.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://libimobiledevice.org/img/logo.svg",
+   "title": "libimobiledevice"
+  },
+  "opentofu": {
+   "file": "opentofu.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/opentofu.svg?height=256",
+   "title": "opentofu"
+  },
+  "ffmpeg-full": {
+   "file": "ffmpeg.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/ffmpeg-pXp43K3JXU",
+   "title": "FFmpeg"
+  },
+  "mpv": {
+   "file": "mpv.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "mpv"
+  },
+  "yazi": {
+   "file": "yazi.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://yazi-rs.github.io/images/logo.png",
+   "title": "yazi"
+  },
+  "xcodesorg-made-xcodes": {
+   "file": "xcodes.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Xcodes"
+  },
+  "xcodes": {
+   "file": "xcodes.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Xcodes"
+  },
+  "pipenv": {
+   "file": "pipenv.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/file-icons/pipenv.svg?height=256",
+   "title": "pipenv"
+  },
+  "oven-sh-bun-bun": {
+   "file": "oven-sh-bun-bun.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/bun-jhUKArwCLq",
+   "title": "Bun"
+  },
+  "bun": {
+   "file": "oven-sh-bun-bun.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/bun-jhUKArwCLq",
+   "title": "Bun"
+  },
+  "tree-sitter-cli": {
+   "file": "tree-sitter-cli.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://github.com/tree-sitter.png?size=300",
+   "title": "tree-sitter-cli"
+  },
+  "nginx": {
+   "file": "nginx.webp",
+   "kind": "app",
+   "source": "macosicons",
+   "sourceURL": "https://macosicons.com/icon/nginx-IG40yP4Ary",
+   "title": "Nginx"
+  },
+  "vale": {
+   "file": "vale.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-vale.svg?height=256",
+   "title": "vale"
+  },
+  "ruby-build": {
+   "file": "ruby-build.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/ruby.svg",
+   "title": "ruby-build"
+  },
+  "python-tk": {
+   "file": "python-tk.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://www.python.org/static/apple-touch-icon-144x144-precomposed.png",
+   "title": "python-tk"
+  },
+  "stripe-stripe-cli-stripe": {
+   "file": "stripe-stripe-cli-stripe.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/stripe.svg?height=256",
+   "title": "stripe"
+  },
+  "stripe": {
+   "file": "stripe-stripe-cli-stripe.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/stripe.svg?height=256",
+   "title": "stripe"
+  },
+  "jfrog-cli": {
+   "file": "jfrog-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/jfrog.svg?height=256",
+   "title": "jfrog-cli"
+  },
+  "trufflehog": {
+   "file": "trufflehog.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://framerusercontent.com/images/mBYTE4QIu1EiDhJqzvX1cUdRE.png",
+   "title": "trufflehog"
+  },
+  "caddy": {
+   "file": "caddy.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/caddy.svg?height=256",
+   "title": "caddy"
+  },
+  "fish": {
+   "file": "fish.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/devicon/fish.svg?height=256",
+   "title": "fish"
+  },
+  "bats-core-bats-core-bats-support": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-support"
+  },
+  "bats-support": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-support"
+  },
+  "bats-file": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-file"
+  },
+  "bats-core-bats-core-bats-file": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-file"
+  },
+  "tcl-tk": {
+   "file": "tcl-tk.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/file-icons/tcl.svg?height=256",
+   "title": "tcl-tk"
+  },
+  "railway": {
+   "file": "railway.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/railway.svg?height=256",
+   "title": "railway"
+  },
+  "unar": {
+   "file": "unar.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://theunarchiver.com/images/the-unarchiver-144x144.png",
+   "title": "unar"
+  },
+  "go-task": {
+   "file": "go-task.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://taskfile.dev/img/logo.png",
+   "title": "go-task"
+  },
+  "sqlite": {
+   "file": "sqlite.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/sqlite.svg?height=256",
+   "title": "sqlite"
+  },
+  "bats-core-bats-core-bats-assert": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-assert"
+  },
+  "bats-assert": {
+   "file": "bats-core.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/bats-core/bats-core/HEAD/docs/source/assets/light_mode_cube.svg",
+   "title": "bats-assert"
+  },
+  "semgrep": {
+   "file": "semgrep.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/material-icon-theme/semgrep.svg?height=256",
+   "title": "semgrep"
+  },
+  "sdl2-compat": {
+   "file": "sdl2-compat.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg/sdl.svg?height=256",
+   "title": "sdl2-compat"
+  },
+  "bazelisk": {
+   "file": "bazelisk.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://github.com/bazelbuild.png?size=300",
+   "title": "bazelisk"
+  },
+  "summarize": {
+   "file": "summarize.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://summarize.sh/favicon.svg",
+   "title": "summarize"
+  },
+  "gnu-sed": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "gnu-sed"
+  },
+  "duckdb": {
+   "file": "duckdb.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/duckdb.svg?height=256",
+   "title": "duckdb"
+  },
+  "jupyterlab": {
+   "file": "jupyterlab.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/jupyter.svg?height=256",
+   "title": "jupyterlab"
+  },
+  "mongosh": {
+   "file": "mongosh.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/mongodb-icon.svg?height=256",
+   "title": "mongosh"
+  },
+  "gettext": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "gettext"
+  },
+  "k6": {
+   "file": "k6.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/k6.svg?height=256",
+   "title": "k6"
+  },
+  "poetry": {
+   "file": "poetry.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/poetry.svg?height=256",
+   "title": "poetry"
+  },
+  "clang-format": {
+   "file": "llvm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/llvm.svg",
+   "title": "clang-format"
+  },
+  "obsproject-tools-clang-format": {
+   "file": "llvm.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/llvm.svg",
+   "title": "clang-format"
+  },
+  "httpie": {
+   "file": "httpie.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "HTTPie"
+  },
+  "zizmor": {
+   "file": "zizmor.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-zizmor.svg?height=256",
+   "title": "zizmor"
+  },
+  "aws-sam-cli": {
+   "file": "aws-sam-cli.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://a0.awsstatic.com/libra-css/images/site/touch-icon-ipad-144-smile.png",
+   "title": "aws-sam-cli"
+  },
+  "gnutls": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "gnutls"
+  },
+  "autoconf": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "autoconf"
+  },
+  "hashicorp-tap-vault": {
+   "file": "hashicorp-tap-vault.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/vault-icon.svg?height=256",
+   "title": "vault"
+  },
+  "vault": {
+   "file": "hashicorp-tap-vault.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/vault-icon.svg?height=256",
+   "title": "vault"
+  },
+  "databricks": {
+   "file": "databricks-tap-databricks.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/databricks-icon.svg?height=256",
+   "title": "databricks"
+  },
+  "databricks-tap-databricks": {
+   "file": "databricks-tap-databricks.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/databricks-icon.svg?height=256",
+   "title": "databricks"
+  },
+  "multica-ai-tap-multica": {
+   "file": "multica-ai-tap-multica.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Multica"
+  },
+  "multica": {
+   "file": "multica-ai-tap-multica.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Multica"
+  },
+  "binutils": {
+   "file": "coreutils.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/gnu.svg",
+   "title": "binutils"
+  },
+  "agent-browser": {
+   "file": "agent-browser.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://agent-browser.dev/favicon.ico?favicon.3fpu2ql9ns1a0.ico",
+   "title": "agent-browser"
+  },
+  "doctl": {
+   "file": "doctl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://docs.digitalocean.com/apple-touch-icon.png",
+   "title": "doctl"
+  },
+  "subversion": {
+   "file": "subversion.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/subversion.svg?height=256",
+   "title": "subversion"
+  },
+  "tree-sitter": {
+   "file": "tree-sitter-cli.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://github.com/tree-sitter.png?size=300",
+   "title": "tree-sitter"
+  },
+  "numpy": {
+   "file": "numpy.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/numpy.svg?height=256",
+   "title": "numpy"
+  },
+  "glfw": {
+   "file": "glfw.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://www.glfw.org/img/favicon/apple-touch-icon-152x152.png",
+   "title": "glfw"
+  },
+  "meson": {
+   "file": "meson.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/vscode-icons/file-type-meson.svg?height=256",
+   "title": "meson"
+  },
+  "cloudflare-wrangler": {
+   "file": "cloudflare-wrangler.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/cloudflareworkers.svg?height=256",
+   "title": "cloudflare-wrangler"
+  },
+  "bitwarden-cli": {
+   "file": "bitwarden-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/bitwarden.svg?height=256",
+   "title": "bitwarden-cli"
+  },
+  "alexsjones-llmfit-llmfit": {
+   "file": "llmfit.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/AlexsJones/llmfit/HEAD/assets/icon.svg",
+   "title": "llmfit"
+  },
+  "llmfit": {
+   "file": "llmfit.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/AlexsJones/llmfit/HEAD/assets/icon.svg",
+   "title": "llmfit"
+  },
+  "firebase-cli": {
+   "file": "firebase-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/firebase-icon.svg?height=256",
+   "title": "firebase-cli"
+  },
+  "python-setuptools": {
+   "file": "python-setuptools.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://setuptools.pypa.io/en/latest/_static/favicon.svg",
+   "title": "python-setuptools"
+  },
+  "getsentry-tools-sentry-cli": {
+   "file": "getsentry-tools-sentry-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/sentry-icon.svg?height=256",
+   "title": "sentry-cli"
+  },
+  "sentry-cli": {
+   "file": "getsentry-tools-sentry-cli.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/logos/sentry-icon.svg?height=256",
+   "title": "sentry-cli"
+  },
+  "vercel": {
+   "file": "vercel.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/vercel.svg?height=256",
+   "title": "vercel"
+  },
+  "opencv": {
+   "file": "opencv.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/simple-icons/opencv.svg?height=256",
+   "title": "opencv"
+  },
+  "terragrunt": {
+   "file": "terragrunt.webp",
+   "kind": "brand",
+   "source": "iconify",
+   "sourceURL": "https://api.iconify.design/thesvg-color/terragrunt.svg?height=256",
+   "title": "terragrunt"
+  },
+  "nowledge-mem": {
+   "file": "nowledge-mem.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Nowledge Mem"
+  },
+  "nmem": {
+   "file": "nowledge-mem.webp",
+   "kind": "app",
+   "source": "app-catalog",
+   "title": "Nowledge Mem"
+  },
+  "k9s": {
+   "file": "k9s.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://k9scli.io/assets/imhotep_logo.png",
+   "title": "k9s"
+  },
+  "zstd": {
+   "file": "zstd.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/facebook/zstd/dev/doc/images/zstd_logo86.png",
+   "title": "Zstandard"
+  },
+  "jpeg-xl": {
+   "file": "jpeg-xl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://jpeg.org/images/jpegxl-logo.svg",
+   "title": "JPEG XL"
+  },
+  "cjxl": {
+   "file": "jpeg-xl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://jpeg.org/images/jpegxl-logo.svg",
+   "title": "JPEG XL"
+  },
+  "djxl": {
+   "file": "jpeg-xl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://jpeg.org/images/jpegxl-logo.svg",
+   "title": "JPEG XL"
+  },
+  "jxl": {
+   "file": "jpeg-xl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://jpeg.org/images/jpegxl-logo.svg",
+   "title": "JPEG XL"
+  },
+  "container": {
+   "file": "container.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/apple/container/HEAD/assets/Containerization-Logo.png",
+   "title": "container"
+  },
+  "zellij": {
+   "file": "zellij.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/zellij-org/zellij/main/assets/logo.png",
+   "title": "Zellij"
+  },
+  "engram": {
+   "file": "engram.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/gentleman-programming/engram/HEAD/assets/branding/engram-logo-only.png",
+   "title": "Engram"
+  },
+  "openssl": {
+   "file": "openssl.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://openssl-library.org/apple-touch-icon.png",
+   "title": "OpenSSL"
+  },
+  "xz": {
+   "file": "xz.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://tukaani.org/images/tukaani_256x256.png",
+   "title": "XZ Utils"
+  },
+  "zoxide": {
+   "file": "zoxide.webp",
+   "kind": "app",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/contrib/logo-light.svg",
+   "title": "zoxide"
+  },
+  "idb-companion": {
+   "file": "idb-companion.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/facebook/idb/main/website/static/img/idb_icon.svg",
+   "title": "idb"
+  },
+  "idb": {
+   "file": "idb-companion.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/facebook/idb/main/website/static/img/idb_icon.svg",
+   "title": "idb"
+  },
+  "mirrord": {
+   "file": "mirrord.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/metalbear-co/mirrord/main/images/icon.png",
+   "title": "mirrord"
+  },
+  "gentle-ai": {
+   "file": "gentle-ai.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/gentleman-programming/gentle-ai/main/docs/assets/brand/gentle-ai-logo.png",
+   "title": "gentle-ai"
+  },
+  "ddev": {
+   "file": "ddev.webp",
+   "kind": "brand",
+   "source": "official-website",
+   "sourceURL": "https://raw.githubusercontent.com/ddev/ddev/main/docs/content/developers/logos/3x/Logo@3x.png",
+   "title": "DDEV"
+  }
+ }
+}

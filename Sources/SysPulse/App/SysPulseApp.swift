@@ -1,0 +1,955 @@
+import AppKit
+import SwiftUI
+
+@main
+struct SysPulseApp {
+    @MainActor
+    static func main() {
+        let args = CommandLine.arguments
+        if args.count >= 3 && args[1] == "--generate-icons" {
+            let outputDir = args[2]
+            MainActor.assumeIsolated {
+                try? AppIconManager.exportIconsets(to: outputDir)
+            }
+            exit(0)
+        }
+        if args.count >= 2 && args[1] == "--self-test" {
+            MainActor.assumeIsolated {
+                let engine = PowerSourceEngine.shared
+                let monitor = SystemResourceMonitor.shared
+                let toggles = FeatureToggleManager.shared
+                engine.refresh(forceUIUpdate: true)
+                monitor.refreshNow()
+                RunLoop.main.run(until: Date().addingTimeInterval(2.8))
+                monitor.refreshNow()
+                RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+                let t = engine.telemetry
+                let p = monitor.power
+                let m = monitor.memory
+                let d = monitor.disk
+                let r = monitor.loadRuntime
+                print("=== SysPulse \(AppMetadata.versionDisplay) Self-Test Report ===")
+                print("Hardware Platform: \(MacHardwareInfo.shared.currentPlatformName)")
+                print("macOS Version: \(MacHardwareInfo.shared.macOSDisplayString) (Build \(MacHardwareInfo.shared.osBuild))")
+                print("UPS Connected: \(t.isConnected) | Paired: \(t.pairedUPSDescription) | Battery: \(t.batteryLevel)% | Voltage: \(Int(t.voltageVolts))V")
+                print(String(format: "System Power: Total %.2f W (Load %.2f W + Adapter %.2f W) | CPU Total: %.1f%%", p.totalSystemWatts, p.systemLoadWatts, p.adapterLossWatts, p.cpuTotalPercent))
+                print(String(format: "Memory: %.2f / %.1f GB (%d%%) | App %.2fG | Wired %.2fG | Compressed %.2fG | Pressure: %@", m.usedGB, m.totalGB, m.usedPercent, m.appMemoryGB, m.wiredMemoryGB, m.compressedMemoryGB, m.pressureLabel))
+                print("Disk I/O: Read \(d.formattedReadSpeed) | Write \(d.formattedWriteSpeed) | Boot Free: \(String(format: "%.1f", d.bootVolumeFreeGB))/\(String(format: "%.0f", d.bootVolumeTotalGB)) GB")
+                print("Fan Status: \(FanController.shared.currentRPM) RPM (Hardware Monitor: \(monitor.hardware.fanSpeedRPM) RPM, Mode: \(FanController.shared.activeMode.rawValue))")
+                print("Load Runtime: \(r.formattedCurrentLoadRuntime) @ \(String(format: "%.1f", r.currentLoadWatts))W (Light: \(r.lightLoadEstimatedMinutes)m, Heavy: \(r.heavyLoadEstimatedMinutes)m, InternalBatt: \(r.hasInternalBattery))")
+                print("Top Energy Apps (\(monitor.topEnergyApps.count)):")
+                for app in monitor.topEnergyApps.prefix(5) {
+                    print(String(format: "  - %@ (PID %d): CPU %.1f%% | Mem %.0f MB | ~%.2f W", app.name, app.id, app.cpuPercent, app.memoryMB, app.estimatedWatts))
+                }
+                print("Toggles Active: Power=\(toggles.enableSystemPowerMonitor), Mem=\(toggles.enableMemoryMonitor), Disk=\(toggles.enableDiskIOMonitor), Apps=\(toggles.enableTopEnergyAppsMonitor), Runtime=\(toggles.enableLoadRuntimeMonitor)")
+
+                // v0.1.17_Test1 extended telemetry & engine checks
+                let ioSample = IOReportMetricsReader.shared.sample()
+                let valsToCheck = [
+                    ioSample.cpuPrimaryClusterGHz,
+                    ioSample.cpuSecondaryClusterGHz,
+                    ioSample.gpuFrequencyGHz,
+                    ioSample.cpuPowerWatts,
+                    ioSample.gpuPowerWatts,
+                    ioSample.anePowerWatts
+                ].compactMap { $0 }
+                assert(valsToCheck.allSatisfy { $0.isFinite && $0 >= 0.0 }, "IOReport sample contained invalid value")
+                print(String(format: "IOReport Probe: CPU Cluster %.2fGHz | GPU %.2fGHz (%.2fW) | ANE %.2fW | Swap: %@",
+                             ioSample.cpuPrimaryClusterGHz ?? 0,
+                             ioSample.gpuFrequencyGHz ?? 0,
+                             ioSample.gpuPowerWatts ?? 0,
+                             ioSample.anePowerWatts ?? 0,
+                             m.formattedSwapInline))
+
+                let selfInsp = ProcessInspectorService.inspectCurrentSelf()
+                assert(!selfInsp.executablePath.isEmpty && selfInsp.threadCount >= 1, "ProcessInspectorService failed self inspection")
+                print("ProcessInspector Self Check: PID \(selfInsp.rootPID) | Threads \(selfInsp.threadCount) | Exec \(selfInsp.executablePath)")
+
+                let prot = CleanProtectionStore.shared
+                let testPat = prot.addFolderNameRule("node_modules_test_guard")
+                let matchRoot = prot.isProtected(path: "/tmp/proj/node_modules_test_guard")
+                let matchSub = prot.isProtected(path: "/tmp/proj/node_modules_test_guard/pkg")
+                if let testPat { prot.removePattern(testPat) }
+                assert(matchRoot && matchSub, "Folder name protection rule check failed")
+
+                let tracker = HardlinkTracker()
+                let firstInsert = tracker.insertIfNew(dev: 1, ino: 424242)
+                let secondInsert = tracker.insertIfNew(dev: 1, ino: 424242)
+                assert(firstInsert && !secondInsert, "HardlinkTracker deduplication failed")
+
+                let idA = UUID(), idB = UUID(), idC = UUID()
+                let treemapRects = SquarifiedTreemapLayout.layout(
+                    items: [
+                        SquarifiedTreemapLayout.InputItem(id: idA, weight: 60),
+                        SquarifiedTreemapLayout.InputItem(id: idB, weight: 30),
+                        SquarifiedTreemapLayout.InputItem(id: idC, weight: 10)
+                    ],
+                    in: CGRect(x: 0, y: 0, width: 800, height: 400)
+                )
+                let areaSum = treemapRects.values.reduce(0.0) { $0 + Double($1.width * $1.height) }
+                assert(treemapRects.count == 3 && abs(areaSum - 320_000.0) < 1.0, "SquarifiedTreemapLayout geometry check failed")
+                print("Engine Self-Checks: FolderProtection=OK | HardlinkDedupe=OK | TreemapLayoutArea=\(Int(areaSum))")
+
+                assert(TrashRemnantWatcher.shared.runSelfTestProbe(), "TrashRemnantWatcher background VNODE dispatch check failed")
+                assert(StorageAnalysisEngine.runVolumeIsolationSelfTest(), "StorageAnalysisEngine volume isolation & package symlink check failed")
+                assert(SystemOptimizeTaskID.allCases.count == 18 && SystemQuickRepairID.allCases.count == 6, "SystemOptimizer task definitions mismatch")
+                print("v0.1.17_Test10 Checks: TrashWatcherQueue=OK | VolumeSymlinkIsolation=OK | OptimizerTasks=\(SystemOptimizeTaskID.allCases.count)/\(SystemQuickRepairID.allCases.count)")
+                print("=== Self-Test PASSED ===")
+            }
+            exit(0)
+        }
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-popover"), idx + 2 < CommandLine.arguments.count {
+            let tabType = CommandLine.arguments[idx + 1]
+            let destPath = CommandLine.arguments[idx + 2]
+            _ = NSApplication.shared
+            PanelCoordinator.shared.selectedTab = (tabType == "cleaner" || tabType == "cleanerScanning") ? .cleaner : .system
+            if tabType == "cleanerScanning" {
+                SystemCleanerEngine.shared.status = .scanning(progress: 0.65, currentPath: "\(NSHomeDirectory())/Library/Caches/com.apple.Safari/Cache.db")
+            }
+            SystemResourceMonitor.shared.refreshNow()
+            let panelView = LiquidGlassPanel()
+                .environment(\.colorScheme, .dark)
+                .frame(width: 360)
+            let hosting = NSHostingView(rootView: panelView)
+            hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 500)
+            hosting.layoutSubtreeIfNeeded()
+            if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+                rep.size = NSSize(width: 360, height: 500)
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                if let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: destPath))
+                    print("RENDERED_POPOVER: \(destPath)")
+                }
+            }
+            exit(0)
+        }
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-window"), idx + 3 < CommandLine.arguments.count {
+            let sectionName = CommandLine.arguments[idx + 1]
+            let appearanceName = CommandLine.arguments[idx + 2]
+            let destPath = CommandLine.arguments[idx + 3]
+            _ = NSApplication.shared
+
+            if sectionName == "menuBar" || sectionName == "popover" || sectionName == "networkDetail" || sectionName == "networkDetailMeasuring" {
+                if sectionName == "networkDetail" || sectionName == "networkDetailMeasuring" {
+                    StudioWindowNavigationState.shared.isNetworkDetailPresented = true
+                    if sectionName == "networkDetailMeasuring" {
+                        NetworkSpeedTest.shared.setSimulating(progressSeconds: 3.2, liveDownload: "186.4 MB/s", liveUpload: "24.6 MB/s")
+                    }
+                }
+                SystemResourceMonitor.shared.refreshNow()
+                AccessoryBatteryManager.shared.refresh()
+                NetworkDetailModel.shared.refresh()
+                let rWidth: CGFloat = 334
+                let popoverView = LiquidGlassPanel()
+                    .environment(\.colorScheme, appearanceName == "light" ? .light : .dark)
+                    .frame(width: rWidth)
+                let hosting = NSHostingView(rootView: popoverView)
+                let offscreenWindow = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: rWidth, height: 720),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offscreenWindow.isOpaque = false
+                offscreenWindow.backgroundColor = .clear
+                offscreenWindow.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(1.3))
+                SystemResourceMonitor.shared.refreshNow()
+                let fitting = hosting.fittingSize
+                let rHeight: CGFloat = ceil(max(680, fitting.height))
+                print("NEW_FITTING_HEIGHT: \(fitting.height), rHeight: \(rHeight)")
+                offscreenWindow.setContentSize(NSSize(width: rWidth, height: rHeight))
+                hosting.frame = NSRect(x: 0, y: 0, width: rWidth, height: rHeight)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: rWidth, height: rHeight)) {
+                    rep.size = NSSize(width: rWidth, height: rHeight)
+                    hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: rWidth, height: rHeight), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: destPath))
+                        print("RENDERED_WINDOW: \(destPath)")
+                    }
+                }
+                exit(0)
+            }
+
+            if sectionName == "menuBarItem" || sectionName == "menuBarStatus" {
+                SystemResourceMonitor.shared.refreshNow()
+                let isLight = (appearanceName == "light")
+                let itemWidth: CGFloat = 360
+                let itemHeight: CGFloat = 28
+                let barView = NSView(frame: NSRect(x: 0, y: 0, width: itemWidth, height: itemHeight))
+                barView.wantsLayer = true
+                barView.layer?.backgroundColor = isLight
+                    ? NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1.0).cgColor
+                    : NSColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0).cgColor
+
+                let container = NSView(frame: NSRect(x: 16, y: 0, width: itemWidth - 32, height: itemHeight))
+                barView.addSubview(container)
+
+                let iconSize: CGFloat = 18
+                let iconView = NSImageView(frame: NSRect(x: 0, y: (itemHeight - iconSize) / 2, width: iconSize, height: iconSize))
+                iconView.imageScaling = .scaleProportionallyDown
+                let templateImage = MenuBarRabbitIcon.templateIcon
+                let tintColor = isLight ? NSColor(calibratedWhite: 0.15, alpha: 1.0) : NSColor.white
+                let tinted = NSImage(size: NSSize(width: iconSize, height: iconSize))
+                tinted.lockFocus()
+                templateImage.draw(in: NSRect(x: 0, y: 0, width: iconSize, height: iconSize))
+                tintColor.set()
+                NSRect(x: 0, y: 0, width: iconSize, height: iconSize).fill(using: .sourceIn)
+                tinted.unlockFocus()
+                tinted.isTemplate = false
+                iconView.image = tinted
+                container.addSubview(iconView)
+
+                let toggles = FeatureToggleManager.shared
+                let monitor = SystemResourceMonitor.shared
+                func formatMetric(_ prefix: String, _ value: Int, _ unit: String) -> String {
+                    let v = max(0, min(999, value))
+                    if v < 10 {
+                        return "\(prefix)  \(v)\(unit)"
+                    } else if v < 100 {
+                        return "\(prefix) \(v)\(unit)"
+                    } else {
+                        return "\(prefix)\(v)\(unit)"
+                    }
+                }
+                var topCols: [String] = []
+                var botCols: [String] = []
+                if toggles.menuBarShowCpuGpu {
+                    let cpuPct = max(0, min(100, Int(round(monitor.power.cpuUsagePercent))))
+                    let gpuPct = max(0, min(100, Int(round(monitor.hardware.gpuUsagePercent))))
+                    topCols.append(formatMetric("CPU", cpuPct > 0 ? cpuPct : 18, "%"))
+                    botCols.append(formatMetric("GPU", gpuPct > 0 ? gpuPct : 12, "%"))
+                }
+                if toggles.menuBarShowMemTemp {
+                    let memPct = max(0, min(100, monitor.memory.usedPercent))
+                    let tempC = max(0, min(120, Int(round(monitor.hardware.cpuTemperatureC))))
+                    topCols.append(formatMetric("RAM", memPct > 0 ? memPct : 54, "%"))
+                    botCols.append(formatMetric("TMP", tempC > 0 ? tempC : 48, "°"))
+                }
+                if toggles.menuBarShowNetworkSpeed {
+                    topCols.append("↑   4 KB/s")
+                    botCols.append("↓ 3.8 MB/s")
+                }
+                if toggles.menuBarShowSystemWatts {
+                    let peak = max(1, Int(round(max(monitor.power.peakWatts, monitor.power.totalSystemWatts))))
+                    let cur = max(1, Int(round(monitor.power.totalSystemWatts)))
+                    topCols.append(formatMetric("MAX", peak > 0 ? peak : 68, "W"))
+                    botCols.append(formatMetric("PWR", cur > 0 ? cur : 29, "W"))
+                }
+                let pStyle = NSMutableParagraphStyle()
+                pStyle.lineSpacing = -1.5
+                pStyle.maximumLineHeight = 10.0
+                pStyle.minimumLineHeight = 10.0
+                pStyle.alignment = .left
+                let f = NSFont.monospacedSystemFont(ofSize: 9.0, weight: .semibold)
+                let textColor = isLight ? NSColor(calibratedWhite: 0.15, alpha: 1.0) : NSColor.white
+                let dotColor = isLight ? NSColor(calibratedWhite: 0.35, alpha: 1.0) : NSColor(calibratedWhite: 0.75, alpha: 1.0)
+
+                // 双行状态栏排版与分隔圆点垂直居中偏移
+                let mstr = NSMutableAttributedString()
+                let topAttr = NSMutableAttributedString()
+                for (i, col) in topCols.enumerated() {
+                    if i == 0 {
+                        topAttr.append(NSAttributedString(string: "  " + col, attributes: [
+                            .font: f,
+                            .paragraphStyle: pStyle,
+                            .foregroundColor: textColor,
+                            .baselineOffset: -4.0
+                        ]))
+                    } else {
+                        topAttr.append(NSAttributedString(string: "   " + col, attributes: [
+                            .font: f,
+                            .paragraphStyle: pStyle,
+                            .foregroundColor: textColor,
+                            .baselineOffset: -4.0
+                        ]))
+                    }
+                }
+                topAttr.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: pStyle]))
+
+                let botAttr = NSMutableAttributedString()
+                for (i, col) in botCols.enumerated() {
+                    if i == 0 {
+                        botAttr.append(NSAttributedString(string: "  " + col, attributes: [
+                            .font: f,
+                            .paragraphStyle: pStyle,
+                            .foregroundColor: textColor,
+                            .baselineOffset: -4.0
+                        ]))
+                    } else {
+                        botAttr.append(NSAttributedString(string: " · ", attributes: [
+                            .font: f,
+                            .paragraphStyle: pStyle,
+                            .foregroundColor: dotColor,
+                            .baselineOffset: 0.5
+                        ]))
+                        botAttr.append(NSAttributedString(string: col, attributes: [
+                            .font: f,
+                            .paragraphStyle: pStyle,
+                            .foregroundColor: textColor,
+                            .baselineOffset: -4.0
+                        ]))
+                    }
+                }
+                mstr.append(topAttr)
+                mstr.append(botAttr)
+
+                let textX: CGFloat = iconSize + 6
+                let textWidth: CGFloat = container.bounds.width - textX
+                let textField = NSTextField(frame: NSRect(x: textX, y: (itemHeight - 20) / 2 - 0.5, width: textWidth, height: 21))
+                textField.isBezeled = false
+                textField.drawsBackground = false
+                textField.isEditable = false
+                textField.isSelectable = false
+                textField.attributedStringValue = mstr
+                container.addSubview(textField)
+
+                let offWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: itemWidth, height: itemHeight), styleMask: [.borderless], backing: .buffered, defer: false)
+                offWindow.backgroundColor = .clear
+                offWindow.contentView = barView
+                barView.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                if let rep = barView.bitmapImageRepForCachingDisplay(in: barView.bounds) {
+                    rep.size = NSSize(width: itemWidth, height: itemHeight)
+                    barView.cacheDisplay(in: barView.bounds, to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: destPath))
+                        print("RENDERED_WINDOW: \(destPath)")
+                    }
+                }
+                exit(0)
+            }
+
+            if sectionName == "appIconMenu" || sectionName == "iconMenu" {
+                let isLight = (appearanceName == "light")
+                let theme = LiquidGlassTheme(colorScheme: isLight ? .light : .dark)
+                let menuView = AppIconDropdownMenuView(navState: StudioWindowNavigationState.shared, theme: theme)
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(isLight ? Color.white : Color(red: 0.16, green: 0.16, blue: 0.17))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.12), lineWidth: 0.8)
+                            )
+                            .shadow(color: Color.black.opacity(0.20), radius: 10, y: 4)
+                    )
+                    .padding(16)
+                let hosting = NSHostingView(rootView: menuView)
+                let offWindow = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 240, height: 320),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offWindow.isOpaque = false
+                offWindow.backgroundColor = .clear
+                offWindow.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let fit = hosting.fittingSize
+                offWindow.setContentSize(fit)
+                hosting.frame = NSRect(origin: .zero, size: fit)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(origin: .zero, size: fit)) {
+                    rep.size = fit
+                    hosting.cacheDisplay(in: NSRect(origin: .zero, size: fit), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: destPath))
+                        print("RENDERED_WINDOW: \(destPath)")
+                    }
+                }
+                exit(0)
+            }
+
+            let section = StudioWindowSection(rawValue: sectionName) ?? .overview
+            StudioWindowNavigationState.shared.isMainWindowVisible = true
+            StudioWindowNavigationState.shared.selectedSection = section
+            if sectionName == "modal" || sectionName == "settings" {
+                StudioWindowNavigationState.shared.openModal(tab: .settings)
+            } else if sectionName == "cleanerModal" || sectionName == "cleanerSettings" {
+                StudioWindowNavigationState.shared.selectedTab = .cleaner
+                StudioWindowNavigationState.shared.openModal(tab: .cleaner)
+            } else if sectionName == "cleanerProtection" {
+                StudioWindowNavigationState.shared.selectedTab = .cleaner
+                StudioWindowNavigationState.shared.openModal(tab: .cleaner)
+                CleanProtectionStore.shared.showingProtectionList = true
+            } else if sectionName == "upsModal" || sectionName == "ups" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = .upsManager
+            } else if sectionName == "plugins" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                PSPortalPluginManager.shared.activePluginType = nil
+                AntigravityContextManager.shared.checkOnEntry()
+                let deadline = Date().addingTimeInterval(3.0)
+                while AntigravityContextManager.shared.isAnalyzing && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                }
+            } else if sectionName == "antigravityPlugin" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                StudioWindowNavigationState.shared.isModalPresented = false
+                FeatureToggleManager.shared.setPluginEnabled(.antigravityContext, true)
+                PSPortalPluginManager.shared.activePluginType = .antigravityContext
+                AntigravityContextManager.shared.checkOnEntry()
+                let deadline = Date().addingTimeInterval(3.5)
+                while AntigravityContextManager.shared.isAnalyzing && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                }
+            } else if sectionName == "aboutModal" {
+                StudioWindowNavigationState.shared.openModal(tab: .about)
+            }
+            SystemResourceMonitor.shared.refreshNow()
+            DiskGuardian.shared.refreshDisks()
+            if sectionName == "appManager" || sectionName == "software" {
+                StudioWindowNavigationState.shared.selectedTab = .software
+                AppUninstallerEngine.shared.startScan()
+                let deadline = Date().addingTimeInterval(5.0)
+                while AppUninstallerEngine.shared.isScanning && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+            } else if sectionName == "cleanerIdle" {
+                StudioWindowNavigationState.shared.selectedTab = .cleaner
+                SystemCleanerEngine.shared.status = .idle
+                SystemCleanerEngine.shared.scannedItems = []
+                SystemCleanerEngine.shared.selectedItemIDs = []
+            } else if sectionName == "cleaner" || sectionName == "smartCleaner" {
+                StudioWindowNavigationState.shared.selectedTab = .cleaner
+                SystemCleanerEngine.shared.startScan()
+                let deadline = Date().addingTimeInterval(5.5)
+                while SystemCleanerEngine.shared.isScanning && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+            } else if sectionName == "optimizer" || sectionName == "optimize" || sectionName == "systemOptimizer" {
+                StudioWindowNavigationState.shared.selectedTab = .optimizer
+                SystemOptimizerEngine.shared.checkOnEntry()
+                let deadline = Date().addingTimeInterval(3.5)
+                while SystemOptimizerEngine.shared.isInspecting && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+                }
+            } else if sectionName == "plugins" || sectionName == "psportal" || sectionName == "antigravityPlugin" || sectionName == "upsModal" || sectionName == "ups" {
+                StudioWindowNavigationState.shared.selectedTab = .plugins
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            } else if sectionName == "space" || sectionName == "spaceAnalysis" {
+                StudioWindowNavigationState.shared.selectedTab = .space
+                StorageAnalysisEngine.shared.startScan(location: .downloads)
+                let deadline = Date().addingTimeInterval(3.5)
+                while StorageAnalysisEngine.shared.isScanning && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+            } else if sectionName == "spaceInsights" || sectionName == "spaceSystem" {
+                StudioWindowNavigationState.shared.selectedTab = .space
+                StorageAnalysisEngine.shared.activeViewMode = .insights
+                StorageAnalysisEngine.shared.startScan(location: .home)
+                let deadline = Date().addingTimeInterval(3.5)
+                while StorageAnalysisEngine.shared.isScanning && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+            } else if sectionName == "network" || sectionName == "networkMonitor" || sectionName == "networkSockets" {
+                StudioWindowNavigationState.shared.selectedTab = .network
+                if sectionName == "networkSockets" {
+                    NetworkMonitorViewModel.shared.selectedRankingTab = .sockets
+                } else {
+                    NetworkMonitorViewModel.shared.selectedRankingTab = .apps
+                }
+                NetworkDetailModel.shared.refresh()
+                NetworkMonitorViewModel.shared.refreshStats()
+                let deadline = Date().addingTimeInterval(3.5)
+                while (NetworkDetailModel.shared.appNetworkItems.isEmpty || NetworkDetailModel.shared.activeSockets.isEmpty) && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            } else if sectionName == "networkSpeedTest" {
+                StudioWindowNavigationState.shared.selectedTab = .network
+                NetworkDetailModel.shared.refresh()
+                NetworkMonitorViewModel.shared.refreshStats()
+                NetworkMonitorViewModel.shared.isSpeedTestCardActive = true
+                NetworkSpeedTest.shared.setSimulating(progressSeconds: 3.2, liveDownload: "186.4 MB/s", liveUpload: "24.6 MB/s")
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            } else if sectionName == "networkSpeedTestDone" {
+                StudioWindowNavigationState.shared.selectedTab = .network
+                NetworkDetailModel.shared.refresh()
+                NetworkMonitorViewModel.shared.refreshStats()
+                NetworkMonitorViewModel.shared.isSpeedTestCardActive = true
+                NetworkSpeedTest.shared.setResults(download: 1593.2, upload: 248.4, latency: 12.0, rpm: 686.0)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            } else if sectionName == "activeConnections" || sectionName == "activeSocketsDetail" {
+                NetworkDetailModel.shared.refreshActiveSockets()
+                let deadline = Date().addingTimeInterval(3.0)
+                while NetworkDetailModel.shared.activeSockets.isEmpty && Date() < deadline {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+
+                let bigView = ActiveConnectionsWindowView(onClose: {})
+                    .environment(\.colorScheme, appearanceName == "light" ? .light : .dark)
+                    .frame(width: 960, height: 620)
+                let hosting = NSHostingView(rootView: bigView)
+                let offscreenWindow = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 960, height: 620),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offscreenWindow.isOpaque = false
+                offscreenWindow.backgroundColor = .clear
+                offscreenWindow.contentView = hosting
+                hosting.frame = NSRect(x: 0, y: 0, width: 960, height: 620)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: 960, height: 620)) {
+                    rep.size = NSSize(width: 960, height: 620)
+                    hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: 960, height: 620), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: destPath))
+                        print("RENDERED_WINDOW: \(destPath)")
+                    }
+                }
+                exit(0)
+            } else {
+                StudioWindowNavigationState.shared.selectedTab = .status
+                RunLoop.current.run(until: Date().addingTimeInterval(2.1))
+                SystemResourceMonitor.shared.refreshNow()
+            }
+
+            let isLargePreview = sectionName.hasSuffix("Large")
+            let renderW: CGFloat = isLargePreview ? 1680 : 1200
+            let renderH: CGFloat = isLargePreview ? 1150 : 822
+
+            let windowView = MainStudioWindowView()
+                .environment(\.colorScheme, appearanceName == "light" ? .light : .dark)
+                .frame(width: renderW, height: renderH)
+            let hosting = NSHostingView(rootView: windowView)
+            let offscreenWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: renderW, height: renderH),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            offscreenWindow.isOpaque = false
+            offscreenWindow.backgroundColor = .clear
+            offscreenWindow.contentView = hosting
+            hosting.frame = NSRect(x: 0, y: 0, width: renderW, height: renderH)
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: renderW, height: renderH)) {
+                rep.size = NSSize(width: renderW, height: renderH)
+                hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: renderW, height: renderH), to: rep)
+                if let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: destPath))
+                    print("RENDERED_WINDOW: \(destPath)")
+                }
+            }
+            exit(0)
+        }
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-poster"), idx + 1 < CommandLine.arguments.count {
+            let destPath = CommandLine.arguments[idx + 1]
+            _ = NSApplication.shared
+
+            func captureView<V: View>(_ view: V, width: CGFloat, height: CGFloat, to path: String) {
+                let hosting = NSHostingView(rootView: view)
+                let offscreen = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offscreen.isOpaque = false
+                offscreen.backgroundColor = .clear
+                offscreen.contentView = hosting
+                hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: width, height: height)) {
+                    rep.size = NSSize(width: width, height: height)
+                    hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: width, height: height), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+            }
+
+            if !FileManager.default.fileExists(atPath: "/tmp/poster_user_status.jpg") {
+                SystemResourceMonitor.shared.refreshNow()
+                AccessoryBatteryManager.shared.refresh()
+                DiskGuardian.shared.refreshDisks()
+                NetworkDetailModel.shared.refresh()
+                NetworkMonitorViewModel.shared.refreshStats()
+                RunLoop.current.run(until: Date().addingTimeInterval(1.6))
+                SystemResourceMonitor.shared.refreshNow()
+
+                // 1. Overview (Dark)
+                StudioWindowNavigationState.shared.isMainWindowVisible = true
+                StudioWindowNavigationState.shared.closeModal()
+                StudioWindowNavigationState.shared.selectedTab = .status
+                captureView(
+                    MainStudioWindowView().environment(\.colorScheme, .dark).frame(width: 1200, height: 822),
+                    width: 1200,
+                    height: 822,
+                    to: "/tmp/poster_overview_dark.png"
+                )
+            }
+
+            // 4. Composite Final Bento Poster (1500 x 2140)
+            captureView(
+                SysPulsePromoPosterView().frame(width: 1500, height: 2140),
+                width: 1500,
+                height: 2140,
+                to: destPath
+            )
+            print("RENDERED_POSTER: \(destPath)")
+            exit(0)
+        }
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-keynote"), idx + 2 < CommandLine.arguments.count {
+            let darkPath = CommandLine.arguments[idx + 1]
+            let lightPath = CommandLine.arguments[idx + 2]
+            _ = NSApplication.shared
+
+            func captureKeynote<V: View>(_ view: V, to path: String) {
+                let hosting = NSHostingView(rootView: view)
+                let offscreen = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 1920, height: 1080),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                offscreen.isOpaque = false
+                offscreen.backgroundColor = .clear
+                offscreen.contentView = hosting
+                hosting.frame = NSRect(x: 0, y: 0, width: 1920, height: 1080)
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: NSRect(x: 0, y: 0, width: 1920, height: 1080)) {
+                    rep.size = NSSize(width: 1920, height: 1080)
+                    hosting.cacheDisplay(in: NSRect(x: 0, y: 0, width: 1920, height: 1080), to: rep)
+                    if let png = rep.representation(using: .png, properties: [:]) {
+                        try? png.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+            }
+
+            captureKeynote(SysPulseKeynotePosterView(isDark: true).frame(width: 1920, height: 1080), to: darkPath)
+            captureKeynote(SysPulseKeynotePosterView(isDark: false).frame(width: 1920, height: 1080), to: lightPath)
+            print("RENDERED_KEYNOTE: \(darkPath) | \(lightPath)")
+            exit(0)
+        }
+
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        let isBg = CommandLine.arguments.contains("--background") || CommandLine.arguments.contains("--login-item")
+        app.setActivationPolicy(isBg ? .accessory : .regular)
+        app.run()
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var menuBarController: MenuBarController?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
+        menuBarController = MenuBarController()
+        AppIconManager.shared.startObservingSystemAppearance()
+        SystemSleepCoordinator.shared.start()
+        KeepAwakeController.shared.recoverOrphanedClamshellStateOnLaunch()
+        TrashRemnantWatcher.shared.startMonitoringIfEnabled()
+
+        let isBackgroundLaunch = CommandLine.arguments.contains("--background") ||
+                                 CommandLine.arguments.contains("--login-item")
+
+        if let idx = CommandLine.arguments.firstIndex(of: "--section"), idx + 1 < CommandLine.arguments.count {
+            let secName = CommandLine.arguments[idx + 1]
+            let section = StudioWindowSection(rawValue: secName) ?? .overview
+            DispatchQueue.main.async {
+                MainStudioWindowController.shared.showWindow(section: section)
+            }
+        } else if CommandLine.arguments.contains("--uninstaller") {
+            DispatchQueue.main.async {
+                MainStudioWindowController.shared.showWindow(section: .appManager)
+            }
+        } else if !isBackgroundLaunch {
+            DispatchQueue.main.async {
+                MainStudioWindowController.shared.showWindow(section: .overview)
+            }
+        }
+
+        // 启动后延迟 3.5 秒按每日早/晚各一次时段槽静默检查一次更新（已检查过或处于非早/晚时段则不发网络请求）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+            AppUpdateManager.shared.checkForUpdatesIfScheduledSlotDue()
+        }
+
+        // Allow clean IPC termination and window opening
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.showMainWindow"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MainStudioWindowController.shared.showWindow(section: .overview)
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.showCleanerWindow"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MainStudioWindowController.shared.showWindow(section: .smartCleaner)
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.showAppManagerWindow"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MainStudioWindowController.shared.showWindow(section: .appManager)
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.showCustomizationWindow"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MainStudioWindowController.shared.showWindow(section: .customization)
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.switchToSystemTab"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                PanelCoordinator.shared.selectedTab = .system
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.switchToCleanerTab"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                PanelCoordinator.shared.selectedTab = .cleaner
+            }
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.showPopover"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                MenuBarController.shared?.openPopover()
+            }
+        }
+
+        if CommandLine.arguments.contains("--uninstaller") || CommandLine.arguments.contains("--apps") {
+            MainStudioWindowController.shared.showWindow(section: .appManager)
+        } else if CommandLine.arguments.contains("--cleaner") {
+            MainStudioWindowController.shared.showWindow(section: .smartCleaner)
+        } else if let idx = CommandLine.arguments.firstIndex(of: "--section"), idx + 1 < CommandLine.arguments.count {
+            let secName = CommandLine.arguments[idx + 1]
+            let targetSec = StudioWindowSection(rawValue: secName) ?? .overview
+            MainStudioWindowController.shared.showWindow(section: targetSec)
+        } else if CommandLine.arguments.contains("--show-window") || CommandLine.arguments.contains("-w") {
+            MainStudioWindowController.shared.showWindow(section: .overview)
+        }
+
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.powerglass.quit"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                NSApplication.shared.terminate(nil)
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            MainStudioWindowController.shared.showWindow(section: .overview)
+        }
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        SystemResourceMonitor.shared.pauseForSleep()
+        NetworkTrafficPersistenceManager.shared.persistToDisk(force: true)
+        PSPortalPluginManager.shared.stopRelaySynchronouslyForTermination()
+        AccessoryLocationPluginManager.shared.stopSessionSynchronouslyForTermination()
+        KeepAwakeController.shared.restoreClamshellSynchronouslyForTermination()
+        PowerSourceEngine.shared.stopListening()
+        WiFiLowLatencyManager.shared.restoreOnTermination()
+    }
+
+    // MARK: - 原生 macOS 顶部菜单栏构建
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // 1. 应用主菜单 (SysPulse)
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu(title: "SysPulse")
+        appMenuItem.submenu = appMenu
+
+        let aboutItem = NSMenuItem(title: "关于 SysPulse", action: #selector(menuOpenAbout), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
+
+        let updateItem = NSMenuItem(title: "检查更新…", action: #selector(menuCheckForUpdates), keyEquivalent: "")
+        updateItem.target = self
+        appMenu.addItem(updateItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        let servicesItem = NSMenuItem(title: "服务", action: nil, keyEquivalent: "")
+        let servicesMenu = NSMenu(title: "服务")
+        servicesItem.submenu = servicesMenu
+        NSApp.servicesMenu = servicesMenu
+        appMenu.addItem(servicesItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        appMenu.addItem(NSMenuItem(title: "隐藏 SysPulse", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        let hideOthers = NSMenuItem(title: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(title: "全部显示", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        appMenu.addItem(NSMenuItem(title: "退出 SysPulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // 2. 编辑菜单 (支持搜索框复制/粘贴/全选快捷键)
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "编辑")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(NSMenuItem(title: "撤销", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        // 3. 模块导航菜单
+        let moduleMenuItem = NSMenuItem()
+        mainMenu.addItem(moduleMenuItem)
+        let moduleMenu = NSMenu(title: "模块")
+        moduleMenuItem.submenu = moduleMenu
+
+        let tab1 = NSMenuItem(title: "状态总览", action: #selector(menuSwitchToOverview), keyEquivalent: "1")
+        tab1.target = self
+        moduleMenu.addItem(tab1)
+
+        let tab2 = NSMenuItem(title: "网络监控", action: #selector(menuSwitchToNetwork), keyEquivalent: "2")
+        tab2.target = self
+        moduleMenu.addItem(tab2)
+
+        let tab3 = NSMenuItem(title: "智能清理", action: #selector(menuSwitchToCleaner), keyEquivalent: "3")
+        tab3.target = self
+        moduleMenu.addItem(tab3)
+
+        let tab3b = NSMenuItem(title: "系统优化", action: #selector(menuSwitchToOptimizer), keyEquivalent: "4")
+        tab3b.target = self
+        moduleMenu.addItem(tab3b)
+
+        let tab4 = NSMenuItem(title: "卸载应用", action: #selector(menuSwitchToSoftware), keyEquivalent: "5")
+        tab4.target = self
+        moduleMenu.addItem(tab4)
+
+        let tab5 = NSMenuItem(title: "空间分析", action: #selector(menuSwitchToSpace), keyEquivalent: "6")
+        tab5.target = self
+        moduleMenu.addItem(tab5)
+
+        let tab6 = NSMenuItem(title: "模块中心", action: #selector(menuSwitchToPlugins), keyEquivalent: "7")
+        tab6.target = self
+        moduleMenu.addItem(tab6)
+
+        // 4. 窗口菜单
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(NSMenuItem(title: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
+        windowMenu.addItem(NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(NSMenuItem(title: "前置全部窗口", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""))
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func menuOpenAbout() {
+        MainStudioWindowController.shared.showWindow(section: .about)
+    }
+
+    @objc private func menuCheckForUpdates() {
+        MainStudioWindowController.shared.showWindow()
+        AppUpdateManager.shared.checkForUpdates(userInitiated: true)
+    }
+
+    @objc private func menuOpenSettings() {
+        MainStudioWindowController.shared.showWindow(section: .customization)
+    }
+
+    @objc private func menuSwitchToOverview() {
+        MainStudioWindowController.shared.showWindow(section: .overview)
+    }
+
+    @objc private func menuSwitchToNetwork() {
+        MainStudioWindowController.shared.showWindow(section: .networkMonitor)
+    }
+
+    @objc private func menuSwitchToCleaner() {
+        MainStudioWindowController.shared.showWindow(section: .smartCleaner)
+    }
+
+    @objc private func menuSwitchToOptimizer() {
+        MainStudioWindowController.shared.showWindow(section: .systemOptimizer)
+    }
+
+    @objc private func menuSwitchToSoftware() {
+        MainStudioWindowController.shared.showWindow(section: .appManager)
+    }
+
+    @objc private func menuSwitchToSpace() {
+        MainStudioWindowController.shared.showWindow(section: .spaceAnalysis)
+    }
+
+    @objc private func menuSwitchToPlugins() {
+        MainStudioWindowController.shared.showWindow(section: .plugins)
+    }
+}
